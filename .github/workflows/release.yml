@@ -1,0 +1,58 @@
+name: Release
+
+# Publishes the Python package to PyPI with Trusted Publishing (OIDC):
+# no PyPI token is stored anywhere. Triggered by pushing a tag like v0.0.1.
+#
+# One-time setup on pypi.org (Account settings -> Publishing -> Add a pending
+# publisher): project "dadl", owner "usecommon", repository "dadl",
+# workflow "release.yml", environment "pypi".
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check version and run tests
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # actions/setup-python v5.3.0, pinned by commit SHA
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: "3.12"
+      - name: Tag must match the package version
+        run: |
+          version=$(grep -m1 '^version = ' python/pyproject.toml | cut -d'"' -f2)
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} does not match version ${version}"; exit 1; }
+      - name: Test
+        run: |
+          python -m pip install -e "./python[test]"
+          python -m pytest python/tests -q
+
+  publish:
+    name: Build and publish to PyPI
+    needs: check
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # actions/setup-python v5.3.0, pinned by commit SHA
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build python --outdir dist
+      # pypa/gh-action-pypi-publish v1.14.3, pinned by commit SHA
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+        with:
+          packages-dir: dist/

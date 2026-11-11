@@ -48,7 +48,7 @@ cargo test --workspace
 
 | Path | Contents |
 | --- | --- |
-| `core/` | Rust core (`dadl-core`): per-tag loops such as dead time, fixed-grid coincidences, histograms |
+| `core/` | Rust core (`dadl` crate): per-tag loops such as dead time, fixed-grid coincidences, histograms |
 | `python/` | Python package `dadl`: simulator, analyses, guardrails, CLI, tests |
 | `schema/` | JSON Schema for calibration artifacts (`calibration/1`) |
 | `examples/` | Example setups, starting with `chsh-spad` |

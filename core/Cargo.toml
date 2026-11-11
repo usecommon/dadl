@@ -1,5 +1,5 @@
 [package]
-name = "dadl-core"
+name = "dadl"
 description = "Per-tag processing core for DADL, the Detector-Aware Data Layer for quantum optics experiments"
 version.workspace = true
 edition.workspace = true
