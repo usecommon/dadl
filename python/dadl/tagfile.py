@@ -49,8 +49,21 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None) -> Runs:
                 header = [h.strip() for h in fh.readline().split(",")]
             if header != list(COLUMNS):
                 raise ConfigError(f"{path}: header must be {','.join(COLUMNS)}, got {','.join(header)}")
-            table = np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.int64, ndmin=2)
-            cols = {c: table[:, i] if table.size else np.array([], dtype=np.int64) for i, c in enumerate(COLUMNS)}
+            # Read as text and check every cell is an integer: some NumPy versions
+            # silently truncate "1.5" when asked for int64 directly.
+            text = np.loadtxt(path, delimiter=",", skiprows=1, dtype=str, ndmin=2)
+            if text.size:
+                text = np.char.strip(text)
+                digits = np.char.isdigit(np.char.lstrip(text, "+-"))
+                if not digits.all():
+                    row, col = map(int, np.argwhere(~digits)[0])
+                    raise ConfigError(
+                        f"{path}: row {row + 2}, column {COLUMNS[col]}: {text[row, col]!r} is not an integer"
+                    )
+            cols = {
+                c: text[:, i].astype(np.int64) if text.size else np.array([], dtype=np.int64)
+                for i, c in enumerate(COLUMNS)
+            }
         else:
             raise ConfigError(f"{path}: tag files must be .npz or .csv")
     except FileNotFoundError as exc:
