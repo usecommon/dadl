@@ -3,55 +3,76 @@
 //! These apply an ideal dead time to a sorted stream of arrivals. They are
 //! used by the simulator and by tests of the closed-form rate models
 //! (non-paralyzable m = n / (1 + n tau), paralyzable m = n exp(-n tau)).
+//! Times and dead times are in picoseconds.
 
+use crate::error::{check_sorted, check_span, DadlError};
 use crate::Timestamp;
 
 /// Non-paralyzable dead time: after each recorded event, arrivals within
-/// `tau` are lost and do not extend the dead time.
+/// `tau_ps` are lost and do not extend the dead time.
 ///
-/// `times` must be sorted ascending. `tau` must be non-negative.
-pub fn apply_nonparalyzable(times: &[Timestamp], tau: Timestamp) -> Vec<Timestamp> {
-    assert!(tau >= 0, "dead time must be non-negative");
-    debug_assert!(is_sorted(times), "times must be sorted ascending");
+/// ```
+/// let kept = dadl::deadtime::apply_nonparalyzable(&[0, 5, 10, 25, 30], 10).unwrap();
+/// assert_eq!(kept, vec![0, 10, 25]);
+/// ```
+///
+/// # Errors
+///
+/// [`DadlError::NegativeDeadTime`] if `tau_ps < 0`;
+/// [`DadlError::Unsorted`] if `times` is not sorted ascending.
+#[must_use = "the filtered tags are returned, not applied in place"]
+pub fn apply_nonparalyzable(times: &[Timestamp], tau_ps: Timestamp) -> Result<Vec<Timestamp>, DadlError> {
+    if tau_ps < 0 {
+        return Err(DadlError::NegativeDeadTime);
+    }
+    check_sorted(times)?;
     let mut out = Vec::with_capacity(times.len());
-    let mut next_allowed: Option<Timestamp> = None;
+    // i128 so that t + tau never wraps or saturates near i64::MAX.
+    let mut next_allowed: Option<i128> = None;
     for &t in times {
         match next_allowed {
-            Some(n) if t < n => continue,
+            Some(n) if i128::from(t) < n => continue,
             _ => {
                 out.push(t);
-                next_allowed = Some(t.saturating_add(tau));
+                next_allowed = Some(i128::from(t) + i128::from(tau_ps));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Paralyzable dead time: every arrival, recorded or not, restarts the dead
 /// time, so an event is recorded only if the previous arrival is at least
-/// `tau` earlier.
+/// `tau_ps` earlier.
 ///
-/// `times` must be sorted ascending. `tau` must be non-negative.
-pub fn apply_paralyzable(times: &[Timestamp], tau: Timestamp) -> Vec<Timestamp> {
-    assert!(tau >= 0, "dead time must be non-negative");
-    debug_assert!(is_sorted(times), "times must be sorted ascending");
+/// ```
+/// let kept = dadl::deadtime::apply_paralyzable(&[0, 5, 10, 25, 30], 10).unwrap();
+/// assert_eq!(kept, vec![0, 25]);
+/// ```
+///
+/// # Errors
+///
+/// [`DadlError::NegativeDeadTime`] if `tau_ps < 0`;
+/// [`DadlError::Unsorted`] if `times` is not sorted ascending;
+/// [`DadlError::Overflow`] if the time span of `times` does not fit in `i64`.
+#[must_use = "the filtered tags are returned, not applied in place"]
+pub fn apply_paralyzable(times: &[Timestamp], tau_ps: Timestamp) -> Result<Vec<Timestamp>, DadlError> {
+    if tau_ps < 0 {
+        return Err(DadlError::NegativeDeadTime);
+    }
+    check_sorted(times)?;
+    check_span(times)?;
     let mut out = Vec::with_capacity(times.len());
     let mut last: Option<Timestamp> = None;
     for &t in times {
-        let recorded = match last {
-            None => true,
-            Some(l) => t.saturating_sub(l) >= tau,
-        };
+        // Sorted and span-checked, so t - l cannot overflow.
+        let recorded = last.map_or(true, |l| t - l >= tau_ps);
         if recorded {
             out.push(t);
         }
         last = Some(t);
     }
-    out
-}
-
-fn is_sorted(times: &[Timestamp]) -> bool {
-    times.windows(2).all(|w| w[0] <= w[1])
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -60,26 +81,23 @@ mod tests {
 
     #[test]
     fn nonparalyzable_drops_events_inside_dead_time() {
-        let times = [0, 5, 10, 25, 30];
-        assert_eq!(apply_nonparalyzable(&times, 10), vec![0, 10, 25]);
+        assert_eq!(apply_nonparalyzable(&[0, 5, 10, 25, 30], 10).unwrap(), vec![0, 10, 25]);
     }
 
     #[test]
     fn paralyzable_extends_dead_time_on_every_arrival() {
-        let times = [0, 5, 10, 25, 30];
-        assert_eq!(apply_paralyzable(&times, 10), vec![0, 25]);
+        assert_eq!(apply_paralyzable(&[0, 5, 10, 25, 30], 10).unwrap(), vec![0, 25]);
     }
 
     #[test]
-    fn zero_dead_time_keeps_everything() {
-        let times = [0, 0, 1, 2];
-        assert_eq!(apply_nonparalyzable(&times, 0), times.to_vec());
-        assert_eq!(apply_paralyzable(&times, 0), times.to_vec());
+    fn unsorted_input_is_refused_in_every_build() {
+        assert_eq!(apply_nonparalyzable(&[30, 0, 5, 10], 10), Err(DadlError::Unsorted { index: 1 }));
+        assert_eq!(apply_paralyzable(&[30, 0, 5, 10], 10), Err(DadlError::Unsorted { index: 1 }));
     }
 
     #[test]
-    fn empty_input() {
-        assert!(apply_nonparalyzable(&[], 10).is_empty());
-        assert!(apply_paralyzable(&[], 10).is_empty());
+    fn negative_dead_time_is_refused() {
+        assert_eq!(apply_nonparalyzable(&[0, 1], -1), Err(DadlError::NegativeDeadTime));
+        assert_eq!(apply_paralyzable(&[0, 1], -1), Err(DadlError::NegativeDeadTime));
     }
 }

@@ -1,8 +1,17 @@
-//! Per-tag processing core for DADL.
+//! Per-tag processing core for DADL, the Detector-Aware Data Layer.
 //!
-//! Every loop that touches individual time tags lives here, so that no
-//! per-tag loop ever runs in Python. Timestamps are `i64` picoseconds on a
-//! declared clock, and every input slice is expected to be sorted ascending.
+//! Every loop that touches individual time tags will live here once the
+//! Python bindings land (phase 2); until then the pure-Python package is the
+//! reference implementation and both are held to the shared test vectors in
+//! `tests/vectors/core.json`.
+//!
+//! Contract, identical in Rust and Python:
+//! - timestamps are `i64` picoseconds on a declared clock;
+//! - dead-time and histogram inputs must be sorted ascending, and this is
+//!   checked in every build profile; coincidence inputs need not be sorted;
+//! - arithmetic that would leave the `i64` range returns
+//!   [`DadlError::Overflow`] instead of wrapping or saturating;
+//! - invalid input returns a [`DadlError`]; no public function panics on input.
 //!
 //! Phase 1 contents:
 //! - [`deadtime`]: non-paralyzable and paralyzable dead-time filters.
@@ -12,7 +21,10 @@
 
 pub mod coincidences;
 pub mod deadtime;
+pub mod error;
 pub mod histogram;
+
+pub use error::DadlError;
 
 /// A time tag in picoseconds.
 pub type Timestamp = i64;

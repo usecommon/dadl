@@ -1,0 +1,27 @@
+{
+  "description": "Shared test vectors for the per-tag functions. Both `cargo test` (core/tests/vectors.rs) and `pytest` (python/tests/test_vectors.py) run every case. The Python implementation is the reference. Errors: Unsorted, Overflow, NegativeDeadTime, NonPositiveWidth.",
+  "cases": [
+    {"name": "nonparalyzable basic", "op": "nonparalyzable", "times": [0, 5, 10, 25, 30], "tau": 10, "expect": [0, 10, 25]},
+    {"name": "paralyzable basic", "op": "paralyzable", "times": [0, 5, 10, 25, 30], "tau": 10, "expect": [0, 25]},
+    {"name": "zero dead time keeps duplicates", "op": "nonparalyzable", "times": [0, 0, 1, 2], "tau": 0, "expect": [0, 0, 1, 2]},
+    {"name": "paralyzable equal tags", "op": "paralyzable", "times": [5, 5, 5, 20], "tau": 3, "expect": [5, 20]},
+    {"name": "nonparalyzable empty", "op": "nonparalyzable", "times": [], "tau": 10, "expect": []},
+    {"name": "nonparalyzable unsorted", "op": "nonparalyzable", "times": [30, 0, 5, 10], "tau": 10, "expect": {"error": "Unsorted"}},
+    {"name": "paralyzable unsorted", "op": "paralyzable", "times": [30, 0, 5, 10], "tau": 10, "expect": {"error": "Unsorted"}},
+    {"name": "negative dead time", "op": "nonparalyzable", "times": [0, 1], "tau": -1, "expect": {"error": "NegativeDeadTime"}},
+    {"name": "nonparalyzable near int64 max", "op": "nonparalyzable", "times": [9223372036854775800, 9223372036854775807], "tau": 100, "expect": [9223372036854775800]},
+    {"name": "paralyzable span overflow", "op": "paralyzable", "times": [-9223372036854775808, 9223372036854775807], "tau": 10, "expect": {"error": "Overflow"}},
+    {"name": "coincidences shared slots", "op": "grid_coincidences", "a": [0, 1000, 2500], "b": [100, 1900, 9000], "width": 1000, "delay_a": 0, "delay_b": 0, "expect": 2},
+    {"name": "coincidences declared delay", "op": "grid_coincidences", "a": [50], "b": [1050], "width": 1000, "delay_a": 0, "delay_b": 1000, "expect": 1},
+    {"name": "coincidences unsorted inputs allowed", "op": "grid_coincidences", "a": [2500, 0, 1000], "b": [9000, 100, 1900], "width": 1000, "delay_a": 0, "delay_b": 0, "expect": 2},
+    {"name": "coincidences negative times floor", "op": "grid_coincidences", "a": [-1], "b": [-999], "width": 1000, "delay_a": 0, "delay_b": 0, "expect": 1},
+    {"name": "coincidences negative delay", "op": "grid_coincidences", "a": [50], "b": [-950], "width": 1000, "delay_a": 0, "delay_b": -1000, "expect": 1},
+    {"name": "coincidences zero width", "op": "grid_coincidences", "a": [0], "b": [0], "width": 0, "delay_a": 0, "delay_b": 0, "expect": {"error": "NonPositiveWidth"}},
+    {"name": "coincidences delay overflow near int64 min", "op": "grid_coincidences", "a": [-9223372036854775803], "b": [-9223372036854775308], "width": 1000, "delay_a": 1000, "delay_b": 0, "expect": {"error": "Overflow"}},
+    {"name": "histogram basic", "op": "interarrival", "times": [0, 10, 30, 60], "bin_width": 10, "n_bins": 4, "expect": [0, 1, 1, 1]},
+    {"name": "histogram drops long gaps", "op": "interarrival", "times": [0, 100], "bin_width": 10, "n_bins": 4, "expect": [0, 0, 0, 0]},
+    {"name": "histogram zero bins", "op": "interarrival", "times": [0, 5], "bin_width": 10, "n_bins": 0, "expect": []},
+    {"name": "histogram unsorted", "op": "interarrival", "times": [30, 0, 5], "bin_width": 10, "n_bins": 4, "expect": {"error": "Unsorted"}},
+    {"name": "histogram span overflow", "op": "interarrival", "times": [-9223372036854775808, 9223372036854775807], "bin_width": 10, "n_bins": 4, "expect": {"error": "Overflow"}}
+  ]
+}

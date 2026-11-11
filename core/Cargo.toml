@@ -6,6 +6,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+homepage = "https://usecommon.github.io/dadl/"
+documentation = "https://docs.rs/dadl"
 readme = "../README.md"
+keywords = ["photon", "time-tagging", "quantum-optics", "coincidence", "physics"]
+categories = ["science"]
+include = ["src/**", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [dependencies]
+
+[dev-dependencies]
+serde_json = "1"

@@ -15,8 +15,25 @@ def paralyzable_measured_rate(true_rate: float, tau_s: float) -> float:
     return true_rate * math.exp(-true_rate * tau_s)
 
 
-def series_hybrid_measured_rate(true_rate: float, tau_p_s: float, tau_np_s: float) -> float:
-    """m = n exp(-n tau_p) / (1 + n tau_np)."""
+def series_measured_rate(true_rate: float, tau_p_s: float, tau_np_s: float) -> float:
+    """Exact rate for a paralyzable stage (tau_p) followed by a non-paralyzable stage (tau_np).
+
+    With m1 = n exp(-n tau_p) the output of the paralyzable stage:
+    m = m1 if tau_np <= tau_p, else m = m1 / (1 + m1 (tau_np - tau_p)).
+    """
+    m1 = paralyzable_measured_rate(true_rate, tau_p_s)
+    if tau_np_s <= tau_p_s:
+        return m1
+    return m1 / (1.0 + m1 * (tau_np_s - tau_p_s))
+
+
+def patil_usman_hybrid_rate(true_rate: float, tau_p_s: float, tau_np_s: float) -> float:
+    """Empirical hybrid m = n exp(-n tau_p) / (1 + n tau_np) (Patil and Usman).
+
+    A phenomenological fit form, not the exact series model: it differs from a
+    simulated paralyzable -> non-paralyzable chain by up to ~30 % at high rate.
+    Do not use it as a test oracle; see `series_measured_rate`.
+    """
     return true_rate * math.exp(-true_rate * tau_p_s) / (1.0 + true_rate * tau_np_s)
 
 
@@ -40,6 +57,8 @@ def grid_capture_probability(jitter_sigma_ps: float, width_ps: float) -> float:
     """
     if width_ps <= 0:
         raise ValueError("width must be positive")
+    if not jitter_sigma_ps >= 0:
+        raise ValueError("jitter sigma must be non-negative")
     s = jitter_sigma_ps * math.sqrt(2.0)
     if s == 0:
         return 1.0
@@ -51,10 +70,10 @@ def grid_capture_probability(jitter_sigma_ps: float, width_ps: float) -> float:
 
 def chsh_expected_grid(
     *,
-    pair_rate: float,
+    pair_rate_per_s: float,
     duration_s: float,
     efficiency: float,
-    dark_rate: float,
+    dark_rate_cps: float,
     jitter_sigma_ps: float,
     width_ps: float,
     visibility: float,
@@ -66,7 +85,7 @@ def chsh_expected_grid(
     rate r = N eta / 2 + d; uniform across combinations, so they add nothing to
     the correlator numerator.
     """
-    c = pair_rate * duration_s * efficiency**2 * grid_capture_probability(jitter_sigma_ps, width_ps)
-    r = pair_rate * efficiency / 2.0 + dark_rate
+    c = pair_rate_per_s * duration_s * efficiency**2 * grid_capture_probability(jitter_sigma_ps, width_ps)
+    r = pair_rate_per_s * efficiency / 2.0 + dark_rate_cps
     a = 4.0 * r * r * (width_ps * 1e-12) * duration_s
     return chsh_with_accidentals(visibility, c, a)

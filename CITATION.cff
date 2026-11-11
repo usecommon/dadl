@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use DADL in published work, please cite the version you used and report DADL's labels with any number you quote."
+title: "DADL: Detector-Aware Data Layer for quantum optics experiments"
+type: software
+authors:
+  - name: "The DADL contributors"
+version: "0.0.3"
+license: "MIT OR Apache-2.0"
+repository-code: "https://github.com/usecommon/dadl"
+url: "https://usecommon.github.io/dadl/"
+keywords:
+  - single-photon detectors
+  - time tagging
+  - Bell test
+  - calibration
+  - quantum optics

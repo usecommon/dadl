@@ -1,0 +1,66 @@
+{
+  "schema": "calibration/1",
+  "kind": "dark-afterpulse-deadtime",
+  "channels": [
+    {
+      "device": "SPCM-0001",
+      "input": 3
+    }
+  ],
+  "method": {
+    "name": "interarrival-wdic",
+    "version": "0.4.0"
+  },
+  "created": "2026-11-10T14:02:11Z",
+  "valid_for": {
+    "from": "2026-11-10T14:02:11Z",
+    "to": "2026-11-17T14:02:11Z",
+    "conditions": {
+      "temperature_K": [
+        247.0,
+        249.0
+      ]
+    }
+  },
+  "backend": "hardware",
+  "inputs": [
+    {
+      "sha256": "7dc8f636e5a33428acfe8789ca42bb44342bba3873b4caf65c7ca3e894f3ff2a",
+      "role": "raw-tags"
+    },
+    {
+      "sha256": "16091175048ac6014be4712b1640c0e3a3272f4fc944e0bee3248f8861b234be",
+      "role": "telemetry"
+    }
+  ],
+  "conditions": {
+    "temperature_K": 248.1,
+    "bias_V": 2.5
+  },
+  "posterior": {
+    "format": "arrow",
+    "sha256": "00ff6f13379089e601cac18e06329d5376881931a6832f6f26b29f8d0253c391",
+    "n_samples": 2000,
+    "params": [
+      "dcr_cps",
+      "tau_np_ps",
+      "p_ap",
+      "tau_ap1_ps",
+      "tau_ap2_ps",
+      "w_ap1"
+    ]
+  },
+  "checks": {
+    "converged": true,
+    "ppc_pvalue": 0.41
+  },
+  "supersedes": "6da0633528deaa0144e7b058315f0b753ec0b945163a72bf96a0d18180f9de0d",
+  "software": {
+    "dadl": "0.4.0"
+  },
+  "signature": {
+    "alg": "ed25519",
+    "key_id": "<site key id>",
+    "sig": "<base64url signature>"
+  }
+}

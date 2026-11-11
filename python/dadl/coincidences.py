@@ -5,17 +5,27 @@ coincidence is a slot occupied by both channels after each channel's declared
 delay is removed. This is the only coincidence method allowed for Bell-type
 analyses: windows centred on detection events open the coincidence-time
 loophole.
+
+Inputs need not be sorted. Widths and delays are integer picoseconds; a
+delay that would move a tag outside the int64 range is refused.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from dadl import _checks
+
 
 def occupied_slots(times: np.ndarray, width_ps: int, delay_ps: int = 0) -> np.ndarray:
-    if width_ps <= 0:
-        raise ValueError("slot width must be positive")
-    times = np.asarray(times, dtype=np.int64)
+    """Sorted, de-duplicated slot indices occupied by `times` after removing `delay_ps`."""
+    width_ps = _checks.integer(width_ps, "width_ps", minimum=1)
+    delay_ps = _checks.integer(delay_ps, "delay_ps")
+    times = _checks.timestamps(times)
+    if times.size:
+        lo, hi = int(times.min()) - delay_ps, int(times.max()) - delay_ps
+        if lo < _checks.INT64_MIN or hi > _checks.INT64_MAX:
+            raise OverflowError("removing the declared delay moves a tag outside the int64 range")
     return np.unique(np.floor_divide(times - np.int64(delay_ps), np.int64(width_ps)))
 
 

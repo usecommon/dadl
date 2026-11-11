@@ -1,14 +1,23 @@
 # DADL: Detector-Aware Data Layer for Quantum Optics Experiments — Design Doc
 
-Nov 10, 2026 · @Jeff
+Nov 10, 2026 · @Jeff · revised Nov 11, 2026 after the third review
 
 ## Summary
 
-We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, that keeps a living, versioned calibration model for every single-photon detector channel and carries that model's uncertainty into Bell S, visibility and fidelity. An MCP server sits on top so agents can call the same validated tools. Status: proposed, seeking review.
+We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, designed to keep a living, versioned calibration model for every single-photon detector channel and carry that model's uncertainty into Bell S, visibility and fidelity. An MCP server may later sit on top so agents can call the same validated tools. Status: draft. Phase 1 is partly released (v0.0.3); this doc is the canonical phase plan, and the README and the overview site copy it.
 
 **What users get:** a downloadable starter kit, not a turnkey product. A user installs it, runs the full pipeline on simulated data in minutes, then tests and adjusts adapters, detector models, analyses and guardrail policies to fit their own setup. Everything is built to be read, changed and re-tested.
 
 The positioning is "known, bounded, auditable imperfections", not "cheap detectors become research-grade." Software cannot recover lost efficiency or jitter. In Bell tests and QKD security paths, correcting the data is not allowed at all, so the layer reports raw and corrected values side by side and refuses invalid corrections.
+
+**What works today (v0.0.3).** Everything else in this doc is design, not code.
+
+- A seeded time-tag simulator with injected efficiency, dark counts, non-paralyzable dead time, jitter, delay and one generation of afterpulsing.
+- `setup.yaml` drives it: `dadl quickstart`, `dadl init`, `dadl simulate` and `dadl analyze` (raw CHSH S from your own tags in a generic `.npz`/`.csv` format).
+- Raw CHSH S from fixed-grid coincidences with a declared window; Bell fringe and HOM dip visibility, with accidental subtraction where the policy allows it.
+- Guardrail refusals, policy fingerprints recorded on every result, and threshold labels.
+- Statistical (Gaussian) uncertainties only. No calibration fits, no calibration uncertainty, no corrected CHSH, no signing, no adapters, no MCP.
+- A Rust core with the same per-tag functions, held to the Python reference by shared test vectors; it is not yet called from Python.
 
 Three design commitments shape everything below:
 
@@ -29,7 +38,7 @@ The physics is solved; the integration is not. Klyshko (correlated-photon) calib
 | IDQ ID281 | Autonomous 24/7, latch-free hardware | Closed, device-level only |
 | ETA | Fast JIT time-tag analysis across formats | No calibration or uncertainty |
 | Kwiat Quantum-Tomography | MLE, accidental/crosstalk correction, MC error bars | No live detector model; accidental correction is just an option |
-| Photon-HDF5 | Open HDF5 schema with provenance | No calibration or uncertainty schema |
+| Photon-HDF5 | Open HDF5 schema with provenance | Point-value detector fields only; no posteriors, uncertainty or calibration history |
 | Qunnect, Aliro | Network automation and orchestration | Polarization and network level; depend on device telemetry |
 
 The biggest technical risk is overcorrection, not missing corrections. Subtracting accidentals can turn a non-violating Bell dataset into a violating one. Data-dependent coincidence windows open the coincidence-time loophole; one NIST and University of Illinois analysis showed a classical source producing an apparent violation of over 2700σ (assuming Gaussian statistics), and none with a predefined fixed window. MLE tomography has been shown to underestimate fidelity and overestimate entanglement, and bootstrapping inherits that bias.
@@ -54,7 +63,7 @@ The biggest technical risk is overcorrection, not missing corrections. Subtracti
 - A turnkey, supported product. Users own their configuration or fork; the kit ships defaults, examples and tests, not guarantees for every setup.
 - Covering every tagger and detector in the main repo. A few reference adapters ship; users add others from the adapter template.
 - Making low-cost detectors "research-grade." Lost efficiency and jitter cannot be recovered.
-- Closing the detection loophole in software. CHSH needs about 82.84% efficiency to avoid the fair-sampling assumption (Larsson et al.), or about 2/3 with Eberhard's inequality, non-maximally entangled states and near-zero background (Eberhard, 1993). Efficiency correction is equivalent to assuming fair sampling.
+- Closing the detection loophole in software. CHSH needs about 82.84% efficiency to avoid the fair-sampling assumption (Garg and Mermin, 1987), or about 2/3 with Eberhard's inequality, non-maximally entangled states and near-zero background (Eberhard, 1993). Efficiency correction is equivalent to assuming fair sampling.
 - Any correction in a QKD security path. There, the kit offers monitoring and attestation only.
 - Replacing time-tagger firmware, lab orchestrators (QCoDeS, ARTIQ, Bluesky) or NMI-traceable calibration.
 - Cloud processing of raw time tags. At 10⁷–10⁸ tags/s they stay local.
@@ -88,7 +97,9 @@ pip install dadl-quantum
 dadl quickstart chsh-spad
 ```
 
-`quickstart` copies an example project into the current folder, generates seeded simulated time tags with known imperfections, calibrates with fast Laplace posteriors (full NUTS fits are opt-in), fits CHSH and prints raw and corrected S with intervals beside the injected true values. The same project then runs on real data by pointing its config at a tagger or a recorded file.
+**Phase 1 (works today).** `quickstart` loads the example's `setup.yaml`, generates seeded simulated time tags with known imperfections, and prints raw S with its statistical error beside the closed-form expectation. `dadl init` copies the setup into a folder to edit; `dadl quickstart setup.yaml` runs the edited copy; `dadl analyze setup.yaml --tags tags.npz` computes raw S from your own tags.
+
+**Target (phase 2 and later).** `quickstart` also calibrates with fast Laplace posteriors (full NUTS fits opt-in) and prints raw and corrected values with intervals beside the injected truth. The same project then runs on a tagger through an adapter.
 
 ### Example setups
 
@@ -96,7 +107,7 @@ Each example is a folder with a config file, a seeded simulation recipe (data is
 
 | Example | Setup | Shows |
 | --- | --- | --- |
-| `chsh-spad` | Polarization-entangled SPDC, two Si SPAD modules, Swabian | Calibration, raw vs. corrected S, the accidental-subtraction refusal |
+| `chsh-spad` | Polarization-entangled SPDC, four Si SPAD channels, simulator (shipped) | Raw S from a planned fixed window beside the closed-form expectation; calibration and corrected S in phase 2 |
 | `hom-snspd` | HOM interference, two SNSPDs, PicoQuant | Visibility fit, latching signatures |
 | `tomography` | Two-qubit state tomography | MLE vs. Bayesian estimates, low-count bias warnings |
 | `link-monitor` | One network link with the health monitor running | Change-point alerts, explain a fidelity drop |
@@ -104,11 +115,11 @@ Each example is a folder with a config file, a seeded simulation recipe (data is
 
 ### One config file per setup
 
-A single `setup.yaml` describes channels, detector families and serials, the tagger, analyses, the pre-declared coincidence window and the guardrail policy. Users adapt the kit mostly by editing this file, not code. It carries a schema\_version, is checked against a generated JSON Schema by dadl check-config, and old versions are upgraded by dadl migrate. The guardrail policy is a separate file referenced from it.
+A single `setup.yaml` describes channels, detector families and serials, the tagger, analyses, the pre-declared coincidence window and the guardrail policy. Users adapt the kit mostly by editing this file, not code. It carries a schema\_version. Phase 1 validates it in code: types, units in key names, unknown and duplicate keys, and a 1 MB size cap. A generated JSON Schema (`dadl check-config`) and `dadl migrate` arrive in phase 2. Phase 1 accepts only `policy: default`; rules are loosened in code with `Policy.allow(analysis, correction, reason)`. YAML 1.1 reads `1.0e5` as a string, so the loader refuses it; write `100000` or `1.0e+5`.
 
 ### Extension points
 
-Extensions are registered through Python entry points, so users can add them in their own package without forking. Groups are versioned (e.g. dadl.adapters.v1) under a published stability and deprecation policy, and only plugins listed and hash-pinned in setup.yaml are loaded.
+None of these templates ship in phase 1; the adapter template comes first, in phase 2. Extensions will be registered through Python entry points, so users can add them in their own package without forking. Groups are versioned (e.g. dadl.adapters.v1) under a published stability and deprecation policy, and only plugins listed and hash-pinned in setup.yaml are loaded.
 
 | Extension | How to add one | Template |
 | --- | --- | --- |
@@ -177,7 +188,7 @@ Each channel has one generative model, stored as posterior samples with provenan
 | --- | --- | --- | --- |
 | Efficiency η | In-situ heralded system efficiency (detector × coupling, "as detected" per NIST IR 8486r1); optional Klyshko anchor; detector-only η needs an external reference | SPDC heralding ratio, Beta posterior | Change-point on heralding; connector event |
 | Dark count rate | DCR = f(T, V\_ex), Arrhenius generation plus field-dependent tunnelling (SPAD); bias/I\_sw curve plus stray light (SNSPD) | Shuttered or gated dark windows, fitted jointly with afterpulsing | Residual vs. fitted model, not a fixed threshold |
-| Dead time | Series hybrid m = n·e^(−nτ\_p)/(1 + nτ\_np), fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
+| Dead time | Series model: a paralyzable stage τ\_p then a non-paralyzable stage τ\_np, m = m₁/(1 + m₁(τ\_np − τ\_p)) with m₁ = n·e^(−nτ\_p) for τ\_np > τ\_p; fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
 | TDC dead time | Separate term from detector dead time | Tagger config + histogram | Firmware/config change |
 | Afterpulse kernel | Excess over exponential Poisson tail; "well-defined initial condition" method | Autocorrelation / inter-arrival histogram; double-window for gated InGaAs | Temperature or bias change |
 | Crosstalk matrix | Branching (geometric/Borel) or nearest-neighbour; Si SPAD breakdown-flash peaks at a fitted nonzero delay | Dark-only zero-delay correlations between pixels | Overvoltage change |
@@ -218,7 +229,7 @@ Accidentals are estimated empirically from off-peak delay bins (the same histogr
 | Counts | Poisson; delta method when counts are large |
 | Heralded ratios, low-count bins | Exact or Bayesian intervals (Clopper–Pearson, Beta posterior) |
 | Calibration nuisance parameters | Joint Monte Carlo from calibration posteriors, pushed through the full analysis |
-| Bell S | Multinomial resampling per setting; σ above 2 computed on raw data; CH/Eberhard plus test-martingale or p-value for loophole-relevant claims |
+| Bell S | Multinomial resampling per setting; the raw interval reported against S = 2 (a Gaussian σ count is not a significance claim, as the 2700σ example shows); CH/Eberhard plus test-martingale or p-value for loophole-relevant claims |
 | Tomography | MLE with bias warnings; profile likelihood, Faist–Renner MCMC error bars, Bayesian mean, or direct fidelity estimation |
 
 Joint Monte Carlo is the only practical way to carry calibration uncertainty into S, visibility and fidelity, because they are non-linear and share inputs.
@@ -229,7 +240,7 @@ MLE enforces positivity, which has been shown to underestimate fidelity and over
 
 ## Scientific guardrails
 
-Guardrails are enforced in the library, not in prompts: an invalid correction is refused with a typed error, whoever calls it. Each analysis type declares which corrections it allows in its headline number.
+Guardrails are enforced in the library, not in prompts: an invalid correction is refused with a typed error, whoever calls it. The analysis type is fixed by the function called (`bell_visibility`, `hom_visibility`, `chsh`), never passed in by the caller, so data cannot be filed under a looser rule. Each analysis type declares which corrections it allows in its headline number.
 
 | Analysis | Headline number allows | Refused or flagged |
 | --- | --- | --- |
@@ -246,29 +257,31 @@ Rules that apply everywhere:
 4. **Fair-sampling stated.** Any efficiency correction carries an explicit "assumes fair sampling" label. The tool states that CHSH needs \~82.84% efficiency (\~87.87% to also avoid fair coincidence) and that low-cost SPADs cannot meet it.
 5. **Distinguishability stated.** The tool says what it cannot separate, for example source-brightness drop vs. coupling loss without a heralding check.
 
-**Adjustable, never silent.** Because this is a starter kit, guardrails live in a policy file that users can change. Loosening a rule needs an explicit override with a written reason and a human approval token; agents cannot write policy files. Any policy whose content hash differs from the shipped default counts as modified, whether or not an override was filed. The override is stored in provenance, and every affected result is labelled "policy modified" next to the raw value. The shipped defaults stay strict.
+**Adjustable, never silent.** Because this is a starter kit, users can change the guardrails. In phase 1, loosening goes through `Policy.allow(analysis, correction, reason)`, which needs a written reason; building a policy with looser rules directly is refused, and the shipped rule tables are read-only. Every result records the policy fingerprint (a hash of the rules and thresholds, compared against a pinned constant) and the overrides with their reasons, and any non-default policy is labelled "policy modified" next to the raw value. Policy files, human approval tokens and keeping agents from writing policy arrive with the MCP surface. The shipped defaults stay strict.
+
+**What phase 1 cannot check.** The window's `source: plan` is declared by the caller and recorded, not verified; signed analysis plans (phase 3) close that gap. The counts and tags passed in are trusted as given; dataset IDs computed from raw tags (phase 2) close that one. A result is protected against accidents, not forgery: code in the same process can always build or edit one.
 
 **Rules added after the second review:**
 
 - **Analysis-plan ledger.** Analysis type, window, sample size, stopping rule and data-exclusion rules are signed into an append-only ledger before the first acquisition. Every result reports how many runs, windows and artifact sets were tried under that plan. Bell results across runs are combined with a test martingale or a trial-corrected p-value, never best-of-N.
-- **Threshold crossings.** Each analysis type knows its physical thresholds (S = 2, two-photon visibility 71%, HOM visibility 50%, fidelity 0.5, zero concurrence). If only the corrected value crosses one, the headline is refused or labelled "threshold crossed only after correction", with the raw interval first.
+- **Threshold crossings.** Each analysis type knows its physical thresholds (S = 2; two-photon fringe visibility 1/√2 ≈ 71%, which implies S > 2 only for a Werner state with that visibility in both the H/V and the diagonal basis; HOM dip visibility 50%; fidelity 0.5; zero concurrence). If only the corrected value crosses one, the headline is refused or labelled "threshold crossed only after correction", with the raw interval first. Values within 1.96σ of a threshold, and results whose Gaussian error is zero at a boundary, carry their own labels (implemented in 0.0.3).
 - **Bell timing.** Delay and window position for Bell-type runs come from a separate calibration segment, frozen before analysis, with a stated drift limit.
 - **Calibration choice.** An artifact whose time range or conditions don't bracket the dataset is refused unless overridden, which labels the result "policy modified".
 - **Data exclusion.** Exclusion rules come from the plan and use setting-blind telemetry only. Results report the excluded fraction and the estimate on all data.
 - **Third-party analyses.** Analyses loaded from plugins get the strictest policy and an "unvalidated analysis" label.
-- **Labels travel with numbers.** Results are a value type that cannot be cast to a bare float. Exports carry label columns, plots are annotated automatically, and `dadl report` produces a citable headline block with raw first, all labels and the plan-ledger ID.
+- **Labels travel with numbers.** Results are a value type that is not implicitly convertible to a float; a bare number takes an explicit `.raw.value`. This guards against accidents, not forgery. Exports carry label columns, plots are annotated automatically, and `dadl report` produces a citable headline block with raw first, all labels and the plan-ledger ID.
 - **QKD sessions.** No recalibration or drift update runs during a key session. Signatures are checked against fixed physical floors and ceilings at sub-second resolution, and any change-point during the session voids its monitoring record.
 
 ## Explain engine
 
-An explanation is only emitted after the engine has proved its share of the change numerically. Something like "S dropped from 2.6 to 2.3 because detector B's dark counts rose 40%" is the right shape, but it is often false. Accidentals reduce contrast roughly by C\_true / (C\_true + A), so a drop from 2.6 to 2.3 needs accidentals to rise by about 13% of the baseline coincidences. A 40% rise in detector B's dark counts only does that if B's dark-count accidentals were already about a third of true coincidences, roughly when DCR\_B·Δt approaches arm B's heralding efficiency, as on long, lossy links.
+An explanation is only emitted after the engine has proved its share of the change numerically. Something like "S dropped from 2.6 to 2.3 because detector B's dark counts tripled" is the right shape, but it is often false. Accidentals scale S as S = 2√2·V·C/(C + A) with V ≤ 1, so a baseline of S = 2.6 already forces A/C ≤ 0.088, and reaching 2.3 needs A/C to rise to 0.230 (×2.6). Even if every baseline accidental came from B's dark counts, a 40% rise in DCR\_B only takes S to about 2.52. Tripling DCR\_B does reach 2.3, but only if B's dark-count accidentals were already about 0.071·C (about 80% of all accidentals), roughly when DCR\_B·Δt ≈ 0.07·η\_B, as on long, lossy links.
 
 ### Counterfactual attribution
 
 1. Pick a baseline run and a current run, each with its calibration artifacts. The baseline choice is recorded with a reason, and the parameter set defaults to all groups.
 2. Re-run the analysis with each nuisance parameter (DCR\_B, η\_A, delay, polarization drift, pump power) held at its baseline value, using grouped Shapley attribution over identifiable parameter groups, with joint posterior draws from both runs. Collinear groups (e.g. system efficiency vs. pump power without a heralding check) are reported as "cannot distinguish", never split.
-3. Attribute ΔS to each parameter with Monte Carlo intervals, plus an explicit misfit term: the observed ΔS minus the model-predicted ΔS.
-4. Render text from that table only, through fixed sentence templates. Causal wording is suppressed when an interval includes zero, and the misfit term and "cannot distinguish" list always come first. Every sentence cites its share, e.g. "0.21 ± 0.04 of the 0.30 drop."
+3. Attribute ΔS to each parameter with Monte Carlo intervals, plus an explicit misfit term: the observed ΔS minus the model-predicted ΔS, with its own interval (the observed ΔS carries shot noise of about √2·σ\_S from the two runs).
+4. Render text from that table only, through fixed sentence templates. Causal wording is suppressed when a group's 95% interval, adjusted for the number of groups (Holm or false-discovery-rate), includes zero, and the misfit term and "cannot distinguish" list always come first. Every sentence cites its share, e.g. "0.21 ± 0.04 of the 0.30 drop."
 
 ### Supporting analytics
 
@@ -304,7 +317,7 @@ Safety design:
 
 ## Data model, storage and provenance
 
-Photon-HDF5 is the interchange container, extended with a `/calibration` namespace that we propose upstream instead of inventing a new format. Raw tags stay on-prem; the project runs no hosted service.
+Photon-HDF5 is the interchange container. DADL writes its calibration data under `/user/dadl_calibration`, the spec's extension point, and proposes a `/calibration` group upstream instead of inventing a new format; paths below are relative to that group. It also fills the native point-value fields under `/setup/detectors` with posterior medians in SI units, and sets `timestamps_unit` = 1e-12 s for its int64 ps tags. All three are to be checked against the spec and phconvert's validator in phase 2. Raw tags stay on-prem; the project runs no hosted service.
 
 ```
 /photon_data      timestamps (typically int64), timestamps_specs/timestamps_unit, detector IDs   [existing]
@@ -312,9 +325,9 @@ Photon-HDF5 is the interchange container, extended with a `/calibration` namespa
 /sample           sample description                                [existing]
 /identity         file and author identity                          [existing]
 /provenance       source files, software                            [existing]
-/calibration      [new]
+/user/dadl_calibration   [new; proposed upstream as /calibration]
   /artifacts/<id> method, timestamp, raw-data hashes, posterior samples, signature
-  /channels/<ch>  current artifact ID per parameter (η, DCR, τ, AP, XT, delay, IRF)
+  /channels/<ch>  current artifact ID per kind (parameters fitted jointly share one artifact)
   /events         connector reseats, config changes, latch resets, change-points
   /analysis       window + how chosen, corrections applied in order, raw + corrected
 ```
@@ -393,15 +406,17 @@ Each channel is modelled as a self-exciting point process, and parameters are gr
 | Group | Parameters | Identified by |
 | --- | --- | --- |
 | Arm, per channel | System efficiency η\_sys = η\_det × t\_arm (detector × coupling, filters, connectors). Detector-only η\_det only with an external reference (substitution or swap test) | Heralding ratio with a pump-power scan |
-| Detector, per channel | DCR(T, V): Arrhenius generation plus a field-dependent tunnelling term; dead times τ\_np and τ\_p; afterpulse kernel (sum of exponentials, ordered time constants); crosstalk kernel at a fitted offset, including breakdown-flash peaks at 2L/c; delay; IRF (Gaussian core plus exponential tail); latch state | Dark inter-arrival data (DCR and afterpulsing fitted jointly); cross-correlation peaks |
+| Detector, per channel | DCR(T, V): Arrhenius generation plus a field-dependent tunnelling term; dead times τ\_np and τ\_p; afterpulse kernel (sum of exponentials, ordered time constants); crosstalk kernel at a fitted offset, including breakdown-flash peaks at 2n\_g·L/c (n\_g ≈ 1.47 in fibre, about 10 ns per metre); delay; IRF (Gaussian core plus exponential tail); latch state | Dark inter-arrival data (DCR and afterpulsing fitted jointly); cross-correlation peaks |
 | Tagger, per channel | TDC dead time; input delay; trigger level (recorded, not fitted) | Config and inter-arrival histogram |
 | Source, per setup | Pair rate N; multi-pair term; polarization or basis-mixing parameters | Rate-dependent coincidence-to-accidental ratio, pump-power scan |
 
-**Detection process.** Every recorded avalanche (photon, dark count, afterpulse or crosstalk) starts a dead time. Afterpulse and crosstalk kernels are triggered by recorded avalanches and conditioned on recovery, so they cascade. The kit simulates and fits this in the time domain. Where singles need a closed form, it uses the series hybrid dead-time model:
+**Detection process.** Every recorded avalanche (photon, dark count, afterpulse or crosstalk) starts a dead time. Afterpulse and crosstalk kernels are triggered by recorded avalanches and conditioned on recovery, so they cascade. The kit simulates and fits this in the time domain. Where singles need a closed form, it uses the exact series model, a paralyzable stage followed by a non-paralyzable one (τ\_np > τ\_p):
 
 ```latex
-m = \frac{n\, e^{-n\tau_p}}{1 + n\,\tau_{np}}
+m = \frac{m_1}{1 + m_1(\tau_{np} - \tau_p)}, \qquad m_1 = n\, e^{-n\tau_p}
 ```
+
+The empirical hybrid m = n·e^(−nτ\_p)/(1 + nτ\_np) (Patil and Usman) is not this model: it is up to about 30% low against a simulated chain at high rate, so it is never used as a test oracle. The test suite checks the exact form against a simulated chain to 2%.
 
 **Correlation histogram.** For delay t = t\_b − t\_a, integrated over each bin B\_k:
 
@@ -426,20 +441,74 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 
 An artifact is a small JSON manifest plus a posterior sample table, addressed by the SHA-256 of its canonical manifest. It is stored under `/calibration/artifacts/<id>` and can also live as a standalone file.
 
+The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until phase 2 produces real artifacts):
+
 ```json
 {
   "schema": "calibration/1",
-  "kind": "afterpulse",
-  "channel": {"device": "<serial>", "input": 3},
-  "method": {"name": "interarrival-wdic", "version": "0.4.0"},
+  "kind": "dark-afterpulse-deadtime",
+  "channels": [
+    {
+      "device": "SPCM-0001",
+      "input": 3
+    }
+  ],
+  "method": {
+    "name": "interarrival-wdic",
+    "version": "0.4.0"
+  },
   "created": "2026-11-10T14:02:11Z",
-  "inputs": [{"sha256": "...", "role": "raw-tags"}, {"sha256": "...", "role": "telemetry"}],
-  "conditions": {"temperature_K": 248.1, "bias_V": 2.5},
-  "posterior": {"format": "arrow", "sha256": "...", "n_samples": 2000, "params": ["p_ap", "tau_1", "tau_2", "w_1"]},
-  "checks": {"ppc_pvalue": 0.41, "converged": true},
-  "supersedes": "<previous id>",
-  "software": {"core": "0.4.0", "python": "0.4.0"},
-  "signature": {"alg": "ed25519", "key_id": "<site key>", "sig": "..."}
+  "valid_for": {
+    "from": "2026-11-10T14:02:11Z",
+    "to": "2026-11-17T14:02:11Z",
+    "conditions": {
+      "temperature_K": [
+        247.0,
+        249.0
+      ]
+    }
+  },
+  "backend": "hardware",
+  "inputs": [
+    {
+      "sha256": "7dc8f636e5a33428acfe8789ca42bb44342bba3873b4caf65c7ca3e894f3ff2a",
+      "role": "raw-tags"
+    },
+    {
+      "sha256": "16091175048ac6014be4712b1640c0e3a3272f4fc944e0bee3248f8861b234be",
+      "role": "telemetry"
+    }
+  ],
+  "conditions": {
+    "temperature_K": 248.1,
+    "bias_V": 2.5
+  },
+  "posterior": {
+    "format": "arrow",
+    "sha256": "00ff6f13379089e601cac18e06329d5376881931a6832f6f26b29f8d0253c391",
+    "n_samples": 2000,
+    "params": [
+      "dcr_cps",
+      "tau_np_ps",
+      "p_ap",
+      "tau_ap1_ps",
+      "tau_ap2_ps",
+      "w_ap1"
+    ]
+  },
+  "checks": {
+    "converged": true,
+    "ppc_pvalue": 0.41
+  },
+  "supersedes": "6da0633528deaa0144e7b058315f0b753ec0b945163a72bf96a0d18180f9de0d",
+  "software": {
+    "dadl": "0.4.0"
+  },
+  "signature": {
+    "alg": "ed25519",
+    "key_id": "<site key id>",
+    "sig": "<base64url signature>"
+  }
 }
 ```
 
@@ -449,7 +518,9 @@ Size: 2,000 samples × \~20 parameters × 8 bytes is about 320 kB per artifact, 
 
 **Schema versions.** The kit reads every past schema version indefinitely. Upgrades create new artifacts that link back to the old ones, so existing hashes and signatures stay valid.
 
-**Signing.** Each site holds its own ed25519 key; the project never holds lab keys. Release binaries are signed separately through the project's GitHub release process. Key custody for QKD attestation stays an open question.
+**Content addressing (phase 2–3).** The ID is the SHA-256 of the manifest canonicalized with RFC 8785 (JCS). Cross-language test vectors (manifest, JCS bytes, ID) ship with the schema. The posterior hash covers a canonical layout (little-endian float64 columns in `params` order), not Arrow file bytes; input hashes cover datasets, not container files, so writing calibration into the same HDF5 file does not change them. `dadl verify` checks that a recomputed artifact agrees statistically, since MCMC output is not bit-reproducible.
+
+**Signing (deferred to v0.2+).** Until a user needs attestation, artifacts are content-addressed only. The planned design: the signed payload is `"dadl-calibration-v1\0"` followed by the JCS bytes; `sig` is base64url; `key_id` is the SHA-256 of the public key; a per-chain `seq` counter rejects rollback; and small labs can sign with minisign or SSH signatures against an `allowed_signers`-style trust file instead of a keystore or HSM. Each site holds its own key; the project never holds lab keys. Key custody for QKD attestation stays an open question.
 
 ### MCP tool schemas
 
@@ -491,7 +562,7 @@ The kit drives real hardware and signs evidence, so its safety controls run in c
 | Prompt injection | Tool results return structured fields. Free text from files, telemetry and other nodes is escaped and marked untrusted. Replays are referenced by dataset ID, never by file path. |
 | Network surfaces | Metrics and non-stdio MCP bind to localhost by default; remote access needs mTLS or bearer auth. Security-relevant series such as blinding alarms can be delayed or withheld. |
 | Resource limits | Schema maximums and per-session quotas on duration, Monte Carlo samples and explain parameters. Every result and artifact carries `backend: sim` or `hardware`, and hardware access needs its own capability. |
-| Supply chain | Trusted Publishing to PyPI and crates.io, Sigstore attestations, GitHub Actions pinned by SHA, branch protection with 2FA, and two maintainer approvals for guardrail, approval and signing code. Package names reserved now. |
+| Supply chain | Trusted Publishing to PyPI from a build job with no publishing permission, PEP 740 attestations, GitHub Actions pinned by SHA and updated by Dependabot, a release check that the tag matches both versions and sits on main, branch and tag protection with 2FA, and maintainer review for guardrail code (two approvals once there are two maintainers). crates.io is published by hand until its Trusted Publishing is configured. |
 
 **QKD monitoring records are not proof of security.** They show what the monitor observed; the absence of a known signature does not prove the absence of an attack. Stronger attestation would need a hardware root of trust, trusted timestamps (RFC 3161) and independent evaluation, which are out of scope.
 
@@ -529,25 +600,26 @@ Above K = 8, the engine switches to sampled-permutation Shapley with a fixed bud
 
 ## MVP scope and milestones
 
-The MVP takes 6–9 months and covers two taggers, two detector families, six calibrations and three analyses. It ships as the starter kit: quickstart, the five example setups, the extension templates, the validate command and a docs site with a how-to guide per extension point. Every shipped example and exposed option must run in the MVP release; cheap-vs-reference, CH/Eberhard and g(2) ship after it.
+The team is small, so the MVP is cut to what it can sustain: the `chsh-spad` and `hom-snspd` examples on one tagger, the calibrations they need, and an honest starter kit. Everything else is "v0.2+ / seeking contributors". This section is the canonical phase plan; the README and the overview site copy it.
 
-| Area | In MVP | Deferred |
+| Area | In MVP | v0.2+ / seeking contributors |
 | --- | --- | --- |
-| Time taggers | Swabian, PicoQuant | qutools, IDQ ID1000 |
+| Time taggers | One (Swabian), plus the generic `.npz`/`.csv` tag format and an adapter template | PicoQuant, qutools, IDQ ID1000 |
 | Detectors | Si SPAD modules; one SNSPD system | CMOS SPAD arrays, SiPMs (crosstalk maps) |
 | Calibrations | DCR(T), dead time, afterpulse, delay/jitter, heralding efficiency, off-peak accidentals | Full Klyshko protocol, crosstalk matrix, rate-dependent η |
-| Analyses | CHSH, HOM visibility, 2-qubit tomography (Kwiat wrapper + Bayesian alternative) | CH/Eberhard with test martingales, g(2) with arrays, multi-qubit tomography |
-| Explain | Attribution for S, visibility and fidelity changes | Environmental sensor auto-discovery |
-| Storage | Photon-HDF5 + `/calibration` export, signed artifacts | Shared calibration registry, fleet dashboards |
-| Agent | MCP server, five tools, simulator twin | Orchestrator integrations (Aliro-style) |
+| Analyses | CHSH, HOM visibility | Tomography, CH/Eberhard with test martingales, g(2) |
+| Storage | Content-addressed artifacts (SHA-256 of JCS), Photon-HDF5 export under `/user` | Signing, shared calibration registry, fleet dashboards |
+| Explain, agents | None | Explain engine, MCP server with approval tokens, hash-chained audit log, HSM/TPM signer, QKD attestation, monitor daemon, Arrow C Stream adapters, plugin hash pinning |
 
-Proposed sequence (each phase gates the next):
+Proposed sequence. Each phase gates the next, and each gate is a named CI job with numbers.
 
-1. **Simulator and schema.** Time-tag simulator with injected imperfections; quickstart running the chsh-spad example end to end; `/calibration` schema draft; artifact signing. Gate: simulator reproduces known textbook distortions.
-2. **Calibration engine.** Six routines on simulated and replayed Swabian data. Gate: 95% posterior intervals cover truth about 95% of the time in simulation.
-3. **Inference and guardrails.** Forward model, joint Monte Carlo, CHSH/HOM/tomography, guardrail refusals. Gate: guardrail test suite passes, including the coincidence-window loophole case.
-4. **Explain and MCP.** Attribution engine, constrained renderer, five MCP tools on the simulator twin. Gate: attributions recover the injected cause in scripted scenarios.
-5. **Hardware pilot.** PicoQuant adapter, SNSPD telemetry, one SPDC lab and one network testbed. Gate: hardware A/B results published, including disagreements.
+| Phase | Delivers | Gate (CI job) | Status |
+| --- | --- | --- | --- |
+| 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): afterpulse closed-form test and crosstalk simulation outstanding |
+| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated and replayed Swabian data; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration; 95% interval coverage within 93.6–96.4% (binomial 99%) | Not started |
+| 3. Inference and plans | Forward model, joint Monte Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n) coincidences | `guardrails`: every regression case refuses, including window shopping under a signed plan | Not started |
+| 4. Explain (v0.2+) | Attribution with family-wise-adjusted 95% intervals and a misfit interval | `explain`: N named scenarios, correct top attribution in ≥ 90% | Seeking contributors |
+| 5. Hardware pilot | One SPDC lab, one network testbed | Hardware A/B results published, including disagreements | Conditional on a design partner |
 
 ## Validation and testing
 
@@ -604,11 +676,11 @@ The project is fully open source and developed in public on GitHub. There is no 
 | Area | Proposal |
 | --- | --- |
 | License | Dual-licensed MIT OR Apache-2.0 (decided): Rust ecosystem convention, Apache's patent grant for vendor contributions, MIT for simplicity. Check the licenses of wrapped dependencies (Kwiat, ETA, ptufile, QCoDeS drivers) before writing wrappers; any GPL tool becomes an optional extra run as a separate process |
-| Repository | One GitHub repo: `core/` (Rust), `python/` (bindings and API), `mcp/` (server), `sim/` (simulator twin), `schema/` (`/calibration` spec), `adapters/` (one per vendor), docs/ (MkDocs site) |
+| Repository | One GitHub repo: `core/` (Rust), `python/` (API, simulator in `dadl/sim.py`), `tests/vectors/` (shared Rust/Python cases), `schema/` (calibration spec and examples), `adapters/` and `mcp/` (placeholders), `docs/` (this doc and the GitHub Pages report) |
 | Distribution | abi3 wheels for Windows x86-64 (tier 1), Linux and macOS, built with maturin on GitHub Actions, plus crates.io crates; dadl doctor detects installed vendor SDKs; semantic versioning; schema versioned separately |
 | CI | GitHub Actions runs guardrail regression cases and fast coverage checks on every pull request, on Windows, Linux and macOS; full coverage runs nightly; adapters are tested against recorded replay files |
 | Reference data | Simulated and hardware A/B datasets published as release assets or in a linked data repository |
-| Governance | Maintainer-led at first; CONTRIBUTING, CODE\_OF\_CONDUCT and SECURITY.md; RFCs in GitHub Discussions for schema and guardrail changes |
+| Governance | Maintainer-led at first; CONTRIBUTING, SECURITY.md, CHANGELOG and CITATION.cff now; a code of conduct and issue templates once there are outside contributors; RFCs in GitHub Discussions for schema and guardrail changes |
 | Security | Private vulnerability reporting through GitHub security advisories; signed releases |
 
 Proprietary vendor SDKs are never vendored into the repo. Adapters that need them load them at runtime as optional dependencies, and replay-file adapters work without them.
@@ -637,12 +709,12 @@ Five independent review agents (physicist, loophole red team, security engineer,
 | Reviewer | Finding | Severity | Resolution |
 | --- | --- | --- | --- |
 | Physics | Parameters from the same data were drawn independently, and calibration and analysis reused the same data, so intervals were too narrow | High | Fixed: joint posteriors, disjoint calibration data |
-| Physics | Detection-process order and the hybrid dead-time formula were unphysical | High | Fixed: self-exciting model, series hybrid formula |
+| Physics | Detection-process order and the hybrid dead-time formula were unphysical | High | Fixed: self-exciting model (the formula was corrected again in the third review) |
 | Physics | Detector efficiency and arm loss are not separately identifiable | High | Fixed: system efficiency per arm; detector-only η needs an external reference |
 | Physics | Attribution split collinear parameters and hid model misfit | High | Fixed: grouped Shapley, explicit misfit term, fixed sentence templates |
 | Physics | Correlation-histogram formula errors, Laplace overconfidence, g(2) inside dead time, breakdown flash, Bell window from same-run delay, 12% instead of 13% | Medium | Fixed |
 | Red team | Window and run shopping, post-selection by exclusion, calibration cherry-picking | High | Fixed: analysis-plan ledger, bracketing rule, exclusion reporting |
-| Red team | Thresholds crossed only after correction, labels lost on export, relabelled analyses and edited policies, raw CHSH read as loophole-free | High | Fixed: threshold rule, labelled result type and dadl report, policy hashing, fair-sampling label |
+| Red team | Thresholds crossed only after correction, labels lost on export, relabelled analyses and edited policies, raw CHSH read as loophole-free | High | Designed here; relabelling and policy edits were only closed in code in 0.0.3 (third review) |
 | Red team, security | QKD blinding absorbed by recalibration; attestation overclaimed | High | Fixed: frozen baseline during key sessions; monitoring records, not proof |
 | Security | Agent set its own limits; weak approval path; plugins could bypass checks; audit log, keys and artifact rollback unspecified | High | Fixed: Security design subsection |
 | Security | Prompt injection, metrics exposure, supply chain, resource limits | Medium | Fixed: Security design subsection |
@@ -651,8 +723,26 @@ Five independent review agents (physicist, loophole red team, security engineer,
 | Architecture | Examples and options relied on deferred features; no platform matrix, docs site, schema migration or config validation | High | Fixed |
 | Fact-check | Ten citations needed correcting (NIST low-cost method, 2700σ attribution, Eberhard source, MLE bias source, SPAD dead time, SiPM crosstalk, SNSPD dark counts, Photon-HDF5 schema, ETSI title, Kwiat version) | Medium | Fixed; Eberhard and Schwemmer added to References |
 | Architecture | MVP too large for an unstated team size | High | Open: team-size question added |
-| Architecture | The diagram is an embed that won't render on GitHub | Low | Open: commit it as SVG or Mermaid when the repo is created |
+| Architecture | The diagram is an embed that won't render on GitHub | Low | Fixed: Mermaid |
 | All | All review is by agents, with no human physicist | High | Open: published results become executable tests before phase 3 |
+
+### Third review (2026-11-11)
+
+Ten independent review agents (physics, statistics, architecture, Python code, Rust core, guardrail red team, data and provenance, plan and scope, security and supply chain, user experience) reviewed the design, the plan and the v0.0.2 code. A council of three seats (physicist, maintainer, user advocate) then ruled on every finding, adopting each with two of three votes. The full ruling, including the repository settings only the owner can change, is in [reviews/2026-11-council.md](reviews/2026-11-council.md). v0.0.3 applies the adopted changes.
+
+| Theme | Finding | Severity | Resolution |
+| --- | --- | --- | --- |
+| Physics | The "series hybrid" dead-time formula is an empirical form, up to 30% off the series model | High | Fixed: exact series form, tested against a simulated chain |
+| Physics | The attribution example (2.6 → 2.3 from a 40% dark-count rise) was physically impossible | High | Fixed: consistent numbers |
+| Physics, statistics | Corrected-visibility error was too small and ignored the accidentals' variance; V > 1 was possible; HOM used the fringe formula | High | Fixed: delta-method errors with σ\_A, input checks, HOM dip convention |
+| Red team | Callers chose the analysis name, so Bell data could take the HOM rule; policy fingerprint never recorded; thresholds outside the hash | High | Fixed: separate entry points, read-only tables, fingerprint and overrides on every result |
+| Red team | Window `source: plan` is self-declared; window and run shopping go undetected | High | Documented as a phase 1 limit; signed plans in phase 3 |
+| Starter kit | `setup.yaml` drove nothing (and `1.0e5` loaded as a string); no way to analyse your own tags | High | Fixed: YAML-driven quickstart, `init`, `simulate`, `analyze`, typed config validation |
+| Code | Unsorted input gave silent wrong answers in release builds; overflow saturated into false coincidences; Rust and Python had no parity check | High | Fixed: checks in every build, `Result` errors, shared test vectors |
+| Packaging, security | Licence texts not shipped; sdist tests failed; build tools ran with the OIDC token | Medium | Fixed: licence files, build/publish split, Dependabot, tag checks |
+| Docs | README, site and design described planned features in the present tense; phase tables disagreed; schema example failed its schema | Medium | Fixed: "what works today", one canonical phase table, CI-validated example |
+| Scope | MVP too large for the team | High | Fixed: cut to chsh-spad and hom-snspd on one tagger |
+| All | All review is by agents, with no human physicist | High | Open |
 
 ## References
 
@@ -675,6 +765,7 @@ Five independent review agents (physicist, loophole red team, security engineer,
 - [ETSI GS QKD 011 V1.1.1](https://standict.eu/standards-repository/etsi-gs-qkd-011-v111) (2016-05): Component characterization of optical components for QKD systems
 - [McKinsey Quantum Technology Monitor 2025](https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/the-year-of-quantum-from-concept-to-reality-in-2025)
 
+* [Garg and Mermin, Detector inefficiencies in the Einstein-Podolsky-Rosen experiment, Phys. Rev. D 35, 3831 (1987)](https://doi.org/10.1103/PhysRevD.35.3831)
 * [Eberhard, Background level and counter efficiencies required for a loophole-free EPR experiment, Phys. Rev. A 47, R747 (1993)](https://doi.org/10.1103/PhysRevA.47.R747)
 * [Schwemmer et al., Systematic errors in current quantum state tomography tools, Phys. Rev. Lett. 114, 080403 (2015)](https://doi.org/10.1103/PhysRevLett.114.080403)
 

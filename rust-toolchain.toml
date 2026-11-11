@@ -1,0 +1,7 @@
+# Pinned so CI and contributors build with the same compiler. Bump deliberately
+# (Dependabot does not update this file). The crate's minimum supported Rust
+# version is rust-version in Cargo.toml (1.74), checked by its own CI job.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

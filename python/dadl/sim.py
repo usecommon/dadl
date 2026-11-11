@@ -1,14 +1,19 @@
 """Time-tag simulator with known, injected detector imperfections.
 
 Every parameter that the calibration engine will later estimate is set
-explicitly here, so tests can compare estimates against the truth.
+explicitly here, so tests can compare estimates against the truth. Parameter
+names match setup.yaml (unit-suffixed).
 
 Units: time tags are int64 picoseconds; rates are per second.
 
 Phase 1 approximations, to be replaced by the self-exciting detection model
 in docs/design.md:
-- afterpulses are generated for one generation only (no cascades);
-- crosstalk and breakdown flash are not simulated yet.
+- afterpulses are generated for one generation only (no cascades), and an
+  afterpulse that lands inside a later event's dead time is dropped, so the
+  effective afterpulse probability is slightly below `afterpulse_prob`;
+- crosstalk and breakdown flash are not simulated yet;
+- arrival times are drawn as float64 ps, exact to the picosecond only up to
+  2^53 ps (about 2.5 hours of simulated time per run).
 """
 
 from __future__ import annotations
@@ -18,14 +23,27 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dadl import _checks
+from dadl.analysis.chsh import CHANNELS, SIGNS
 from dadl.deadtime import apply_nonparalyzable
 
 PS_PER_S = 10**12
 
 #: Analyzer angles in degrees for the standard CHSH settings on a Phi+ state.
 CHSH_SETTINGS: dict[str, float] = {"a": 0.0, "a'": 45.0, "b": 22.5, "b'": 67.5}
-CHSH_PAIRS: tuple[tuple[str, str], ...] = (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))
-CHANNELS: tuple[str, ...] = ("A+", "A-", "B+", "B-")
+CHSH_PAIRS: tuple[tuple[str, str], ...] = tuple(SIGNS)
+
+__all__ = [
+    "CHANNELS",
+    "CHSH_PAIRS",
+    "CHSH_SETTINGS",
+    "DetectorParams",
+    "PairSource",
+    "detect",
+    "poisson_times",
+    "simulate_chsh",
+    "simulate_chsh_setting",
+]
 
 
 @dataclass(frozen=True)
@@ -33,38 +51,41 @@ class DetectorParams:
     """Ground truth for one detector channel."""
 
     efficiency: float = 0.5  # system efficiency (detector x coupling)
-    dark_rate: float = 100.0  # counts per second
+    dark_rate_cps: float = 100.0  # counts per second
     dead_time_ps: int = 22_000  # non-paralyzable
-    jitter_ps: float = 350.0  # Gaussian sigma
+    jitter_sigma_ps: float = 350.0  # Gaussian sigma
     afterpulse_prob: float = 0.0  # per recorded avalanche
     afterpulse_tau_ps: float = 50_000.0  # exponential delay after the dead time
     delay_ps: int = 0  # fixed channel delay
 
     def __post_init__(self) -> None:
-        if not 0.0 <= self.efficiency <= 1.0:
-            raise ValueError("efficiency must be in [0, 1]")
-        if self.dark_rate < 0 or self.dead_time_ps < 0 or self.jitter_ps < 0:
-            raise ValueError("rates, dead time and jitter must be non-negative")
-        if not 0.0 <= self.afterpulse_prob < 1.0:
-            raise ValueError("afterpulse probability must be in [0, 1)")
+        _checks.finite(self.efficiency, "efficiency", minimum=0.0, maximum=1.0)
+        _checks.finite(self.dark_rate_cps, "dark_rate_cps", minimum=0.0)
+        object.__setattr__(self, "dead_time_ps", _checks.integer(self.dead_time_ps, "dead_time_ps", minimum=0))
+        _checks.finite(self.jitter_sigma_ps, "jitter_sigma_ps", minimum=0.0)
+        p = _checks.finite(self.afterpulse_prob, "afterpulse_prob", minimum=0.0)
+        if p >= 1.0:
+            raise ValueError("afterpulse_prob must be in [0, 1)")
+        _checks.finite(self.afterpulse_tau_ps, "afterpulse_tau_ps", minimum=0.0)
+        object.__setattr__(self, "delay_ps", _checks.integer(self.delay_ps, "delay_ps"))
 
 
 @dataclass(frozen=True)
 class PairSource:
     """A CW polarization-entangled SPDC source producing a Werner-like Phi+ state."""
 
-    pair_rate: float = 1e5  # pairs per second at the crystal
+    pair_rate_per_s: float = 1e5  # pairs per second at the crystal
     visibility: float = 0.95  # E(alpha, beta) = V cos 2(alpha - beta)
 
     def __post_init__(self) -> None:
-        if self.pair_rate < 0:
-            raise ValueError("pair rate must be non-negative")
-        if not 0.0 <= self.visibility <= 1.0:
-            raise ValueError("visibility must be in [0, 1]")
+        _checks.finite(self.pair_rate_per_s, "pair_rate_per_s", minimum=0.0)
+        _checks.finite(self.visibility, "visibility", minimum=0.0, maximum=1.0)
 
 
 def poisson_times(rate: float, duration_s: float, rng: np.random.Generator) -> np.ndarray:
     """Sorted float64 arrival times (ps) of a homogeneous Poisson process."""
+    _checks.finite(rate, "rate", minimum=0.0)
+    _checks.finite(duration_s, "duration_s", minimum=0.0)
     n = rng.poisson(rate * duration_s)
     return np.sort(rng.uniform(0.0, duration_s * PS_PER_S, n))
 
@@ -78,10 +99,10 @@ def detect(
     """Turn photon arrival times into recorded int64 time tags for one detector."""
     photons = np.asarray(photon_times_ps, dtype=np.float64)
     kept = photons[rng.random(photons.size) < det.efficiency]
-    if det.jitter_ps > 0:
-        kept = kept + rng.normal(0.0, det.jitter_ps, kept.size)
+    if det.jitter_sigma_ps > 0:
+        kept = kept + rng.normal(0.0, det.jitter_sigma_ps, kept.size)
     kept = kept + det.delay_ps
-    darks = poisson_times(det.dark_rate, duration_s, rng)
+    darks = poisson_times(det.dark_rate_cps, duration_s, rng)
     arrivals = np.sort(np.rint(np.concatenate([kept, darks]))).astype(np.int64)
     recorded = apply_nonparalyzable(arrivals, det.dead_time_ps)
 
@@ -108,7 +129,10 @@ def simulate_chsh_setting(
     missing = set(CHANNELS) - set(detectors)
     if missing:
         raise ValueError(f"missing detector parameters for {sorted(missing)}")
-    t = poisson_times(source.pair_rate, duration_s, rng)
+    _checks.finite(duration_s, "duration_s", minimum=0.0)
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    t = poisson_times(source.pair_rate_per_s, duration_s, rng)
     n = t.size
     a_plus = rng.random(n) < 0.5
     p_same = 0.5 * (1.0 + source.visibility * math.cos(2.0 * math.radians(alpha_deg - beta_deg)))
@@ -126,7 +150,10 @@ def simulate_chsh(
     settings: dict[str, float] | None = None,
 ) -> dict[tuple[str, str], dict[str, np.ndarray]]:
     """One acquisition per CHSH setting pair, keyed like ("a", "b'")."""
-    angles = settings or CHSH_SETTINGS
+    angles = CHSH_SETTINGS if settings is None else settings
+    missing = [s for s in CHSH_SETTINGS if s not in angles]
+    if missing:
+        raise ValueError(f"settings are missing angle(s) for {missing}")
     return {
         (sa, sb): simulate_chsh_setting(source, angles[sa], angles[sb], detectors, duration_s, rng)
         for sa, sb in CHSH_PAIRS
