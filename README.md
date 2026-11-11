@@ -25,7 +25,15 @@ better than the data supports.
 
 ## Quickstart (phase 1)
 
-Requires Python 3.10 or later.
+Requires Python 3.10 or later. The PyPI package is `dadl-quantum`; the import
+name and the command are both `dadl`.
+
+```bash
+pip install dadl-quantum
+dadl quickstart chsh-spad
+```
+
+To work on DADL itself, from a clone of this repository:
 
 ```bash
 pip install -e "./python[test]"

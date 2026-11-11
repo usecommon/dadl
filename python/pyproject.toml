@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dadl"
+name = "dadl-quantum"
 version = "0.0.1"
 description = "Detector-Aware Data Layer for quantum optics experiments"
 readme = "README.md"

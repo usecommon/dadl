@@ -84,7 +84,7 @@ A user should get from download to a full result on simulated data in under 15 m
 ### First run
 
 ```bash
-pip install dadl
+pip install dadl-quantum
 dadl quickstart chsh-spad
 ```
 

@@ -4,7 +4,7 @@ name: Release
 # no PyPI token is stored anywhere. Triggered by pushing a tag like v0.0.1.
 #
 # One-time setup on pypi.org (Account settings -> Publishing -> Add a pending
-# publisher): project "dadl", owner "usecommon", repository "dadl",
+# publisher): project "dadl-quantum", owner "usecommon", repository "dadl",
 # workflow "release.yml", environment "pypi".
 
 on:
