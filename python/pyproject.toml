@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dadl-quantum"
-version = "0.0.1"
+version = "0.0.2"
 description = "Detector-Aware Data Layer for quantum optics experiments"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
