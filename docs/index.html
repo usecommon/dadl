@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DADL: Detector-Aware Data Layer</title>
+<meta name="description" content="DADL is an open-source data layer that models single-photon detector imperfections, propagates their uncertainty into Bell, HOM and tomography results, and refuses corrections that would inflate them.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;0,700;1,400&family=Source+Code+Pro:wght@400;500&display=swap">
+<style>
+/* Technical-report layout: one centred 42rem text column, journal typography,
+   grayscale line-art figures, rule-only tables, numbered citations. */
+:root {
+  --paper: #ffffff;
+  --ink: #111111;
+  --grey: #555555;
+  --rule: #111111;
+  --rule-light: #c9c9c9;
+  --fill: #ececec;
+  --fill-dark: #bdbdbd;
+  --red: #8a1c1c;
+  --link: #1a3f8a;
+  --code-bg: #f4f4f4;
+  --serif: "STIX Two Text", "Times New Roman", Times, serif;
+  --mono: "Source Code Pro", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #16171b; --ink: #e8e6e1; --grey: #a8a6a0; --rule: #e8e6e1; --rule-light: #45474e;
+    --fill: #2a2c33; --fill-dark: #4a4d56; --red: #e58a8a; --link: #9db8f0; --code-bg: #202228;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 18px/1.6 var(--serif);
+  font-kerning: normal;
+  font-variant-numeric: oldstyle-nums proportional-nums;
+  padding-left: max(18px, env(safe-area-inset-left, 0px));
+  padding-right: max(18px, env(safe-area-inset-right, 0px));
+}
+article { max-width: 42rem; margin: 0 auto; padding-block: 56px 80px; }
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+p { margin: 0 0 0.9em; hyphens: auto; text-align: justify; }
+h1, h2, h3 { font-weight: 700; line-height: 1.25; text-wrap: balance; }
+h2 { font-size: 1.15rem; margin: 2.4em 0 0.7em; }
+h3 { font-size: 1rem; font-style: italic; font-weight: 400; margin: 1.6em 0 0.5em; }
+.num { margin-right: 0.6em; }
+code { font-family: var(--mono); font-size: 0.82em; }
+sup, sub { line-height: 0; }
+.cite { white-space: nowrap; }
+.sc { font-variant: small-caps; letter-spacing: 0.03em; }
+
+/* Title block */
+.titleblock { text-align: center; margin-bottom: 2.2em; }
+.titleblock h1 { font-size: clamp(1.6rem, 4.5vw, 2.1rem); margin: 0 0 0.5em; }
+.titleblock .sub { font-size: 1.1rem; font-style: italic; margin: 0 0 1.2em; }
+.titleblock .authors { margin: 0; }
+.titleblock .meta { margin: 0.3em 0 0; font-size: 0.9rem; color: var(--grey); }
+
+.abstract { margin: 0 auto 1.6em; max-width: 36rem; font-size: 0.93rem; }
+.abstract h2 { text-align: center; font-size: 0.85rem; font-variant: small-caps; letter-spacing: 0.08em; margin: 0 0 0.4em; font-weight: 600; }
+.keywords { max-width: 36rem; margin: 0 auto; font-size: 0.88rem; }
+hr.sep { border: 0; border-top: 1px solid var(--rule); margin: 2em 0 0; }
+
+/* Figures */
+figure { margin: 1.8em 0 1.6em; }
+.fig { overflow-x: auto; }
+.fig svg { display: block; width: 100%; min-width: 560px; height: auto; margin: 0 auto; }
+figcaption { font-size: 0.86rem; line-height: 1.5; text-align: justify; margin-top: 0.6em; }
+figcaption .lab, .tcap .lab { font-weight: 700; }
+
+/* SVG line art */
+.f-box { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }
+.f-shade { fill: var(--fill); stroke: var(--ink); stroke-width: 1; }
+.f-emph { fill: var(--fill); stroke: var(--ink); stroke-width: 1.8; }
+.f-frame { fill: none; stroke: var(--ink); stroke-width: 0.8; stroke-dasharray: 3 3; }
+.f-line { fill: none; stroke: var(--ink); stroke-width: 1; }
+.f-thin { fill: none; stroke: var(--rule-light); stroke-width: 0.8; }
+.f-dash { fill: none; stroke: var(--ink); stroke-width: 1; stroke-dasharray: 4 3; }
+.f-red { fill: none; stroke: var(--red); stroke-width: 1.4; }
+.f-redfill { fill: var(--red); }
+.f-head { fill: var(--ink); }
+.f-tick { stroke: var(--ink); stroke-width: 2; }
+.f-slot { fill: var(--fill); }
+.f-hatch { fill: url(#hatch); stroke: var(--ink); stroke-width: 1; }
+.f-hatch-dead { fill: url(#hatch-dead); }
+.f-dot { fill: var(--ink); }
+.f-open { fill: var(--paper); stroke: var(--ink); stroke-width: 1.3; }
+.hatch-line { stroke: var(--ink); stroke-width: 0.8; }
+.hatch-line-light { stroke: var(--fill-dark); stroke-width: 1; }
+.tx { fill: var(--ink); font: 400 12.5px var(--serif); }
+.tx-b { fill: var(--ink); font: 700 13px var(--serif); }
+.tx-i { fill: var(--ink); font: italic 400 12.5px var(--serif); }
+.tx-s { fill: var(--grey); font: 400 11.5px var(--serif); }
+.tx-m { fill: var(--grey); font: 400 10.5px var(--mono); }
+.tx-red { fill: var(--red); font: 700 12.5px var(--serif); }
+
+/* Tables (rules only) */
+.tcap { font-size: 0.86rem; margin: 1.8em 0 0.4em; }
+.table { overflow-x: auto; margin-bottom: 1.6em; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.86rem; line-height: 1.45; }
+thead tr { border-top: 1.5px solid var(--rule); border-bottom: 0.8px solid var(--rule); }
+tbody tr:last-child { border-bottom: 1.5px solid var(--rule); }
+th { text-align: left; font-weight: 600; padding: 6px 10px 6px 0; }
+td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0; }
+td.st { white-space: nowrap; font-style: italic; }
+
+/* Listings and equations */
+.listing { margin: 1.4em 0 1.4em; }
+.listing .lcap { font-size: 0.86rem; margin-bottom: 0.3em; }
+pre { margin: 0; background: var(--code-bg); border-top: 0.8px solid var(--rule-light); border-bottom: 0.8px solid var(--rule-light); padding: 10px 12px; overflow-x: auto; font: 0.78rem/1.55 var(--mono); }
+pre .c { color: var(--grey); }
+.eq { display: flex; justify-content: space-between; align-items: baseline; gap: 1em; margin: 0.9em 0 1em; padding-left: 2em; font-style: italic; overflow-x: auto; }
+.eq .n { font-style: normal; }
+
+ol.proc { padding-left: 1.6em; margin: 0 0 1em; }
+ol.proc li { margin-bottom: 0.6em; text-align: justify; }
+ol.proc .avail { font-size: 0.86rem; color: var(--grey); font-style: italic; }
+ul.tight { padding-left: 1.4em; margin: 0 0 1em; }
+ul.tight li { margin-bottom: 0.35em; }
+
+ol.refs { padding-left: 2.2em; font-size: 0.86rem; line-height: 1.5; }
+ol.refs li { margin-bottom: 0.45em; padding-left: 0.2em; }
+ol.refs li::marker { content: "[" counter(list-item) "] "; }
+.avail-box { font-size: 0.93rem; }
+footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top: 1em; font-size: 0.82rem; color: var(--grey); }
+@media (max-width: 560px) { p, ol.proc li, figcaption { text-align: left; } body { font-size: 17px; } }
+</style>
+</head>
+<body>
+<article>
+
+<header class="titleblock">
+  <h1>DADL: A Detector-Aware Data Layer for Single-Photon Experiments</h1>
+  <p class="sub">Making detector imperfections known, bounded and auditable</p>
+  <p class="authors">The DADL contributors</p>
+  <p class="meta">Technical report · Version 0.0.2 · November 2026 · <a href="https://github.com/usecommon/dadl">github.com/usecommon/dadl</a></p>
+</header>
+
+<section class="abstract" aria-labelledby="abs">
+  <h2 id="abs">Abstract</h2>
+  <p>Results in quantum optics, from Bell tests and Hong–Ou–Mandel interference to state tomography and quantum key distribution, are computed from coincidence counts recorded by imperfect single-photon detectors. Efficiency loss, dark counts, dead time, afterpulsing, crosstalk and timing drift all shift the reported numbers, yet the corrections applied for them are rarely recorded, rarely carried into the stated uncertainty, and occasionally large enough to manufacture a result. We describe DADL, an open-source data layer that keeps a versioned, uncertainty-carrying model of every detector channel, computes analyses through a single forward model of the detection process, always reports raw and corrected values together, and refuses corrections that are invalid for the analysis at hand. We explain the problem it addresses, how it is used in an experiment, its guardrails, and its current status.</p>
+</section>
+<p class="keywords"><b>Keywords:</b> single-photon detection; detector calibration; coincidence counting; Bell inequalities; uncertainty propagation; reproducibility.</p>
+<hr class="sep">
+
+<!-- ========== 1 ========== -->
+<h2 id="intro"><span class="num">1</span>Introduction</h2>
+<p>A single-photon experiment does not observe photons directly. It observes time tags: the instants at which detectors produced an electrical pulse. Correlations between those time tags carry the physics, and every imperfection of the detectors enters the data before any analysis begins (Figure 1).</p>
+
+<figure id="fig1">
+  <div class="fig">
+    <svg viewBox="0 28 760 182" role="img" aria-label="Figure 1: four channels of time tags with fixed coincidence slots, dead time, a lost photon, an afterpulse and a dark count">
+      <defs>
+        <pattern id="hatch-dead" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch-line-light"/></pattern>
+      </defs>
+      <!-- x = 80 + 16.4 t (ns); slots every 2 ns -->
+      <rect class="f-slot" x="112.8" y="36" width="32.8" height="130"/>
+      <rect class="f-slot" x="244" y="36" width="32.8" height="130"/>
+      <rect class="f-slot" x="604.8" y="36" width="32.8" height="130"/>
+      <path class="f-thin" d="M80 36V166M112.8 36V166M145.6 36V166M178.4 36V166M211.2 36V166M244 36V166M276.8 36V166M309.6 36V166M342.4 36V166M375.2 36V166M408 36V166M440.8 36V166M473.6 36V166M506.4 36V166M539.2 36V166M572 36V166M604.8 36V166M637.6 36V166M670.4 36V166M703.2 36V166M736 36V166"/>
+      <rect class="f-hatch-dead" x="130.8" y="46" width="360.8" height="14"/>
+      <rect class="f-hatch-dead" x="247.3" y="78" width="360.8" height="14"/>
+      <rect class="f-hatch-dead" x="139" y="110" width="360.8" height="14"/>
+      <rect class="f-hatch-dead" x="258.8" y="142" width="360.8" height="14"/>
+      <path class="f-line" d="M80 60H736M80 92H736M80 124H736M80 156H736"/>
+      <text x="30" y="64" class="tx-i">A</text><text x="40" y="58" class="tx-s">+</text>
+      <text x="30" y="96" class="tx-i">A</text><text x="40" y="90" class="tx-s">−</text>
+      <text x="30" y="128" class="tx-i">B</text><text x="40" y="122" class="tx-s">+</text>
+      <text x="30" y="160" class="tx-i">B</text><text x="40" y="154" class="tx-s">−</text>
+      <path class="f-tick" d="M130.8 45V60M139 109V124M247.3 77V92M258.8 141V156M621.2 77V92M629.4 109V124"/>
+      <path class="f-red" d="M305.6 46l8 8M313.6 46l-8 8"/>
+      <path class="f-dot" d="M555.6 45l5.5 7l-5.5 7l-5.5 -7z"/>
+      <circle class="f-open" cx="662.2" cy="150" r="4.5"/>
+      <path class="f-line" d="M80 172H736M80 172V177M244 172V177M408 172V177M572 172V177M736 172V177"/>
+      <text x="80" y="191" class="tx-m" text-anchor="middle">0</text>
+      <text x="244" y="191" class="tx-m" text-anchor="middle">10</text>
+      <text x="408" y="191" class="tx-m" text-anchor="middle">20</text>
+      <text x="572" y="191" class="tx-m" text-anchor="middle">30</text>
+      <text x="736" y="191" class="tx-m" text-anchor="end">40</text>
+      <text x="408" y="206" class="tx-s" text-anchor="middle">time (ns)</text>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 1.</span> Schematic time tags on four channels of a polarization-entangled pair source over 40 ns. Vertical strokes are recorded detections; shaded columns are fixed 2 ns coincidence slots in which both sides fired. Hatched bands mark the 22 ns dead time following each detection; the photon marked × arrives during dead time and is lost. The filled diamond on <i>A</i><sub>+</sub> is an afterpulse, a spurious count triggered by the earlier avalanche; the open circle on <i>B</i><sub>−</sub> is a dark count. None of these events is labelled as such in the recorded data.</figcaption>
+</figure>
+
+<p>The methods for characterizing these effects are mature. Correlated-photon (Klyshko) calibration and conventional substitution calibration agree at NIST to within 0.14(14)%, with standard uncertainties near 0.2% <span class="cite">[1]</span>, and the relevant vocabulary has been standardized <span class="cite">[2]</span>. What is missing is not physics but practice: a consistent way to apply these methods to the data of a running experiment, record what was applied, and carry the resulting uncertainty into the published number. DADL is an attempt to provide that practice as reusable, open-source software.</p>
+
+<!-- ========== 2 ========== -->
+<h2 id="problem"><span class="num">2</span>Sources of error in photon counting</h2>
+<p>Error enters a coincidence measurement at every stage between the source and the analysis (Figure 2). The detector stage contributes the largest number of distinct effects, and the least visible: they depend on temperature, bias, count rate and device age, and they differ markedly between detector families.</p>
+
+<figure id="fig2">
+  <div class="fig">
+    <svg viewBox="0 30 760 250" role="img" aria-label="Figure 2: sources of error at each stage of a single-photon measurement">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-head"/></marker>
+      </defs>
+      <rect class="f-box" x="24" y="40" width="120" height="44"/>
+      <rect class="f-box" x="172" y="40" width="120" height="44"/>
+      <rect class="f-emph" x="320" y="40" width="120" height="44"/>
+      <rect class="f-box" x="468" y="40" width="120" height="44"/>
+      <rect class="f-box" x="616" y="40" width="120" height="44"/>
+      <text x="84" y="67" class="tx-b" text-anchor="middle">Pair source</text>
+      <text x="232" y="67" class="tx-b" text-anchor="middle">Fiber and optics</text>
+      <text x="380" y="67" class="tx-b" text-anchor="middle">Detectors</text>
+      <text x="528" y="67" class="tx-b" text-anchor="middle">Time tagger</text>
+      <text x="676" y="67" class="tx-b" text-anchor="middle">Analysis</text>
+      <g class="f-line">
+        <path d="M144 62H170" marker-end="url(#a2)"/>
+        <path d="M292 62H318" marker-end="url(#a2)"/>
+        <path d="M440 62H466" marker-end="url(#a2)"/>
+        <path d="M588 62H614" marker-end="url(#a2)"/>
+      </g>
+      <g class="tx-s">
+        <text x="30" y="112">pump-power drift</text>
+        <text x="30" y="130">multi-pair emission</text>
+        <text x="178" y="112">coupling loss</text>
+        <text x="178" y="130">connector reseats</text>
+        <text x="178" y="148">polarization drift</text>
+        <text x="474" y="112">channel delays</text>
+        <text x="474" y="130">TDC dead time</text>
+        <text x="474" y="148">trigger thresholds</text>
+        <text x="622" y="112">window choice</text>
+        <text x="622" y="130">accidental subtraction</text>
+        <text x="622" y="148">MLE bias</text>
+      </g>
+      <g class="tx">
+        <text x="326" y="112">efficiency &lt; 1</text>
+        <text x="326" y="130">dark counts (T, bias)</text>
+        <text x="326" y="148">dead time</text>
+        <text x="326" y="166">afterpulsing</text>
+        <text x="326" y="184">crosstalk, jitter</text>
+        <text x="326" y="202">latching, blinding</text>
+      </g>
+      <path class="f-line" d="M24 228V236H736V228"/>
+      <text x="380" y="258" class="tx-i" text-anchor="middle">each shifts the reported S, visibility, fidelity or key rate</text>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 2.</span> Principal sources of error in a coincidence measurement, by stage. The detector stage (bold outline) is the focus of DADL; the analysis stage is where corrections for the other stages are applied, and where they can be misapplied.</figcaption>
+</figure>
+
+<p>Typical magnitudes illustrate the range. A commercial silicon SPAD module is graded between 25 and 1500 dark counts per second, with a dead time of 22–42 ns and afterpulsing of 0.5–1% <span class="cite">[3]</span>. A recent waveguide-integrated visible SPAD reported 25–30% afterpulsing <span class="cite">[4]</span>. Silicon photomultipliers show optical crosstalk of about 25% as bare devices at high bias, rising toward 40–49% with reflective packaging <span class="cite">[5]</span>. An analysis that ignores effects of this size is not reporting the state of the photons; it is reporting the state of the detectors.</p>
+
+<!-- ========== 3 ========== -->
+<h2 id="practice"><span class="num">3</span>Failure modes in current practice</h2>
+
+<h3>3.1 Silent drift</h3>
+<p>Dark counts rise with temperature; a reseated fiber connector changes coupling; a cable delay shifts by a hundred picoseconds as the room warms. Each degrades the result, and without a record of the detector's state alongside the data the cause cannot be identified after the fact.</p>
+
+<h3>3.2 Overcorrection</h3>
+<p>Corrections can create results as well as repair them. In one published example, subtracting accidental coincidences raised a measured two-photon visibility from about 45% to 82%, past the 71% threshold for a Bell violation <span class="cite">[6]</span>. In another, a classical source analysed with coincidence windows chosen from the data produced an apparent violation of over 2700σ, and no violation with predefined windows <span class="cite">[7]</span>. Maximum-likelihood tomography, the standard estimator, has been shown to underestimate fidelity and overestimate entanglement <span class="cite">[8]</span>. These are not errors of calculation; they are errors of procedure, and they recur because nothing in the usual toolchain prevents them.</p>
+
+<h3>3.3 Unreproducible numbers</h3>
+<p>Corrections are typically applied in notebooks or spreadsheets. Which calibration was used, from when, in what order, and with what uncertainty is seldom recorded with the result, so a published number can be neither traced to its inputs nor recomputed by a colleague or referee.</p>
+
+<p>Existing software addresses parts of this chain but not the chain itself. Time-tagger software computes coincidences without a model of the detectors; detector controllers tune bias without reference to the experiment's figure of merit; tomography libraries estimate states without a record of the detectors behind the counts. No tool connects <i>detector state</i>, <i>correction</i>, <i>uncertainty</i>, <i>result</i> and <i>explanation</i> across vendors. That connection is the purpose of DADL.</p>
+
+<!-- ========== 4 ========== -->
+<h2 id="design"><span class="num">4</span>Design</h2>
+<p>DADL is a layer between the instruments and the analysis (Figure 3). Data arrive through vendor adapters; a registry holds a fitted, versioned model of every detector channel; calibration routines update the registry from the experiment's own data; and all corrections, analyses and explanations are computed through the same registry entries.</p>
+
+<figure id="fig3">
+  <div class="fig">
+    <svg viewBox="0 30 760 330" role="img" aria-label="Figure 3: architecture of DADL between the experimental setup and its outputs">
+      <defs>
+        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-head"/></marker>
+      </defs>
+      <rect class="f-frame" x="24" y="40" width="180" height="308"/>
+      <rect class="f-frame" x="250" y="40" width="260" height="308"/>
+      <rect class="f-frame" x="556" y="40" width="180" height="308"/>
+      <text x="114" y="62" class="tx-i" text-anchor="middle">Experimental setup</text>
+      <text x="380" y="62" class="tx-i" text-anchor="middle">DADL</text>
+      <text x="646" y="62" class="tx-i" text-anchor="middle">Outputs</text>
+      <rect class="f-box" x="40" y="76" width="148" height="52"/>
+      <rect class="f-box" x="40" y="144" width="148" height="52"/>
+      <rect class="f-box" x="40" y="212" width="148" height="52"/>
+      <rect class="f-box" x="40" y="280" width="148" height="52"/>
+      <text x="114" y="98" class="tx-b" text-anchor="middle">Time taggers</text>
+      <text x="114" y="116" class="tx-s" text-anchor="middle">Swabian, PicoQuant</text>
+      <text x="114" y="166" class="tx-b" text-anchor="middle">Detectors</text>
+      <text x="114" y="184" class="tx-s" text-anchor="middle">SPAD, SNSPD, SiPM</text>
+      <text x="114" y="234" class="tx-b" text-anchor="middle">Telemetry</text>
+      <text x="114" y="252" class="tx-s" text-anchor="middle">temperature, bias</text>
+      <text x="114" y="302" class="tx-b" text-anchor="middle">Simulator</text>
+      <text x="114" y="320" class="tx-s" text-anchor="middle">identical interface</text>
+      <rect class="f-box" x="266" y="76" width="228" height="36"/>
+      <rect class="f-emph" x="266" y="120" width="228" height="36"/>
+      <rect class="f-box" x="266" y="164" width="228" height="36"/>
+      <rect class="f-box" x="266" y="208" width="228" height="36"/>
+      <rect class="f-box" x="266" y="252" width="228" height="36"/>
+      <rect class="f-box" x="266" y="296" width="228" height="36"/>
+      <text x="380" y="98" class="tx" text-anchor="middle">Vendor adapters</text>
+      <text x="380" y="142" class="tx-b" text-anchor="middle">Detector registry</text>
+      <text x="380" y="186" class="tx" text-anchor="middle">Calibration engine</text>
+      <text x="380" y="230" class="tx" text-anchor="middle">Forward model and analyses</text>
+      <text x="380" y="274" class="tx" text-anchor="middle">Attribution engine</text>
+      <text x="380" y="318" class="tx" text-anchor="middle">Agent interface (MCP)</text>
+      <rect class="f-box" x="572" y="76" width="148" height="44"/>
+      <rect class="f-box" x="572" y="129" width="148" height="44"/>
+      <rect class="f-box" x="572" y="182" width="148" height="44"/>
+      <rect class="f-box" x="572" y="235" width="148" height="44"/>
+      <rect class="f-box" x="572" y="288" width="148" height="44"/>
+      <text x="646" y="102" class="tx" text-anchor="middle">Raw and corrected values</text>
+      <text x="646" y="155" class="tx" text-anchor="middle">Full uncertainty</text>
+      <text x="646" y="208" class="tx" text-anchor="middle">Signed calibration records</text>
+      <text x="646" y="261" class="tx" text-anchor="middle">Health alerts</text>
+      <text x="646" y="314" class="tx" text-anchor="middle">Attribution of drift</text>
+      <g class="f-line">
+        <path d="M204 194H248" marker-end="url(#a3)"/>
+        <path d="M510 194H554" marker-end="url(#a3)"/>
+      </g>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 3.</span> Architecture. The detector registry (bold outline) holds, for each channel, posterior samples of efficiency, dark-count rate as a function of temperature and bias, dead time, afterpulse kernel, crosstalk, delay and timing response, each stored as an immutable, signed record. Because every downstream component reads the same records, no effect is corrected twice and every result can cite exactly the calibration it used.</figcaption>
+</figure>
+
+<p>Three design commitments follow from Section 3. First, corrections are derived from one generative model of the detection process, fitted to the data, rather than from a sequence of independent subtractions that may count the same event twice. Second, raw values are never discarded: every result carries its raw value, its corrected value where one is permitted, and its labels. Third, explanations of a change in a result are computed numerically before any text is produced.</p>
+
+<p>For a polarization-entangled source, the CHSH parameter is formed from four correlators,</p>
+<div class="eq"><span><i>S</i> = <i>E</i>(<i>a</i>, <i>b</i>) − <i>E</i>(<i>a</i>, <i>b</i>′) + <i>E</i>(<i>a</i>′, <i>b</i>) + <i>E</i>(<i>a</i>′, <i>b</i>′),&nbsp;&nbsp; <i>E</i> = (<i>N</i><sub>++</sub> + <i>N</i><sub>−−</sub> − <i>N</i><sub>+−</sub> − <i>N</i><sub>−+</sub>) / <i>N</i>,</span><span class="n">(1)</span></div>
+<p>and uniform accidental coincidences <i>A</i> dilute every correlator equally, so that for a Werner-like state of visibility <i>V</i> with <i>C</i> true coincidences</p>
+<div class="eq"><span><i>S</i><sub>raw</sub> = 2√2 <i>V</i> · <i>C</i> / (<i>C</i> + <i>A</i>).</span><span class="n">(2)</span></div>
+<p>Equation (2) is one of the closed-form results against which the DADL simulator and analyses are tested; with the parameters of the bundled example it predicts <i>S</i> = 2.686, and the simulation returns 2.689 ± 0.011 (Listing 2).</p>
+
+<!-- ========== 5 ========== -->
+<h2 id="workflow"><span class="num">5</span>Use in an experiment</h2>
+<p>DADL is designed to fit the measurement loop a laboratory already runs (Figure 4). Most calibration data are by-products of ordinary acquisitions: the cross-correlation peak yields channel delays and timing response, off-peak bins yield the accidental rate, and the heralding ratio yields system efficiency.</p>
+
+<figure id="fig4">
+  <div class="fig">
+    <svg viewBox="0 30 760 306" role="img" aria-label="Figure 4: the measurement loop of plan, acquire, calibrate, correct and fit, and explain, around the detector registry">
+      <defs>
+        <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-head"/></marker>
+      </defs>
+      <rect class="f-box" x="295" y="40" width="170" height="56"/>
+      <rect class="f-box" x="545" y="116" width="170" height="56"/>
+      <rect class="f-box" x="510" y="270" width="170" height="56"/>
+      <rect class="f-box" x="80" y="270" width="170" height="56"/>
+      <rect class="f-box" x="45" y="116" width="170" height="56"/>
+      <rect class="f-emph" x="280" y="160" width="200" height="64"/>
+      <text x="380" y="64" class="tx-b" text-anchor="middle">(i) Plan</text>
+      <text x="380" y="82" class="tx-s" text-anchor="middle">setup file, fixed window</text>
+      <text x="630" y="140" class="tx-b" text-anchor="middle">(ii) Acquire</text>
+      <text x="630" y="158" class="tx-s" text-anchor="middle">time tags</text>
+      <text x="595" y="294" class="tx-b" text-anchor="middle">(iii) Calibrate</text>
+      <text x="595" y="312" class="tx-s" text-anchor="middle">from the same data</text>
+      <text x="165" y="294" class="tx-b" text-anchor="middle">(iv) Correct and fit</text>
+      <text x="165" y="312" class="tx-s" text-anchor="middle">raw with corrected</text>
+      <text x="130" y="140" class="tx-b" text-anchor="middle">(v) Explain</text>
+      <text x="130" y="158" class="tx-s" text-anchor="middle">attribution of change</text>
+      <text x="380" y="188" class="tx-b" text-anchor="middle">Detector registry</text>
+      <text x="380" y="207" class="tx-s" text-anchor="middle">versioned, signed records</text>
+      <g class="f-line">
+        <path d="M465 72L560 114" marker-end="url(#a4)"/>
+        <path d="M625 172L605 268" marker-end="url(#a4)"/>
+        <path d="M510 298H252" marker-end="url(#a4)"/>
+        <path d="M155 270L138 174" marker-end="url(#a4)"/>
+        <path d="M180 116L293 76" marker-end="url(#a4)"/>
+      </g>
+      <g class="f-dash">
+        <path d="M545 270L466 226" marker-end="url(#a4)"/>
+        <path d="M300 224L222 268" marker-end="url(#a4)"/>
+      </g>
+      <text x="520" y="240" class="tx-i">write</text>
+      <text x="206" y="240" class="tx-i" text-anchor="end">read</text>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 4.</span> The measurement loop. Solid arrows give the order of operations in each run; dashed arrows show calibration writing new records to the registry and the analysis reading them. A health monitor (not shown) compares every run with the current model and flags drift, latching and blinding signatures.</figcaption>
+</figure>
+
+<p>In practice a measurement proceeds as follows. The status of each step in the current release is given in italics.</p>
+<ol class="proc">
+  <li><b>Describe the setup.</b> A single configuration file names the source, each detector channel and its family, the time tagger and the analysis (Listing 1). <span class="avail">Available.</span></li>
+  <li><b>Declare the analysis before acquisition.</b> The coincidence window, sample size and any data-exclusion rules are fixed in advance. For Bell-type analyses a window derived from the data is rejected, since this is the mechanism of the coincidence-time loophole <span class="cite">[7]</span>. <span class="avail">Window rule available; signed analysis plan planned.</span></li>
+  <li><b>Acquire.</b> Time tags are read from a tagger, a recorded file or the built-in simulator. Configuration changes, buffer overflows and dropped data are logged as events. <span class="avail">Simulator available; Swabian and PicoQuant adapters planned.</span></li>
+  <li><b>Calibrate.</b> Dark counts and afterpulsing are fitted jointly from dark inter-arrival data; delays and timing response from the cross-correlation peak; system efficiency from the heralding ratio. Each fit is stored with its posterior uncertainty, and a new record supersedes but never overwrites the previous one. <span class="avail">Planned; record schema available.</span></li>
+  <li><b>Correct and fit.</b> CHSH, HOM visibility and tomography are computed through the forward model, with calibration uncertainty propagated by joint Monte Carlo sampling. Every result returns its raw value first, its corrected value where permitted, and its labels (Listing 2). <span class="avail">Raw CHSH and visibility available; corrected values planned.</span></li>
+  <li><b>Explain.</b> When a result changes between runs, the analysis is recomputed with each identifiable cause held at its earlier value (Section 7). <span class="avail">Planned.</span></li>
+  <li><b>Archive.</b> Time tags from calibration windows and declared runs are stored in Photon-HDF5 <span class="cite">[9]</span> with a <code>/calibration</code> group recording which records were applied, in what order, and with which software versions. <span class="avail">Schema available; export planned.</span></li>
+</ol>
+
+<div class="listing">
+  <div class="lcap"><b>Listing 1.</b> Excerpt of the bundled example configuration, <code>examples/chsh-spad/setup.yaml</code>.</div>
+<pre>schema_version: 1
+name: chsh-spad
+detectors:
+  A+: { family: si-spad-module, efficiency: 0.5, dark_rate_cps: 500, dead_time_ps: 22000 }
+analysis:
+  type: chsh
+  window: { width_ps: 2000, source: plan }   <span class="c"># declared before acquisition</span></pre>
+</div>
+
+<div class="listing">
+  <div class="lcap"><b>Listing 2.</b> Output of the bundled example on simulated data (version 0.0.2).</div>
+<pre>$ dadl quickstart chsh-spad
+  Raw S = 2.6890 ± 0.0105
+  Labels: fair sampling assumed (post-selected on coincidences)
+  Closed-form expectation (ignores dead time and afterpulsing): S = 2.6863</pre>
+</div>
+
+<!-- ========== 6 ========== -->
+<h2 id="guardrails"><span class="num">6</span>Guardrails</h2>
+<p>A tool that improves reported numbers will be used to improve reported numbers. DADL therefore treats the validity of a correction as a property of the analysis, enforced in code. Each analysis type declares which corrections may appear, always as a labelled secondary value; a forbidden correction raises an error rather than a warning. Figure 5 shows the case from Section 3.2 as it is handled by the current release.</p>
+
+<figure id="fig5">
+  <div class="fig">
+    <svg viewBox="0 18 760 218" role="img" aria-label="Figure 5: raw visibility of 45 percent and accidental-subtracted visibility of 82 percent relative to the 71 percent Bell threshold">
+      <defs>
+        <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern>
+      </defs>
+      <!-- x = 200 + 5 * percent -->
+      <path class="f-thin" d="M200 40V178M325 40V178M450 40V178M575 40V178M700 40V178"/>
+      <rect class="f-shade" x="200" y="62" width="225" height="34"/>
+      <rect class="f-hatch" x="200" y="122" width="410" height="34"/>
+      <text x="24" y="84" class="tx">Raw counts</text>
+      <text x="24" y="144" class="tx">Accidentals subtracted</text>
+      <text x="433" y="84" class="tx-b">0.45</text>
+      <text x="618" y="144" class="tx-b">0.82</text>
+      <text x="656" y="144" class="tx-red">refused</text>
+      <path class="f-dash" d="M555 36V178"/>
+      <text x="555" y="30" class="tx-i" text-anchor="middle">1/√2 ≈ 0.71</text>
+      <path class="f-line" d="M200 182H700M200 182V187M325 182V187M450 182V187M575 182V187M700 182V187"/>
+      <text x="200" y="201" class="tx-m" text-anchor="middle">0</text>
+      <text x="325" y="201" class="tx-m" text-anchor="middle">0.25</text>
+      <text x="450" y="201" class="tx-m" text-anchor="middle">0.50</text>
+      <text x="575" y="201" class="tx-m" text-anchor="middle">0.75</text>
+      <text x="700" y="201" class="tx-m" text-anchor="middle">1</text>
+      <text x="450" y="222" class="tx-s" text-anchor="middle">two-photon fringe visibility <tspan class="tx-i">V</tspan></text>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 5.</span> Visibility from the same counts before (solid) and after (hatched) subtracting accidentals, after Ref. <span class="cite">[6]</span>; the dashed line is the threshold 1/√2 for a CHSH violation under fair sampling. For Bell-type analyses DADL rejects the subtraction. If a user loosens the policy, the result is still returned with the raw value 0.45 first and the labels <i>policy modified</i> and <i>threshold crossed only after correction</i>. This case is part of the automated test suite.</figcaption>
+</figure>
+
+<p>The rules enforced in the current release are:</p>
+<ul class="tight">
+  <li>raw and corrected values are always returned together, and a result cannot be converted to a bare number;</li>
+  <li>Bell-type headline values use raw counts and fixed coincidence windows declared before acquisition;</li>
+  <li>every coincidence-normalized <i>S</i> is labelled as assuming fair sampling;</li>
+  <li>analyses that DADL does not know, including third-party plugins, receive the strictest policy.</li>
+</ul>
+<p>Because DADL is distributed as a starter kit, its policy can be edited. Loosening a rule requires a written reason, and any policy whose content differs from the shipped default is detected by its hash and labels every result computed under it.</p>
+
+<!-- ========== 7 ========== -->
+<h2 id="attribution"><span class="num">7</span>Attribution of drift</h2>
+<p>When a result changes between runs, the usual explanation is a conjecture. DADL is designed to replace it with a computation: the analysis is repeated with each identifiable group of parameters held at its earlier value, the change is divided among those groups by Shapley attribution, and any part not reproduced by the model is reported as misfit. Figure 6 illustrates the intended output.</p>
+
+<figure id="fig6">
+  <div class="fig">
+    <svg viewBox="0 36 760 294" role="img" aria-label="Figure 6: illustrative attribution of a drop in S from 2.60 to 2.30 among dark counts, delay drift, pump power and model misfit">
+      <defs>
+        <pattern id="hatch6" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch-line"/></pattern>
+      </defs>
+      <!-- y = 280 - (S - 2.20) * 533.33 -->
+      <path class="f-thin" d="M100 280H736M100 226.7H736M100 173.3H736M100 120H736M100 66.7H736"/>
+      <path class="f-line" d="M100 60V280"/>
+      <text x="92" y="284" class="tx-m" text-anchor="end">2.2</text>
+      <text x="92" y="230.7" class="tx-m" text-anchor="end">2.3</text>
+      <text x="92" y="177.3" class="tx-m" text-anchor="end">2.4</text>
+      <text x="92" y="124" class="tx-m" text-anchor="end">2.5</text>
+      <text x="92" y="70.7" class="tx-m" text-anchor="end">2.6</text>
+      <text x="30" y="173" class="tx-i">S</text>
+      <path class="f-tick" d="M110 66.7H190"/>
+      <text x="150" y="58" class="tx-b" text-anchor="middle">2.60</text>
+      <path class="f-dash" d="M190 66.7H215M295 178.7H320M400 200H425M505 216H530M610 226.7H635"/>
+      <rect class="f-shade" x="215" y="66.7" width="80" height="112"/>
+      <rect class="f-shade" x="320" y="178.7" width="80" height="21.3"/>
+      <rect class="f-shade" x="425" y="200" width="80" height="16"/>
+      <rect x="530" y="216" width="80" height="10.7" style="fill:url(#hatch6);stroke:var(--ink);stroke-width:1"/>
+      <path class="f-line" d="M255 157.4V200M249 157.4H261M249 200H261"/>
+      <path class="f-line" d="M360 189.3V210.7M354 189.3H366M354 210.7H366"/>
+      <path class="f-line" d="M465 205.3V226.7M459 205.3H471M459 226.7H471"/>
+      <text x="255" y="58" class="tx" text-anchor="middle">−0.21 ± 0.04</text>
+      <text x="360" y="170" class="tx" text-anchor="middle">−0.04 ± 0.02</text>
+      <text x="465" y="192" class="tx" text-anchor="middle">−0.03 ± 0.02</text>
+      <text x="570" y="208" class="tx" text-anchor="middle">−0.02</text>
+      <path class="f-tick" d="M635 226.7H715"/>
+      <text x="675" y="216" class="tx-b" text-anchor="middle">2.30</text>
+      <text x="150" y="302" class="tx" text-anchor="middle">run 1</text>
+      <text x="255" y="302" class="tx" text-anchor="middle">dark counts</text>
+      <text x="255" y="318" class="tx-s" text-anchor="middle">detector B</text>
+      <text x="360" y="302" class="tx" text-anchor="middle">delay drift</text>
+      <text x="465" y="302" class="tx" text-anchor="middle">pump power</text>
+      <text x="570" y="302" class="tx" text-anchor="middle">misfit</text>
+      <text x="570" y="318" class="tx-s" text-anchor="middle">not explained</text>
+      <text x="675" y="302" class="tx" text-anchor="middle">run 2</text>
+    </svg>
+  </div>
+  <figcaption><span class="lab">Figure 6.</span> Illustrative attribution of a decrease in <i>S</i> from 2.60 to 2.30 between two runs; values are hypothetical. Shaded bars are contributions with 1σ intervals; the hatched bar is the difference between the observed change and the change predicted by the model. A 40% rise in one detector's dark-count rate produces a decrease of this size only if dark-count accidentals were already about one third of true coincidences, as on long, lossy links; on a bright source the same rise has a negligible effect, and the attribution would show this. Parameters that the data cannot separate, such as source brightness and fiber coupling without a heralding reference, are reported jointly as indistinguishable rather than divided arbitrarily.</figcaption>
+</figure>
+
+<!-- ========== 8 ========== -->
+<h2 id="benefits"><span class="num">8</span>Benefits</h2>
+<p>Table 1 summarizes the practical difference DADL is intended to make to routine questions in a single-photon laboratory.</p>
+
+<div class="tcap"><span class="lab">Table 1.</span> Routine questions with and without DADL.</div>
+<div class="table">
+<table>
+  <thead><tr><th style="width:28%">Question</th><th style="width:34%">Common practice</th><th>With DADL</th></tr></thead>
+  <tbody>
+    <tr><td>What is the detector efficiency now?</td><td>Datasheet value or an old calibration</td><td>Versioned record from current data, with uncertainty and provenance</td></tr>
+    <tr><td>How large are the error bars?</td><td>Poisson errors on counts</td><td>Counting and calibration uncertainty propagated jointly</td></tr>
+    <tr><td>Did a correction inflate the result?</td><td>Depends on the analysis script</td><td>Raw value always reported; invalid corrections rejected; threshold crossings labelled</td></tr>
+    <tr><td>Why did the result change?</td><td>Conjecture and re-measurement</td><td>Attribution with intervals and an explicit unexplained part</td></tr>
+    <tr><td>Can the number be reproduced?</td><td>Rarely; corrections undocumented</td><td>Each result cites its calibration records and software versions</td></tr>
+    <tr><td>Does it work across hardware?</td><td>Each vendor tool covers its own devices</td><td>One model across taggers and detector families; extensible adapters</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The benefits differ by user. For <b>quantum network testbeds</b>, where availability is the figure of merit, a continuous health monitor tracks each channel, flags latching and blinding, and exports metrics to an orchestrator, with each alert linked to its evidence. For <b>research laboratories</b> running Bell, HOM and tomography experiments, the gains are honest uncertainties, protection against loophole-prone procedures, and less time spent rebuilding calibration scripts. For <b>quantum key distribution developers</b>, DADL offers detector characterization along the lines of ETSI GS QKD 011 <span class="cite">[10]</span> and signed monitoring records for each key session; it never alters data in the security path, and its records document what was observed rather than prove security. For <b>teaching laboratories</b>, the simulator injects known imperfections, so that the effect of a dark count, an afterpulse or a dead-time loss on a Bell parameter can be observed and checked against closed-form results such as Eq. (2).</p>
+
+<!-- ========== 9 ========== -->
+<h2 id="limits"><span class="num">9</span>Limitations</h2>
+<p>Software cannot recover lost efficiency or timing resolution; DADL makes the imperfections of an inexpensive detector known, bounded and auditable, which is not the same as making it equivalent to a better one. Correcting for efficiency is equivalent to assuming fair sampling, so DADL cannot close the detection loophole: a loophole-free CHSH test requires a detection efficiency of about 82.84% <span class="cite">[11]</span>, or about 2/3 with Eberhard's inequality and non-maximally entangled states <span class="cite">[12]</span>. In a QKD security path DADL monitors and records only. Finally, all review of the design to date has been internal; published results are therefore encoded as automated tests, so that the guardrails are checked against an external reference on every change.</p>
+
+<!-- ========== 10 ========== -->
+<h2 id="status"><span class="num">10</span>Status and roadmap</h2>
+<p>DADL is pre-alpha. The first phase is released and tested: 11 Rust and 28 Python tests, including the published guardrail cases, pass on Windows, Linux and macOS. Subsequent phases are listed in Table 2 and specified in the <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md">design document</a>.</p>
+
+<div class="tcap"><span class="lab">Table 2.</span> Development phases.</div>
+<div class="table">
+<table>
+  <thead><tr><th style="width:26%">Phase</th><th>Scope</th><th style="width:14%">Status</th></tr></thead>
+  <tbody>
+    <tr><td>1. Simulator and schema</td><td>Time-tag simulator with injected imperfections; fixed-window coincidences; raw CHSH and visibility; guardrail policy; labelled results; calibration record schema; Rust core</td><td class="st">released</td></tr>
+    <tr><td>2. Calibration engine</td><td>Dark counts, dead time, afterpulsing, delay and timing response, heralding efficiency, off-peak accidentals; Swabian and PicoQuant adapters</td><td class="st">next</td></tr>
+    <tr><td>3. Inference</td><td>Forward model; joint Monte Carlo uncertainty; corrected CHSH, HOM and tomography with bias-aware intervals; signed analysis plans</td><td class="st">planned</td></tr>
+    <tr><td>4. Attribution and agents</td><td>Attribution engine; typed MCP tools with human approval for hazardous instrument changes</td><td class="st">planned</td></tr>
+    <tr><td>5. Hardware pilot</td><td>One research laboratory and one network testbed; comparison of inexpensive and reference detectors, published including disagreements</td><td class="st">planned</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="availability">Availability</h2>
+<p class="avail-box">Source code, documentation and the design document are at <a href="https://github.com/usecommon/dadl">github.com/usecommon/dadl</a>, dual-licensed under MIT or Apache-2.0. The Python package is published as <a href="https://pypi.org/project/dadl-quantum/"><code>dadl-quantum</code></a> on PyPI and the Rust core as <a href="https://crates.io/crates/dadl"><code>dadl</code></a> on crates.io; the import name and the command-line tool are both <code>dadl</code>. The example in Listing 2 is reproduced by <code>pip install dadl-quantum</code> followed by <code>dadl quickstart chsh-spad</code>.</p>
+
+<h2 id="refs">References</h2>
+<ol class="refs">
+  <li>A. Migdall <i>et al.</i>, “High accuracy calibration of photon-counting detectors ‘on demand’,” <i>Proc. SPIE</i> 6583. <a href="https://physics.nist.gov/Divisions/Div844/publications/migdall/SPIE65830A_Calibration_On_Demand.pdf">NIST</a></li>
+  <li>National Institute of Standards and Technology, <i>Single-Photon Sources and Detectors</i>, NIST IR 8486r1 (2025). <a href="https://nvlpubs.nist.gov/nistpubs/ir/2025/NIST.IR.8486r1.pdf">doi/pdf</a></li>
+  <li>Excelitas Technologies, <i>SPCM-AQRH single-photon counting module datasheet</i>, Rev. 2023-1. <a href="https://www.excelitas.com/file-download/download/public/103899?filename=SPCM_User_Manual.pdf">pdf</a></li>
+  <li>“Free-running waveguide-integrated single-photon avalanche detectors for visible light,” arXiv:2606.22863 (2026). <a href="https://arxiv.org/abs/2606.22863">arXiv</a></li>
+  <li>Optical crosstalk in SiPM-based detectors, <i>Frontiers in Physics</i> (2025), doi:10.3389/fphy.2025.1603556. <a href="https://www.frontiersin.org/journals/physics/articles/10.3389/fphy.2025.1603556/full">link</a></li>
+  <li>C. H. Thompson, “Subtraction of ‘accidentals’ and the validity of Bell tests,” arXiv:quant-ph/9903066 (1999). <a href="https://arxiv.org/abs/quant-ph/9903066">arXiv</a></li>
+  <li>B. G. Christensen <i>et al.</i>, “Analysis of coincidence-time loopholes in experimental Bell tests,” arXiv:1503.07573 (2015). <a href="https://arxiv.org/abs/1503.07573">arXiv</a></li>
+  <li>C. Schwemmer <i>et al.</i>, “Systematic errors in current quantum state tomography tools,” <i>Phys. Rev. Lett.</i> 114, 080403 (2015). <a href="https://doi.org/10.1103/PhysRevLett.114.080403">doi</a></li>
+  <li>A. Ingargiola <i>et al.</i>, Photon-HDF5 format definition, version 0.4. <a href="https://photon-hdf5.readthedocs.io/en/0.4/phdata.html">docs</a></li>
+  <li>ETSI, <i>Quantum Key Distribution; Component characterization: characterizing optical components for QKD systems</i>, GS QKD 011 V1.1.1 (2016). <a href="https://standict.eu/standards-repository/etsi-gs-qkd-011-v111">record</a></li>
+  <li>J.-Å. Larsson <i>et al.</i>, “Bell violation with entangled photons, free of the coincidence-time loophole,” arXiv:1309.0712 (2013). <a href="https://arxiv.org/abs/1309.0712">arXiv</a></li>
+  <li>P. H. Eberhard, “Background level and counter efficiencies required for a loophole-free Einstein–Podolsky–Rosen experiment,” <i>Phys. Rev. A</i> 47, R747 (1993). <a href="https://doi.org/10.1103/PhysRevA.47.R747">doi</a></li>
+</ol>
+
+<footer>
+  DADL v0.0.2 · <a href="https://github.com/usecommon/dadl">Source</a> · <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md">Design document</a> · <a href="https://github.com/usecommon/dadl/issues">Issues</a> · MIT OR Apache-2.0
+</footer>
+</article>
+</body>
+</html>

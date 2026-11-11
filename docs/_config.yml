@@ -1,0 +1,4 @@
+# GitHub Pages configuration (Settings > Pages > Deploy from a branch: main, /docs).
+# docs/index.html is a self-contained styled page and is published as-is.
+title: "DADL: Detector-Aware Data Layer"
+description: "Detector-Aware Data Layer for quantum optics experiments"

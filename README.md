@@ -9,6 +9,10 @@ into Bell S, visibility and fidelity. It always reports raw and corrected
 values side by side, and it refuses corrections that would make a result look
 better than the data supports.
 
+**Read the overview:** [usecommon.github.io/dadl](https://usecommon.github.io/dadl/),
+a short technical report on the problem DADL solves, how it is used in an
+experiment, its guardrails and its roadmap.
+
 > **Status: pre-alpha, phase 1.** The simulator, closed-form tests and the
 > guardrail regression cases are in place. Calibration fits, vendor adapters,
 > the explain engine and the MCP agent surface come in later phases. See
@@ -62,7 +66,7 @@ cargo test --workspace
 | `examples/` | Example setups, starting with `chsh-spad` |
 | `adapters/` | Vendor adapters (phase 2 onward) |
 | `mcp/` | MCP agent surface (phase 4) |
-| `docs/` | Design doc and MkDocs site |
+| `docs/` | Design doc and the GitHub Pages site (`docs/index.html`) |
 
 The Python package is pure NumPy in phase 1. PyO3 bindings to the Rust core
 arrive in phase 2, built as abi3 wheels with maturin.
