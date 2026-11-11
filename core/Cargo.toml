@@ -1,0 +1,11 @@
+[package]
+name = "dadl-core"
+description = "Per-tag processing core for DADL, the Detector-Aware Data Layer for quantum optics experiments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme = "../README.md"
+
+[dependencies]

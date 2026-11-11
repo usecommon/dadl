@@ -1,0 +1,38 @@
+# CHSH with a polarization-entangled SPDC source and four Si SPAD modules.
+# Phase 1 runs on the simulator; the same file will point at a tagger later.
+schema_version: 1
+name: chsh-spad
+
+backend: sim
+seed: 2026
+
+source:
+  type: spdc-cw
+  pair_rate_per_s: 1.0e5
+  visibility: 0.95
+
+# Ground truth for the simulator. On hardware these become calibration targets.
+detectors:
+  A+: &spad
+    family: si-spad-module
+    efficiency: 0.5
+    dark_rate_cps: 500
+    dead_time_ps: 22000
+    jitter_sigma_ps: 350
+    afterpulse_prob: 0.005
+    afterpulse_tau_ps: 50000
+    delay_ps: 0
+  A-: *spad
+  B+: *spad
+  B-: *spad
+
+analysis:
+  type: chsh
+  settings_deg: {a: 0.0, "a'": 45.0, b: 22.5, "b'": 67.5}
+  duration_s_per_setting: 1.0
+  # Declared before acquisition. Windows chosen from the data are refused.
+  window:
+    width_ps: 2000
+    source: plan
+
+policy: default

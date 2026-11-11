@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dadl"
+version = "0.0.1"
+description = "Detector-Aware Data Layer for quantum optics experiments"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/usecommon/dadl"
+Documentation = "https://github.com/usecommon/dadl/blob/main/docs/design.md"
+Issues = "https://github.com/usecommon/dadl/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+dadl = "dadl.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dadl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
