@@ -144,12 +144,20 @@ class CoverageResult:
         return "\n".join(lines)
 
 
+def _children(seed: int, replicates: int, part: range | None):
+    """The SeedSequence of each replicate, child i of `seed`; `part` selects a subset of indices."""
+    for i in range(replicates) if part is None else part:
+        yield np.random.SeedSequence(seed, spawn_key=(i,))
+
+
 def gate(replicates: int, n_params: int) -> tuple[float, float]:
     """Accepted coverage range: binomial band at confidence 1 - FALSE_FAIL / n_params."""
     return coverage_band(replicates, confidence=1 - FALSE_FAIL / n_params)
 
 
-def dark_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "si-spad") -> CoverageResult:
+def dark_coverage(
+    replicates: int = 1000, seed: int = 20261111, regime: str = "si-spad", part: range | None = None
+) -> CoverageResult:
     det, duration_s = DARK_REGIMES[regime]
     truth = {
         "dark_rate_cps": det.dark_rate_cps,
@@ -159,7 +167,7 @@ def dark_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "s
     }
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in np.random.SeedSequence(seed).spawn(replicates):
+    for child in _children(seed, replicates, part):
         sim_rng, fit_seed = child.spawn(2)
         tags = simulate_dark(det, duration_s, np.random.default_rng(sim_rng))
         cal = calibrate_dark(tags, channel, backend="sim", seed=fit_seed.generate_state(1)[0], n_draws=10)
@@ -199,14 +207,16 @@ def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
     }
 
 
-def pairs_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "cw-spad") -> list[CoverageResult]:
+def pairs_coverage(
+    replicates: int = 1000, seed: int = 20261111, regime: str = "cw-spad", part: range | None = None
+) -> list[CoverageResult]:
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
     r = PAIR_REGIMES[regime]
     truth = pairs_truth(regime)
     covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items()}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
-    for child in np.random.SeedSequence(seed).spawn(replicates):
+    for child in _children(seed, replicates, part):
         sim_rng, fit_seed = child.spawn(2)
         a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(sim_rng))
         s = int(fit_seed.generate_state(1)[0])
@@ -223,12 +233,12 @@ def pairs_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "
     ]
 
 
-def dcr_coverage(replicates: int = 1000, seed: int = 20261111) -> CoverageResult:
+def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
     """DCR(T) gate: dark calibrations at each temperature, then the Arrhenius fit."""
     truth = {"dcr_ref_cps": DCR_REF_CPS, "activation_energy_ev": DCR_EA_EV}
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in np.random.SeedSequence(seed).spawn(replicates):
+    for child in _children(seed, replicates, part):
         streams = child.spawn(len(DCR_TEMPS_K) + 1)
         darks = []
         for t_k, stream in zip(DCR_TEMPS_K, streams):
@@ -251,25 +261,50 @@ UNITS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _unit(args: tuple[str, str, int, int]) -> list[CoverageResult]:
-    name, regime, replicates, seed = args
+#: Replicates per parallel task: small enough to keep every core busy to the end.
+CHUNK = 125
+
+
+def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]:
+    name, regime, replicates, seed, part = args
     if name == "dark":
-        return [dark_coverage(replicates, seed, regime)]
+        return [dark_coverage(replicates, seed, regime, part)]
     if name == "pairs":
-        return pairs_coverage(replicates, seed, regime)
-    return [dcr_coverage(replicates, seed)]
+        return pairs_coverage(replicates, seed, regime, part)
+    return [dcr_coverage(replicates, seed, part)]
+
+
+def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
+    first = parts[0]
+    covered = {k: sum(p.covered[k] for p in parts) for k in first.covered}
+    return CoverageResult(first.calibration, replicates, covered, first.gate, first.at_least)
 
 
 def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) -> list[CoverageResult]:
-    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all")."""
+    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all").
+
+    With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
+    always uses child i of `seed`, so the result does not depend on `jobs`.
+    """
     names = list(UNITS) if name == "all" else [name]
     if any(n not in UNITS for n in names):
         raise ValueError(f"unknown calibration {name!r}")
-    units = [(n, r, replicates, seed) for n in names for r in UNITS[n]]
-    if jobs > 1:
-        with ProcessPoolExecutor(jobs) as ex:
-            return [res for part in ex.map(_unit, units) for res in part]
-    return [res for u in units for res in _unit(u)]
+    units = [(n, r) for n in names for r in UNITS[n]]
+    if jobs <= 1:
+        return [res for n, r in units for res in _unit((n, r, replicates, seed, None))]
+    tasks = [
+        (n, r, replicates, seed, range(lo, min(lo + CHUNK, replicates)))
+        for n, r in units
+        for lo in range(0, replicates, CHUNK)
+    ]
+    with ProcessPoolExecutor(jobs) as ex:
+        parts = list(ex.map(_unit, tasks))
+    out: list[CoverageResult] = []
+    for n, r in units:
+        mine = [res for t, part in zip(tasks, parts) if (t[0], t[1]) == (n, r) for res in part]
+        for cal in dict.fromkeys(res.calibration for res in mine):
+            out.append(_merge([res for res in mine if res.calibration == cal], replicates))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

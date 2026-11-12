@@ -162,10 +162,13 @@ def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarra
     starts = []
     if warm is not None:
         starts.append(np.clip(np.asarray(warm, dtype=float)[free], [bounds[j][0] for j in free], [bounds[j][1] for j in free]))
+    # A warm start from the fit plus one spread start finds the profile minimum (checked against
+    # three or more starts in the calibration probes); without a warm start, spread starts only.
+    extra = 1 if warm is not None else 3
     if index == 1:
-        starts += [np.array([math.log(r0), z]) for z in np.linspace(bounds[2][0], bounds[2][1], 3)]
+        starts += [np.array([math.log(r0), z]) for z in np.linspace(bounds[2][0], bounds[2][1], extra + 2)[1:-1]]
     else:
-        starts += [np.array([math.log(r0), y]) for y in (math.log(0.01 / 0.99), math.log(0.1 / 0.9))]
+        starts += [np.array([math.log(r0), y]) for y in np.linspace(math.log(0.01 / 0.99), math.log(0.1 / 0.9), extra)]
     best = math.inf
     for x0 in starts:
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
@@ -187,8 +190,8 @@ def _profile_interval(
 
     lo_lim, hi_lim = limits
     centre = min(max(centre, lo_lim), hi_lim)
-    hi = hi_lim if excess(hi_lim) < 0 else optimize.brentq(excess, centre, hi_lim, xtol=1e-3)
-    lo = lo_lim if centre <= lo_lim or excess(lo_lim) < 0 else optimize.brentq(excess, lo_lim, centre, xtol=1e-3)
+    hi = hi_lim if excess(hi_lim) < 0 else optimize.brentq(excess, centre, hi_lim, xtol=1e-2)
+    lo = lo_lim if centre <= lo_lim or excess(lo_lim) < 0 else optimize.brentq(excess, lo_lim, centre, xtol=1e-2)
     return lo, hi
 
 
@@ -266,19 +269,19 @@ def _p_upper_limit(s: np.ndarray, nll_null: float, log_r0: float) -> tuple[float
             lambda x: -_MODEL.log_likelihood(s, np.array([x, logit_p, log_ta])),
             bounds=(log_r0 - 1.0, log_r0 + 1.0),
             method="bounded",
-            options={"xatol": 1e-7},
+            options={"xatol": 1e-6},
         )
         return float(res.fun)
 
     limit = 0.0
-    for log_ta in np.linspace(math.log(lo_tau), math.log(hi_tau), 12):
+    for log_ta in np.linspace(math.log(lo_tau), math.log(hi_tau), 6):
         def excess(y: float, log_ta: float = log_ta) -> float:
             return 2.0 * (nll_profile_r(y, log_ta) - nll_null) - target
 
         lo, hi = -15.0, 6.0
         if excess(hi) < 0:
             return 1.0, lo_tau, hi_tau
-        y = lo if excess(lo) > 0 else optimize.brentq(excess, lo, hi, xtol=1e-3)
+        y = lo if excess(lo) > 0 else optimize.brentq(excess, lo, hi, xtol=1e-2)
         limit = max(limit, float(expit(y)))
     return limit, lo_tau, hi_tau
 
