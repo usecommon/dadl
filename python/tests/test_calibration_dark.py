@@ -129,7 +129,7 @@ def test_gate_is_bonferroni_corrected():
     lo1, hi1 = gate(1000, 1)
     lo4, hi4 = gate(1000, 4)
     assert lo4 < lo1 < 0.95 < hi1 < hi4
-    assert math.isclose(lo1, 0.931, abs_tol=0.002) and math.isclose(hi1, 0.967, abs_tol=0.002)
+    assert math.isclose(lo1, 0.926, abs_tol=0.002) and math.isclose(hi1, 0.971, abs_tol=0.002)
 
 
 @pytest.mark.coverage

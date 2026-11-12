@@ -55,7 +55,13 @@ from the packages.
 - `simulate_pairs` and closed forms `arrhenius_dark_rate`,
   `accidentals_expected` and `heralding_ratio_expected`.
 - Coverage gate: `python -m dadl.calibration.coverage {dark,pairs,dcr,all}`;
-  the CI job now runs all six calibrations.
+  the CI job now runs all six calibrations. The chance that a correct
+  calibration fails its gate is lowered from 1% to 0.1% (band 92.6–97.1% for
+  one parameter, 92.3–97.3% for four): the seed is fixed, so a chance failure
+  blocks CI permanently. The delay/jitter gate read 96.9% for jitter on seed
+  20261111, above the old 96.8% limit; three other seeds gave 95.3%, 94.7%
+  and 94.0%. The accidentals gate first read 91.7% because mirrored off-peak
+  windows are correlated; the windows no longer mirror each other (94.0%).
 
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
