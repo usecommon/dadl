@@ -86,13 +86,28 @@ def shifted_coincidences(
     return out
 
 
-def dispersion_pvalue(counts: np.ndarray) -> float:
-    """Upper-tail p-value of the Poisson dispersion statistic (small values flag structure)."""
+#: Below this mean count per window the chi-square approximation to the dispersion test fails
+#: (it flagged 4.5% of good sparse runs at p < 0.01), so the exact conditional test is used.
+EXACT_BELOW = 5.0
+
+
+def dispersion_pvalue(counts: np.ndarray, n_sim: int = 2000) -> float:
+    """Upper-tail p-value of the Poisson dispersion statistic (small values flag structure).
+
+    With few counts per window the p-value is exact: given the total, Poisson counts are
+    multinomial with equal cells, which is simulated with a fixed seed.
+    """
+    counts = np.asarray(counts)
     m = float(np.mean(counts))
     if counts.size < 2 or m <= 0:
         return 1.0
     stat = float(np.sum((counts - m) ** 2) / m)
-    return float(_st.chi2.sf(stat, counts.size - 1))
+    if m >= EXACT_BELOW:
+        return float(_st.chi2.sf(stat, counts.size - 1))
+    total = int(counts.sum())
+    sims = np.random.default_rng(0).multinomial(total, np.full(counts.size, 1.0 / counts.size), size=n_sim)
+    sim_stat = np.sum((sims - m) ** 2, axis=1) / m
+    return float((1 + np.sum(sim_stat >= stat - 1e-9)) / (n_sim + 1))
 
 
 def _span_s(*streams: np.ndarray) -> float:
