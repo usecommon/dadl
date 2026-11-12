@@ -6,6 +6,30 @@ from the packages.
 
 ## Unreleased
 
+### Phase 2, milestone 1: data model and the dark calibration
+
+- `dadl calibrate dark` and `dadl.calibration.calibrate_dark`: dark rate,
+  afterpulse probability and time constant, and dead time, fitted jointly from
+  one dark acquisition's inter-arrival gaps (maximum likelihood, Laplace
+  posterior; an upper limit on afterpulsing when none is detected), with a
+  posterior predictive check.
+- `dadl.artifact`: content-addressed calibration artifacts (RFC 8785 canonical
+  manifest, SHA-256 ID, `.npy` posterior table), verified on read. JCS test
+  vectors in `tests/vectors/jcs.json`.
+- `dadl.data` (`ChannelId`, `TagSet`, `Dataset`), `dadl.models`
+  (`DetectorModel`), `dadl.stats` (Wilson, Clopper–Pearson, Beta and Gamma
+  posteriors, Laplace).
+- `schema/setup-1.schema.json` for `setup.yaml`. `calibration/1` (still a
+  draft) gains `summary`, `notes` and `unidentified_params`, and the `npy`
+  posterior format.
+- `dadl simulate --dark` writes dark acquisitions for calibration.
+- Simulator: afterpulsing is self-exciting (afterpulses cascade and every
+  avalanche starts dead time), matching the closed form
+  `closed_form.dark_afterpulse_rate`. Simulated tags for a given seed differ
+  from 0.0.3; the quickstart prints S = 2.6941 instead of 2.6890.
+- CI: a coverage job runs the 1,000-replicate gate on every pull request.
+- New dependency: SciPy (>= 1.10).
+
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
 

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/usecommon/dadl/main/schema/setup-1.schema.json",
+  "title": "DADL setup file, schema_version 1",
+  "description": "The structure of setup.yaml. dadl.config.load_setup enforces this and more (values must be finite, the channel map must cover A+, A-, B+, B- exactly once). Units are in key names: _ps picoseconds, _cps counts per second, _s seconds, _deg degrees.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "source", "detectors", "analysis"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "backend": {"enum": ["sim", "file"], "default": "sim"},
+    "seed": {"type": ["integer", "null"], "minimum": 0},
+    "policy": {"const": "default"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string"},
+        "pair_rate_per_s": {"type": "number", "minimum": 0},
+        "visibility": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "detectors": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/detector"}
+    },
+    "channels": {
+      "description": "Tag-file channel numbers mapped to channel names.",
+      "type": "object",
+      "propertyNames": {"pattern": "^[0-9]+$"},
+      "additionalProperties": {"enum": ["A+", "A-", "B+", "B-"]}
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "window"],
+      "properties": {
+        "type": {"const": "chsh"},
+        "settings_deg": {
+          "type": "object",
+          "required": ["a", "a'", "b", "b'"],
+          "additionalProperties": {"type": "number"}
+        },
+        "duration_s_per_setting": {"type": "number", "exclusiveMinimum": 0},
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width_ps", "source"],
+          "properties": {
+            "width_ps": {"type": "integer", "minimum": 1},
+            "source": {"const": "plan"},
+            "delays_ps": {
+              "type": "object",
+              "additionalProperties": {"type": "integer"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "detector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": {"type": "string"},
+        "efficiency": {"type": "number", "minimum": 0, "maximum": 1},
+        "dark_rate_cps": {"type": "number", "minimum": 0},
+        "dead_time_ps": {"type": "integer", "minimum": 0},
+        "jitter_sigma_ps": {"type": "number", "minimum": 0},
+        "afterpulse_prob": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+        "afterpulse_tau_ps": {"type": "number", "minimum": 0},
+        "delay_ps": {"type": "integer"}
+      }
+    }
+  }
+}

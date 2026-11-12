@@ -13,13 +13,19 @@ result look better than the data supports.
 a short technical report on the problem DADL solves, how it is used in an
 experiment, its guardrails and its roadmap.
 
-> **Status: pre-alpha, phase 1 (partial).** Anything may change in 0.0.x. The
+> **Status: pre-alpha, phase 1 (partial), phase 2 in progress.** Anything may change in 0.0.x. The
 > canonical phase plan is in [docs/design.md](docs/design.md#mvp-scope-and-milestones).
 
 ## What works today (v0.0.3)
 
 - A seeded time-tag simulator with injected efficiency, dark counts,
-  non-paralyzable dead time, jitter, delay and afterpulsing.
+  non-paralyzable dead time, jitter, delay and cascading afterpulsing.
+- **Calibration (phase 2, on `main`, unreleased):** dark rate, afterpulse
+  probability and time constant, and dead time fitted from a dark acquisition,
+  with 95% intervals whose coverage is checked in CI, written as
+  content-addressed artifacts:
+  `dadl simulate chsh-spad --dark --out dark.npz`, then
+  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`.
 - `setup.yaml` drives everything: copy it with `dadl init`, edit it, run it.
 - Raw CHSH S from fixed-grid coincidences with a planned window, from
   simulated tags or **your own tags** (`dadl analyze`).
@@ -28,7 +34,7 @@ experiment, its guardrails and its roadmap.
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 
-Not yet: calibration fits, calibration uncertainty, corrected CHSH, signing,
+Not yet: the other calibrations, calibration uncertainty in results, corrected CHSH, signing,
 vendor adapters, the explain engine, MCP. Uncertainties today are statistical
 only (Gaussian, 1σ).
 
@@ -130,7 +136,7 @@ implementation in phase 1, and both are held to the shared cases in
 | `core/` | Rust core (`dadl` crate): dead time, fixed-grid coincidences, histograms |
 | `python/` | Python package `dadl`: simulator, analyses, guardrails, config, tag files, CLI, tests |
 | `tests/vectors/` | Test cases shared by the Rust and Python suites |
-| `schema/` | JSON Schema for calibration artifacts (`calibration/1`, draft) and a validated example |
+| `schema/` | JSON Schemas for calibration artifacts (`calibration/1`, draft) and `setup.yaml` (`setup-1`), with a validated example |
 | `examples/` | Example setups, starting with `chsh-spad` (also bundled in the package) |
 | `adapters/` | Vendor adapters (phase 2 onward) |
 | `mcp/` | MCP agent surface (v0.2+, seeking contributors) |

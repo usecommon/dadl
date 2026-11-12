@@ -6,18 +6,21 @@ names match setup.yaml (unit-suffixed).
 
 Units: time tags are int64 picoseconds; rates are per second.
 
-Phase 1 approximations, to be replaced by the self-exciting detection model
-in docs/design.md:
-- afterpulses are generated for one generation only (no cascades), and an
-  afterpulse that lands inside a later event's dead time is dropped, so the
-  effective afterpulse probability is slightly below `afterpulse_prob`;
-- crosstalk and breakdown flash are not simulated yet;
-- arrival times are drawn as float64 ps, exact to the picosecond only up to
-  2^53 ps (about 2.5 hours of simulated time per run).
+Detection is self-exciting, as in docs/design.md ("Detection process"):
+every recorded avalanche (photon, dark count or afterpulse) starts a
+non-paralyzable dead time and, with probability `afterpulse_prob`, schedules
+an afterpulse at the end of its dead time plus an exponential delay, so
+afterpulses cascade. An afterpulse that falls inside a later avalanche's dead
+time is lost.
+
+Not simulated yet: crosstalk and breakdown flash, and a separate TDC dead
+time. Arrival times are drawn as float64 ps, exact to the picosecond only up
+to 2^53 ps (about 2.5 hours of simulated time per run).
 """
 
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass
 
@@ -43,6 +46,7 @@ __all__ = [
     "poisson_times",
     "simulate_chsh",
     "simulate_chsh_setting",
+    "simulate_dark",
 ]
 
 
@@ -104,17 +108,56 @@ def detect(
     kept = kept + det.delay_ps
     darks = poisson_times(det.dark_rate_cps, duration_s, rng)
     arrivals = np.sort(np.rint(np.concatenate([kept, darks]))).astype(np.int64)
-    recorded = apply_nonparalyzable(arrivals, det.dead_time_ps)
+    if det.afterpulse_prob == 0:
+        return apply_nonparalyzable(arrivals, det.dead_time_ps)
+    return _self_exciting(arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng)
 
-    if det.afterpulse_prob > 0 and recorded.size:
-        mask = rng.random(recorded.size) < det.afterpulse_prob
-        n_ap = int(mask.sum())
-        if n_ap:
-            delays = det.dead_time_ps + rng.exponential(det.afterpulse_tau_ps, n_ap)
-            afterpulses = np.rint(recorded[mask] + delays).astype(np.int64)
-            merged = np.sort(np.concatenate([recorded, afterpulses]))
-            recorded = apply_nonparalyzable(merged, det.dead_time_ps)
-    return recorded
+
+def _self_exciting(
+    arrivals: np.ndarray, dead_time_ps: int, p: float, tau_ps: float, rng: np.random.Generator
+) -> np.ndarray:
+    """Dead time plus cascading afterpulses, event by event.
+
+    `arrivals` are sorted primary avalanche candidates (photons and dark
+    counts). Each recorded avalanche blocks the next `dead_time_ps` and, with
+    probability `p`, adds an afterpulse candidate at its dead-time end plus an
+    exponential delay with mean `tau_ps`.
+    """
+    out: list[int] = []
+    pending: list[int] = []  # afterpulse candidates (min-heap)
+    next_allowed: int | None = None
+    block = 4096
+    u = rng.random(block)
+    e = rng.exponential(tau_ps, block)
+    k = 0
+    primaries = arrivals.tolist()
+    i, n = 0, len(primaries)
+    while i < n or pending:
+        if pending and (i >= n or pending[0] <= primaries[i]):
+            t = heapq.heappop(pending)
+        else:
+            t = primaries[i]
+            i += 1
+        if next_allowed is not None and t < next_allowed:
+            continue
+        out.append(t)
+        next_allowed = t + dead_time_ps
+        if k == block:
+            u = rng.random(block)
+            e = rng.exponential(tau_ps, block)
+            k = 0
+        if u[k] < p:
+            heapq.heappush(pending, next_allowed + round(float(e[k])))
+        k += 1
+    return np.array(out, dtype=np.int64)
+
+
+def simulate_dark(det: DetectorParams, duration_s: float, rng: np.random.Generator) -> np.ndarray:
+    """Recorded tags of one detector with no light: dark counts, dead time and afterpulsing."""
+    _checks.finite(duration_s, "duration_s", minimum=0.0)
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    return detect(np.empty(0), det, duration_s, rng)
 
 
 def simulate_chsh_setting(

@@ -2,8 +2,9 @@
 
     dadl quickstart [chsh-spad | path/to/setup.yaml]   simulate and analyse an example
     dadl init [DIR]                                     copy the example setup.yaml into DIR
-    dadl simulate SETUP --out tags.npz                  write simulated tags in the tag-file format
+    dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S from your own tags
+    dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
     dadl version
 """
 
@@ -23,8 +24,8 @@ from dadl.closed_form import chsh_expected_grid
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
-from dadl.sim import simulate_chsh
-from dadl.tagfile import read_tags, write_tags
+from dadl.sim import simulate_chsh, simulate_dark
+from dadl.tagfile import SETTING_PAIRS, read_tags, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad",)
@@ -91,7 +92,9 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
         print(f"  Closed-form expectation (ignores dead time and afterpulsing): S = {expected:.4f}")
     print()
     print("  Edit a copy of this setup with `dadl init`, then `dadl quickstart setup.yaml`.")
-    print(f"  Calibration fits and corrected values arrive in phase 2. Overview: {SITE}")
+    print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
+    print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`.")
+    print(f"  Corrected values arrive in phase 3. Overview: {SITE}")
     return 0
 
 
@@ -107,10 +110,57 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _simulate_dark(setup: Setup, duration_s: float):
+    """One dark acquisition per channel (source off), stored as setting 0 of a tag file."""
+    if setup.backend != "sim":
+        raise DadlError(f"{setup.name}: backend is {setup.backend!r}; only 'sim' setups can be simulated")
+    if not duration_s > 0:
+        raise DadlError("--duration-s must be positive")
+    streams = np.random.SeedSequence(setup.seed).spawn(len(setup.channels))
+    dark = {
+        name: simulate_dark(setup.detectors[name], duration_s, np.random.default_rng(stream))
+        for (_num, name), stream in zip(sorted(setup.channels.items()), streams)
+    }
+    empty = {name: np.empty(0, dtype=np.int64) for name in dark}
+    return {pair: (dark if i == 0 else empty) for i, pair in enumerate(SETTING_PAIRS)}
+
+
 def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
-    out = write_tags(args.out, _simulate(setup), setup.channels)
-    print(f"Wrote simulated tags for {setup.name} to {out}")
+    if args.dark:
+        runs = _simulate_dark(setup, args.duration_s)
+        what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
+    else:
+        runs = _simulate(setup)
+        what = "CHSH tags"
+    out = write_tags(args.out, runs, setup.channels)
+    print(f"Wrote simulated {what} for {setup.name} to {out}")
+    return 0
+
+
+def cmd_calibrate_dark(args: argparse.Namespace) -> int:
+    from dadl.artifact import write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.data import ChannelId
+
+    setup = load_setup(_resolve(args.setup))
+    runs = read_tags(args.tags, setup.channels)
+    if not 0 <= args.setting < len(SETTING_PAIRS):
+        raise DadlError(f"--setting must be 0..{len(SETTING_PAIRS) - 1}")
+    tags = runs[SETTING_PAIRS[args.setting]]
+    number = {name: num for num, name in setup.channels.items()}
+    wanted = args.channel or [setup.channels[n] for n in sorted(setup.channels)]
+    unknown = [c for c in wanted if c not in number]
+    if unknown:
+        raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
+    backend = "sim" if setup.backend == "sim" else "hardware"
+    print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
+    for name in wanted:
+        cal = calibrate_dark(tags[name], ChannelId(name, number[name]), backend=backend, seed=setup.seed)
+        path = write_artifact(cal, args.out)
+        print()
+        print(cal)
+        print(f"  artifact: {path}")
     return 0
 
 
@@ -155,12 +205,29 @@ def build_parser() -> argparse.ArgumentParser:
     sim = sub.add_parser("simulate", help="write simulated tags from a setup in the tag-file format")
     sim.add_argument("setup", help="setup.yaml or a bundled example name")
     sim.add_argument("--out", required=True, help="output file, .npz or .csv")
+    sim.add_argument("--dark", action="store_true", help="simulate dark acquisitions (source off) for calibration")
+    sim.add_argument("--duration-s", type=float, default=20.0, help="dark acquisition length per channel (default 20)")
     sim.set_defaults(func=cmd_simulate)
 
     an = sub.add_parser("analyze", help="raw CHSH S from your own tag file")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
     an.add_argument("--tags", required=True, help="tag file, .npz or .csv (columns setting, channel, timestamp_ps)")
     an.set_defaults(func=cmd_analyze)
+
+    cal = sub.add_parser("calibrate", help="estimate detector parameters and write calibration artifacts")
+    cal_sub = cal.add_subparsers(dest="calibration", required=True)
+    dark = cal_sub.add_parser(
+        "dark",
+        help="dark rate, afterpulsing and dead time from a dark acquisition",
+        description="Fit each channel's dark rate, afterpulse probability and time constant, and dead time "
+        "from the gaps between dark counts. Writes one content-addressed artifact per channel.",
+    )
+    dark.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
+    dark.add_argument("--tags", required=True, help="tag file with the dark acquisition")
+    dark.add_argument("--setting", type=int, default=0, help="which setting index holds the dark data (default 0)")
+    dark.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
+    dark.add_argument("--out", required=True, help="directory for the artifacts")
+    dark.set_defaults(func=cmd_calibrate_dark)
 
     ver = sub.add_parser("version", help="print the version")
     ver.set_defaults(func=lambda _args: print(__version__) or 0)

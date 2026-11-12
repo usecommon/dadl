@@ -13,6 +13,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "scipy>=1.10",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -45,4 +46,8 @@ include = ["dadl", "tests", "README.md", "pyproject.toml", "LICENSE-MIT", "LICEN
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: statistical calibration checks (seconds, run in CI)"]
+markers = [
+    "slow: statistical calibration checks (seconds, run in CI)",
+    "coverage: 1,000-replicate interval coverage gates (minutes; run with -m coverage)",
+]
+addopts = "-m 'not coverage'"
