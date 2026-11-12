@@ -103,9 +103,10 @@ probed at six points, 1,000 replicates each (95% intervals; band about 92.6–97
 
 **What is still needed for higher coverage**, most important first:
 
-1. **A second regime in each CI gate.** Add the CMOS-SPAD regime to the dark gate, and a sparse
-   (low-rate SNSPD) and a broad-IRF regime to the pairs gate. Each runs in minutes with the
-   compiled core.
+1. **A second regime in each CI gate.** Done: the dark gate also runs a CMOS-SPAD regime, and the
+   pair gates a sparse low-rate SNSPD regime and a broad-IRF regime (12 gates in all, run in
+   parallel in CI). All pass on the pre-set seed 20261111. The broad-IRF regime first crashed the
+   delay fit (a starting width from a fixed +-50 bins, an unbounded fit); fixed and tested.
 2. **Misspecification tests per calibration.** Only the dark fit (two afterpulse time constants) and
    the delay fit (an exponential IRF tail) are tested against data their model cannot describe.
    Heralding needs multi-pair emission, accidentals need drifting rates, and DCR(T) needs a
