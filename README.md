@@ -40,6 +40,9 @@ experiment, its guardrails and its roadmap.
   read by DADL's own adapter (phase 2, on `main`).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
+- **Optional compiled core** (phase 2, on `main`): with `dadl-quantum-core`
+  installed, dead time, coincidences and histograms run in Rust (about 50x
+  faster); `dadl.backend()` says which is in use.
 
 Not yet: calibration uncertainty in results, corrected CHSH, signing,
 the explain engine, MCP. Uncertainties today are statistical
@@ -131,18 +134,23 @@ From a clone of this repository:
 pip install -e "./python[test]"
 pytest python/tests
 cargo test --workspace
+pip install ./bindings/python    # optional: the compiled core (needs Rust)
 ```
 
 The Rust core is pinned to the toolchain in `rust-toolchain.toml`; its
-minimum supported Rust version is 1.74. The Python package is the reference
-implementation in phase 1, and both are held to the shared cases in
-`tests/vectors/core.json`. PyO3 bindings to the Rust core arrive in phase 2.
+minimum supported Rust version is 1.74. The pure-Python package is the
+reference implementation; `bindings/python` (PyO3, built with maturin) puts
+the Rust core behind the same functions as the optional package
+`dadl-quantum-core`. Both backends are held to the shared cases in
+`tests/vectors/core.json`, and `python bindings/python/bench.py` compares
+their throughput (about 50x for dead time, coincidences and histograms).
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `core/` | Rust core (`dadl` crate): dead time, fixed-grid coincidences, histograms |
+| `bindings/python/` | PyO3 bindings: the optional `dadl-quantum-core` package (module `dadl_core`) |
 | `python/` | Python package `dadl`: simulator, analyses, guardrails, config, tag files, CLI, tests |
 | `tests/vectors/` | Test cases shared by the Rust and Python suites |
 | `schema/` | JSON Schemas for calibration artifacts (`calibration/1`, draft) and `setup.yaml` (`setup-1`), with a validated example |

@@ -88,6 +88,27 @@ from the packages.
   +0.5 ps, visible only when the jitter is a few bin widths.
 - `AdapterError` for malformed or unsupported vendor data.
 
+### Phase 2, milestone 4: Python bindings to the Rust core
+
+- `bindings/python`: a PyO3 crate (its own Cargo workspace) built with
+  maturin into the optional package `dadl-quantum-core` (module
+  `dadl_core`, abi3 wheels for Python 3.10+). It exposes dead time,
+  occupied slots, fixed-grid coincidences, inter-arrival and
+  cross-correlation histograms over NumPy int64 arrays, reading contiguous
+  arrays in place and releasing the GIL.
+- `dadl.backend()` and `DADL_BACKEND` (`python` / `rust`): `dadl` uses the
+  compiled core when it is installed, else the pure-Python reference.
+  Argument types are checked in Python for both; the shared vectors and
+  random-stream comparisons run on both backends.
+- `bindings/python/bench.py`: on 2,000,000 tags per channel (Apple M-series)
+  the core is 61x faster for the non-paralyzable filter, 47x for fixed-grid
+  coincidences, 48x for inter-arrival histograms and 5x for
+  cross-correlation (already vectorized in NumPy). Recorded, not gated.
+- CI: a bindings job builds the core on Windows, Linux and macOS and runs
+  every test with `DADL_BACKEND=rust`. Release: abi3 wheels (manylinux2014
+  x86-64 and aarch64, macOS universal2, Windows x64) and an sdist for
+  `dadl-quantum-core`, published with Trusted Publishing.
+
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
 

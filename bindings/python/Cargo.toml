@@ -1,0 +1,22 @@
+# Python bindings to the DADL core, published to PyPI as dadl-quantum-core
+# (import name dadl_core). A workspace of its own, so the core's
+# `cargo test --workspace`, clippy and MSRV checks never build PyO3.
+[workspace]
+
+[package]
+name = "dadl-core-python"
+version = "0.0.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+repository = "https://github.com/usecommon/dadl"
+publish = false
+
+[lib]
+name = "dadl_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+dadl = { path = "../../core" }
+numpy = "0.30"
+pyo3 = { version = "0.30", features = ["abi3-py310", "extension-module"] }

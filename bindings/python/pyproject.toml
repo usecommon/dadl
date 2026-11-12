@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "dadl-quantum-core"
+dynamic = ["version"]
+description = "Compiled per-tag core for dadl-quantum (Rust, optional): dead time, coincidences, histograms"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/usecommon/dadl"
+Documentation = "https://usecommon.github.io/dadl/"
+
+[tool.maturin]
+module-name = "dadl_core"
+features = []

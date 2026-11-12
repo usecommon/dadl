@@ -2,10 +2,15 @@
 
 Calibrations live in `dadl.calibration` and artifacts in `dadl.artifact`;
 they are not imported here, so `import dadl` does not load SciPy.
+
+`dadl.backend()` says which implementation runs the per-tag functions:
+"rust" when the optional compiled core (`pip install dadl-quantum-core`) is
+installed, else "python". Set DADL_BACKEND=python or =rust to choose.
 """
 
 __version__ = "0.0.3"
 
+from dadl._backend import name as backend  # noqa: E402
 from dadl.analysis.chsh import Window, chsh  # noqa: E402
 from dadl.analysis.visibility import bell_visibility, hom_visibility  # noqa: E402
 from dadl.config import Setup, load_setup  # noqa: E402
@@ -29,6 +34,7 @@ __all__ = [
     "TagSet",
     "Window",
     "__version__",
+    "backend",
     "bell_visibility",
     "chsh",
     "hom_visibility",
