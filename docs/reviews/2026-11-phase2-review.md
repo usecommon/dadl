@@ -72,3 +72,48 @@ remains the top open item.
 | 11 | The `setup-1` schema allows `reference_delay_ps` in a CHSH setup and A/B names in either type; the loader refuses both | Express with `if`/`then` in the schema later |
 | 2 | The delay fit assumes a Gaussian IRF; a tail shows as a failing predictive check, not a better fit | The design's IRF has an exponential tail; fit it in phase 3 |
 | 19 | No replay file from real PicoQuant hardware | Needs a recording from a lab |
+
+## Follow-up: test coverage and untested regimes (2026-11-12)
+
+**Code coverage.** Line and branch coverage of `python/dadl`, both backends combined, is 89%
+(2,661 statements, 676 branches). Most of the rest is refusal paths: bad input that must raise a
+clear error. That excludes `calibration/coverage.py`, whose 1,000-replicate gates run in their
+own CI job. The Rust core and bindings are not measured yet.
+
+**Regime probe.** The gates test one parameter point per calibration. The dark calibration was
+probed at six points, 1,000 replicates each (95% intervals; band about 92.6–97.3%):
+
+| Regime | Dark rate | Afterpulse p | τa | Dead time |
+| --- | --- | --- | --- | --- |
+| Gate point (1 kcps, p 3%, 20 s) | 94.5% | 94.5% | 94.6% | 95.8% |
+| CMOS SPAD (p 20%, τa 20 ns, 10 ns dead time) | 94.5% | 95.3% | 94.7% | 96.2% (was 89.0%) |
+| Low counts (2 s) | 94.5% | 94.8% | 94.0% | 94.2% |
+| High rate (100 kcps) | 95.2% | 93.7% | 94.9% | 95.8% |
+| Long afterpulse (τa 1 µs) | 94.6% | 94.5% | 94.2% | 95.0% |
+| SNSPD (100 cps, no afterpulsing) | 94.6% | 99.9% (one-sided limit, conservative by design) | not identified | 95.2% |
+
+**Defects found and fixed.**
+
+| Finding | Evidence | Fix |
+| --- | --- | --- |
+| Dead-time interval covered 89.0% with fast afterpulsing | The shortest gap equals the dead time exactly in 7% of runs, and the continuous interval ended just below it | Exact discrete quantiles of the shortest gap in whole ticks (method `interarrival-mle` v2); 96.2% |
+| A sparse, sharp coincidence peak gave a NaN predictive check, so `calibrate pairs` could not save the artifact | Probe: 150 pairs, 8 ps jitter, no background | Parametric-bootstrap deviance check when there are too few bin groups for a chi-square; test added |
+| HOM dropped the accidental-subtracted value without saying why when accidentals exceed C_min | Probe | `counts["subtracted"]`, and the CLI says so |
+| The delay fit read 5 ps MultiHarp delays 2 ps high (found by running existing calibrations on hardware-twin data) | Probe | Tick-aware bins (`xcorr-gaussian-mle` v3) |
+
+**What is still needed for higher coverage**, most important first:
+
+1. **A second regime in each CI gate.** Add the CMOS-SPAD regime to the dark gate, and a sparse
+   (low-rate SNSPD) and a broad-IRF regime to the pairs gate. Each runs in minutes with the
+   compiled core.
+2. **Misspecification tests per calibration.** Only the dark fit (two afterpulse time constants) and
+   the delay fit (an exponential IRF tail) are tested against data their model cannot describe.
+   Heralding needs multi-pair emission, accidentals need drifting rates, and DCR(T) needs a
+   tunnelling term.
+3. **A pulsed-source simulator.** The pulsed-pump path of the accidentals calibration (side peaks
+   at the repetition period) has only a synthetic test.
+4. **Rust coverage.** Run `cargo llvm-cov` on the core and the bindings in CI.
+5. **Refusal paths.** About 150 uncovered lines are input errors in `config`, `tagfile`, `artifact`
+   and `ptu`. A parametrised table of bad inputs would cover most of them cheaply.
+6. **PTU edge cases.** Header types not yet exercised (float arrays, bitsets, dates), T3 mode, and
+   one real recording per device family.

@@ -98,3 +98,12 @@ def test_quickstart_simulate_analyze(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "at the dip" in out and "Raw V = 0.9" in out
     assert main(["init", str(tmp_path / "x"), "--example", "hom-snspd"]) == 0
+
+
+def test_accidentals_above_c_min_are_not_subtracted_and_it_is_said(capsys):
+    runs = {
+        "dip": {"A": np.arange(0, 10**9, 1000), "B": np.arange(500, 10**9, 1000)},
+        "reference": {"A": np.arange(0, 10**9, 997), "B": np.arange(0, 10**9, 997)},
+    }
+    result, counts = hom_from_tags(runs, Window(width_ps=200))
+    assert result.corrected is None and counts["subtracted"] == 0.0

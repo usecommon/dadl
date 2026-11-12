@@ -280,3 +280,18 @@ def test_heralds_sharing_a_slot_are_counted_once():
     cal = calibrate_heralding(herald, signal, CHS, width_ps=2000)
     assert cal.estimates["heralding_efficiency"].value == pytest.approx(1.0)
     assert any("shared a slot" in n for n in cal.notes)
+
+
+def test_sparse_sharp_peak_still_gets_a_predictive_check_and_an_artifact(tmp_path):
+    # Too few counts for a grouped chi-square: v2 returned NaN, which no artifact can hold.
+    import datetime as dt
+
+    from dadl.artifact import write_artifact
+
+    rng = np.random.default_rng(0)
+    t = np.sort(rng.uniform(0, 1e12, 150))
+    a = np.rint(t).astype(np.int64)
+    b = np.sort(np.rint(t + rng.normal(0, 8, t.size)).astype(np.int64))
+    cal = calibrate_delay(a, b, CHS, n_draws=10)
+    assert 0.0 < cal.ppc_pvalue <= 1.0
+    write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))

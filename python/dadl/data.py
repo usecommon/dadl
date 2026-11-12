@@ -45,6 +45,18 @@ def tags_sha256(tags: np.ndarray) -> str:
     return hashlib.sha256(arr.tobytes()).hexdigest()
 
 
+def tag_tick(*streams: np.ndarray) -> int:
+    """The tagger tick in ps: the greatest common divisor of the tags' offsets from the first tag."""
+    nonempty = [s for s in streams if s.size]
+    if not nonempty:
+        return 1
+    origin = int(nonempty[0][0])
+    g = 0
+    for s in nonempty:
+        g = int(np.gcd.reduce(np.abs(s - origin), initial=g))
+    return max(g, 1)
+
+
 @dataclass(frozen=True)
 class TagSet:
     """The recorded tags of one acquisition, per channel, sorted int64 ps on one clock."""
