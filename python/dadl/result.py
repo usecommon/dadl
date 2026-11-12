@@ -21,13 +21,23 @@ UNCERTAINTY_KIND = "statistical only (Gaussian, 1 sigma)"
 
 @dataclass(frozen=True)
 class Estimate:
-    """A value with its one-sigma standard error (statistical only in phase 1)."""
+    """A value with its one-sigma standard error (statistical only in phase 1).
+
+    `low` and `high`, when present, are an exact 95% interval (e.g. Clopper-Pearson for
+    visibilities); threshold labels use them in preference to value +- 1.96 stderr, which is
+    unreliable at low counts.
+    """
 
     value: float
     stderr: float
+    low: float | None = None
+    high: float | None = None
 
     def __str__(self) -> str:
-        return f"{self.value:.4f} ± {self.stderr:.4f}"
+        text = f"{self.value:.4f} ± {self.stderr:.4f}"
+        if self.low is not None and self.high is not None:
+            text += f" (exact 95%: [{self.low:.4f}, {self.high:.4f}])"
+        return text
 
 
 @dataclass(frozen=True)

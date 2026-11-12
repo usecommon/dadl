@@ -185,7 +185,6 @@ def _write_checked(cal, out: str, accept_misfit: bool) -> str:
 
 def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_dark
-    from dadl.data import ChannelId
 
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
@@ -201,7 +200,7 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     for name in wanted:
-        cal = calibrate_dark(tags[name], ChannelId(name, number[name]), backend=backend, seed=setup.seed)
+        cal = calibrate_dark(tags[name], setup.channel_id(name), backend=backend, seed=setup.seed)
         print()
         print(cal)
         path = _write_checked(cal, args.out, args.accept_misfit)
@@ -211,7 +210,6 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
 
 def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_accidentals, calibrate_delay, calibrate_heralding
-    from dadl.data import ChannelId
 
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
@@ -232,7 +230,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             raise DadlError(f"unknown channel {name!r}; the setup's channels are {sorted(number)}")
     if args.herald == args.signal:
         raise DadlError("--herald and --signal must be different channels")
-    chs = (ChannelId(args.herald, number[args.herald]), ChannelId(args.signal, number[args.signal]))
+    chs = (setup.channel_id(args.herald), setup.channel_id(args.signal))
     a, b = tags[args.herald], tags[args.signal]
     window = setup.window
     d_a, d_b = window.delays_ps.get(args.herald, 0), window.delays_ps.get(args.signal, 0)

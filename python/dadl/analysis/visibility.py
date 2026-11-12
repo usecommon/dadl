@@ -22,7 +22,8 @@ from __future__ import annotations
 import math
 
 from dadl import _checks
-from dadl.guardrails import Policy, threshold_labels
+from dadl.stats import clopper_pearson
+from dadl.guardrails import LOW_COUNTS, Policy, threshold_labels
 from dadl.result import Estimate, LabelledValue
 
 
@@ -79,13 +80,39 @@ def hom_visibility_corrected(c_max: float, c_min: float, a: float, var_a: float)
     return Estimate(v, math.sqrt(var))
 
 
+#: Below this smaller count the delta-method error is unreliable (statistician review: coverage
+#: 63-93% near V = 1 or at a handful of counts), so results carry the LOW_COUNTS label.
+LOW_COUNT_MIN = 10
+
+
+def _exact_bell(n_max: float, n_min: float) -> tuple[float, float]:
+    """Exact 95% interval for V = 1 - 2 m / n: Clopper-Pearson on m out of n = M + m (counts rounded)."""
+    n, m = int(round(n_max + n_min)), int(round(n_min))
+    ci = clopper_pearson(m, n)
+    return 1.0 - 2.0 * ci.high, 1.0 - 2.0 * ci.low
+
+
+def _exact_hom(c_max: float, c_min: float) -> tuple[float, float]:
+    """Exact 95% interval for V = 1 - rho, rho = mu_min / mu_max: given m + M, m is binomial in rho / (1 + rho)."""
+    n, m = int(round(c_max + c_min)), int(round(c_min))
+    ci = clopper_pearson(m, n)
+
+    def rho(p: float) -> float:
+        return math.inf if p >= 1.0 else p / (1.0 - p)
+
+    return 1.0 - rho(ci.high), 1.0 - rho(ci.low)
+
+
 def _finish(
     analysis: str,
     raw: Estimate,
     corrected: Estimate | None,
     policy: Policy,
+    min_count: float | None = None,
 ) -> LabelledValue:
     labels = policy.labels_for(analysis) + threshold_labels(analysis, raw, corrected)
+    if min_count is not None and min_count < LOW_COUNT_MIN:
+        labels += (LOW_COUNTS,)
     return LabelledValue(analysis=analysis, raw=raw, corrected=corrected, labels=labels, **policy.provenance())
 
 
@@ -106,13 +133,14 @@ def bell_visibility(
     policy = policy or Policy.default()
     n_max, n_min = _counts(n_max, n_min)
     total = n_max + n_min
-    raw = Estimate((n_max - n_min) / total, math.sqrt(4.0 * n_max * n_min / total**3))
+    low, high = _exact_bell(n_max, n_min)
+    raw = Estimate((n_max - n_min) / total, math.sqrt(4.0 * n_max * n_min / total**3), low, high)
     corrected = None
     if accidentals is not None:
         policy.check_correction("bell_visibility", "accidental_subtraction")
         a, var_a = _accidentals(accidentals, accidentals_stderr, n_min)
         corrected = fringe_visibility_corrected(n_max, n_min, a, var_a)
-    return _finish("bell_visibility", raw, corrected, policy)
+    return _finish("bell_visibility", raw, corrected, policy, n_min)
 
 
 def hom_visibility(
@@ -129,10 +157,11 @@ def hom_visibility(
     if c_max <= 0:
         raise ValueError("c_max must be positive")
     # V = 1 - m/M: var = (m/M^2)^2 M + (1/M)^2 m
-    raw = Estimate((c_max - c_min) / c_max, math.sqrt(c_min**2 / c_max**3 + c_min / c_max**2))
+    low, high = _exact_hom(c_max, c_min)
+    raw = Estimate((c_max - c_min) / c_max, math.sqrt(c_min**2 / c_max**3 + c_min / c_max**2), low, high)
     corrected = None
     if accidentals is not None:
         policy.check_correction("hom_visibility", "accidental_subtraction")
         a, var_a = _accidentals(accidentals, accidentals_stderr, c_min)
         corrected = hom_visibility_corrected(c_max, c_min, a, var_a)
-    return _finish("hom_visibility", raw, corrected, policy)
+    return _finish("hom_visibility", raw, corrected, policy, c_min)

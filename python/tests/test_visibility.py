@@ -72,9 +72,23 @@ def test_zero_minimum_is_labelled_as_invalid_gaussian():
 
 
 def test_near_threshold_is_labelled():
-    # V = 0.70 with ~0.05 error sits within 1.96 sigma of 1/sqrt(2).
+    # V = 0.70: the exact 95% interval for the raw value contains 1/sqrt(2).
+    from dadl.guardrails import NEAR_THRESHOLD_EXACT
+
     r = bell_visibility(85.0, 15.0)
-    assert NEAR_THRESHOLD in r.labels
+    assert NEAR_THRESHOLD_EXACT in r.labels and r.raw.low < 0.7071 < r.raw.high
+    # The corrected value (delta method) still uses the 1.96 sigma rule.
+    assert NEAR_THRESHOLD not in r.labels
+
+
+def test_low_counts_get_an_exact_interval_and_a_label():
+    # Statistician review W8: near V = 1 the delta method covered 63-93%; the exact interval >= 95%.
+    from dadl.analysis.visibility import hom_visibility
+    from dadl.guardrails import LOW_COUNTS
+
+    r = hom_visibility(50.0, 1.0)
+    assert LOW_COUNTS in r.labels and r.raw.low < 0.98 <= r.raw.high <= 1.0
+    assert LOW_COUNTS not in hom_visibility(5000.0, 400.0).labels
 
 
 def test_results_record_policy_provenance():

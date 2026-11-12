@@ -31,6 +31,8 @@ POLICY_MODIFIED = "policy modified"
 THRESHOLD_AFTER_CORRECTION = "threshold crossed only after correction"
 NEAR_THRESHOLD = "within 1.96 sigma of the threshold"
 GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
+NEAR_THRESHOLD_EXACT = "the exact 95% interval contains the threshold"
+LOW_COUNTS = "low counts: the Gaussian error is unreliable; use the exact interval"
 UNVALIDATED_ANALYSIS = "unvalidated analysis"
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
@@ -223,7 +225,13 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
     if corrected is not None and raw.value < threshold <= corrected.value:
         labels.append(THRESHOLD_AFTER_CORRECTION)
     for est in (raw, corrected):
-        if est is not None and abs(est.value - threshold) < 1.96 * est.stderr:
+        if est is None:
+            continue
+        if est.low is not None and est.high is not None:
+            if est.low <= threshold <= est.high:
+                labels.append(NEAR_THRESHOLD_EXACT)
+                break
+        elif abs(est.value - threshold) < 1.96 * est.stderr:
             labels.append(NEAR_THRESHOLD)
             break
     return tuple(labels)

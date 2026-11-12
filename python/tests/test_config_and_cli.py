@@ -168,7 +168,8 @@ def test_simulate_dark_then_calibrate(tmp_path, capsys):
     assert "dark_rate_cps" in out and "artifact:" in out
     (path,) = (tmp_path / "art").glob("*.json")
     manifest, samples = read_artifact(path)
-    assert manifest["channels"] == [{"device": "B+", "input": 2}]
+    # Expert review W7: the record names the device and input; the role label travels alongside.
+    assert manifest["channels"] == [{"device": "sim", "input": 2, "role": "B+"}]
     assert manifest["backend"] == "sim"
     assert manifest["summary"]["dark_rate_cps"]["low"] < 500 < manifest["summary"]["dark_rate_cps"]["high"]
 
@@ -207,3 +208,30 @@ def test_calibrate_pairs_refuses_bell_data_and_accepts_a_heralding_run(tmp_path,
     assert 0.38 < her_m["summary"]["heralding_efficiency"]["value"] < 0.41  # 0.5 x window capture x live fraction
     assert main(argv[:3] + ["--tags", str(her), "--no-analysers", "--herald", "A+", "--signal", "A+", "--out", str(out_dir)]) == 1
     assert "different channels" in capsys.readouterr().err
+
+
+
+def test_hardware_setups_need_the_tagger_serial(tmp_path, capsys):
+    tags = tmp_path / "dark.npz"
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(tags)]) == 0
+    hw = write(tmp_path, GOOD.replace("seed: 5\n", "seed: 5\nbackend: file\n"))
+    assert main(["calibrate", "dark", str(hw), "--tags", str(tags), "--channel", "A+", "--out", str(tmp_path / "a")]) == 1
+    assert "hardware.tagger" in capsys.readouterr().err
+    hw2 = tmp_path / "hw2.yaml"
+    hw2.write_text(hw.read_text() + "hardware:\n  tagger: HydraHarp-1234567\n  detectors: {A+: SPCM-AQRH-0042}\n", encoding="utf-8")
+    out = tmp_path / "b"
+    assert main(["calibrate", "dark", str(hw2), "--tags", str(tags), "--channel", "A+", "--out", str(out)]) == 0
+    from dadl.artifact import read_artifact
+
+    (path,) = out.glob("*[0-9a-f].json")
+    manifest = read_artifact(path)[0]
+    assert manifest["channels"] == [{"device": "HydraHarp-1234567", "input": 0, "role": "A+", "detector": "SPCM-AQRH-0042"}]
+    assert manifest["backend"] == "sim"  # the npz says it was simulated, whatever the setup claims
+
+
+def test_unsupported_source_types_are_refused(tmp_path):
+    from dadl.config import load_setup
+
+    bad = write(tmp_path, GOOD.replace("source: {", "source: {type: spdc-pulsed-80MHz, "))
+    with pytest.raises(ConfigError, match="not supported"):
+        load_setup(bad)

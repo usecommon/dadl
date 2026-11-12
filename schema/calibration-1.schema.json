@@ -47,11 +47,19 @@
         "properties": {
           "device": {
             "type": "string",
-            "description": "Device serial or simulator ID"
+            "description": "Tagger serial (e.g. HydraHarp-1234567), or 'sim' for simulated data"
           },
           "input": {
             "type": "integer",
             "minimum": 0
+          },
+          "role": {
+            "type": "string",
+            "description": "The setup's name for the channel (e.g. A+); a label, not an identity"
+          },
+          "detector": {
+            "type": "string",
+            "description": "Serial of the detector cabled to this input"
           }
         }
       }

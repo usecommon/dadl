@@ -26,7 +26,10 @@ SUPPORTED_SCHEMA_VERSIONS = (1,)
 REQUIRED_KEYS = ("schema_version", "name", "source", "detectors", "analysis")
 MAX_FILE_BYTES = 1_000_000
 
-TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy"}
+TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy", "hardware"}
+#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned).
+SOURCE_TYPES = ("spdc-cw",)
+HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
      "afterpulse_tau_ps", "delay_ps"}
@@ -72,8 +75,27 @@ class Setup:
     path: Path | None = None
     data: dict[str, Any] = field(default_factory=dict, repr=False)
     analysis_type: str = "chsh"
+    #: Tagger serial and detector serials per channel name (hardware setups; recorded with calibrations).
+    tagger: str | None = None
+    detector_serials: dict[str, str] = field(default_factory=dict)
     #: HOM only: the path delay of the reference acquisition, far from the dip.
     reference_delay_ps: float | None = None
+
+    def channel_id(self, name: str):
+        """The ChannelId of a channel name: tagger serial (or "sim") and input number, with role and detector."""
+        from dadl.data import ChannelId
+
+        number = {n: k for k, n in self.channels.items()}
+        if self.backend == "sim":
+            device = "sim"
+        elif self.tagger:
+            device = self.tagger
+        else:
+            raise ConfigError(
+                f"{self.name}: calibrations of hardware data need hardware.tagger (the tagger's serial) in "
+                "setup.yaml, so the record identifies the physical device, not just the channel name"
+            )
+        return ChannelId(device, number[name], role=name, detector=self.detector_serials.get(name))
 
     @property
     def channel_names(self) -> tuple[str, ...]:
@@ -168,6 +190,11 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     # source
     src = _mapping(data["source"], "source")
     _no_unknown(src, SOURCE_KEYS, "source")
+    if src.get("type", "spdc-cw") not in SOURCE_TYPES:
+        raise ConfigError(
+            f"source.type {src.get('type')!r} is not supported; DADL models {list(SOURCE_TYPES)} only "
+            "(pulsed sources need coincidence slots locked to the laser, which is planned)"
+        )
     source = _wrap(
         "source",
         PairSource,
@@ -247,6 +274,16 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     if sorted(channels.values()) != sorted(names):
         raise ConfigError(f"channels must map exactly one number to each of {list(names)}")
 
+    hw = _mapping(data.get("hardware", {}), "hardware")
+    _no_unknown(hw, HARDWARE_KEYS, "hardware")
+    tagger = hw.get("tagger")
+    if tagger is not None and (not isinstance(tagger, str) or not tagger.strip()):
+        raise ConfigError("hardware.tagger must be the tagger's serial, e.g. HydraHarp-1234567")
+    serials = {str(k): str(v) for k, v in _mapping(hw.get("detectors", {}), "hardware.detectors").items()}
+    unknown_roles = sorted(set(serials) - set(names))
+    if unknown_roles:
+        raise ConfigError(f"hardware.detectors names unknown channels {unknown_roles}")
+
     return Setup(
         name=name,
         backend=backend,
@@ -259,5 +296,7 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         channels=channels,
         data=data,
         analysis_type=kind,
+        tagger=tagger,
+        detector_serials=serials,
         reference_delay_ps=reference_delay,
     )

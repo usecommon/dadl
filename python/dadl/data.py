@@ -22,10 +22,17 @@ from dadl import _checks
 
 @dataclass(frozen=True, order=True)
 class ChannelId:
-    """One detector input: the device (serial or simulator ID) and the tagger input number."""
+    """One tagger input: the tagger (serial, or "sim") and its input number.
+
+    `role` is the setup's name for the channel ("A+") and `detector` the serial
+    of the detector cabled to it. They are recorded with every calibration but
+    are not part of the identity, so a record follows the hardware, not the label.
+    """
 
     device: str
     input: int
+    role: str | None = field(default=None, compare=False)
+    detector: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.device, str) or not self.device.strip():
@@ -33,7 +40,12 @@ class ChannelId:
         object.__setattr__(self, "input", _checks.integer(self.input, "input", minimum=0))
 
     def as_record(self) -> dict[str, object]:
-        return {"device": self.device, "input": self.input}
+        rec: dict[str, object] = {"device": self.device, "input": self.input}
+        if self.role is not None:
+            rec["role"] = self.role
+        if self.detector is not None:
+            rec["detector"] = self.detector
+        return rec
 
     def __str__(self) -> str:
         return f"{self.device}:{self.input}"
