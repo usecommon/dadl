@@ -75,6 +75,8 @@ def _quickstart_hom(path: Path, setup: Setup) -> int:
     print()
     print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
     _print_result(result, "V")
+    if not counts["subtracted"]:
+        print(f"  Accidentals not subtracted: the estimate ({counts['accidentals']:.3g}) exceeds C_min.")
     if result.corrected is not None:
         print(
             f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
@@ -248,6 +250,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print()
         print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
         _print_result(result, "V")
+        if not counts["subtracted"]:
+            print(f"  Accidentals not subtracted: the estimate ({counts['accidentals']:.3g}) exceeds C_min.")
         if result.corrected is not None:
             print(f"  Accidentals subtracted ({counts['accidentals']:.3g}, off-peak): V = {result.corrected}")
         return 0

@@ -130,6 +130,13 @@ from the packages.
   (method `xcorr-gaussian-mle` v3) finds the tagger tick from the data, rounds
   the bin width up to whole ticks, and models each bin accordingly. Version 2
   assumed 1 ps ticks and read 5 ps MultiHarp delays 2 ps high.
+- Coverage analysis ([review record](docs/reviews/2026-11-phase2-review.md#follow-up-test-coverage-and-untested-regimes-2026-11-12)):
+  the dark calibration was probed at six detector regimes. Its dead-time
+  interval (method `interarrival-mle` v2) now uses exact quantiles of the
+  shortest gap in whole ticks; v1 covered 89% with fast afterpulsing, v2 96%.
+  A sparse, sharp coincidence peak no longer gives a NaN predictive check
+  (which blocked saving the artifact); HOM says when accidentals are not
+  subtracted.
 
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 

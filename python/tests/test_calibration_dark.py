@@ -137,3 +137,20 @@ def test_dark_calibration_coverage():
     result = dark_coverage(1000)
     print(result)
     assert result.passed(), str(result)
+
+
+def test_dead_time_interval_allows_for_whole_ps_tags():
+    # Fast afterpulsing puts the shortest gap within a few ps of the dead time, in about 7% of runs
+    # exactly on it. Method v1's continuous interval then ended just below the truth (89% coverage
+    # in this regime); the exact discrete interval gives 96% (1,000-replicate probe, review record).
+    det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000, afterpulse_prob=0.2, afterpulse_tau_ps=20_000.0)
+    on_the_edge = 0
+    for seed in range(60):
+        tags = dark(det, 20.0, seed=seed)
+        m = int(np.diff(tags).min())
+        iv = calibrate_dark(tags, CH, seed=seed, n_draws=10).estimates["dead_time_ps"]
+        assert iv.high <= m  # never above the shortest gap
+        if m == 10_000:
+            on_the_edge += 1
+            assert iv.contains(10_000.0)
+    assert on_the_edge >= 1
