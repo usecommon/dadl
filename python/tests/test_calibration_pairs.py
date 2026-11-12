@@ -23,7 +23,6 @@ from dadl.calibration.coverage import (
     PAIR_RATE,
     PAIR_WIDTH_PS,
     dcr_coverage,
-    pairs_coverage,
     pairs_truth,
 )
 from dadl.closed_form import arrhenius_dark_rate
@@ -248,7 +247,9 @@ def test_closed_form_truths_are_sane(truth):
 
 @pytest.mark.coverage
 def test_pair_calibrations_coverage():
-    results = pairs_coverage(1000)
+    from dadl.calibration.coverage import run
+
+    results = run("pairs", 1000, jobs=3)
     for r in results:
         print(r)
     assert all(r.passed() for r in results), "\n".join(map(str, results))
@@ -295,3 +296,31 @@ def test_sparse_sharp_peak_still_gets_a_predictive_check_and_an_artifact(tmp_pat
     cal = calibrate_delay(a, b, CHS, n_draws=10)
     assert 0.0 < cal.ppc_pvalue <= 1.0
     write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
+
+
+def test_every_regime_has_a_closed_form_truth_and_runs():
+    from dadl.calibration.coverage import PAIR_REGIMES, UNITS, run
+
+    assert set(UNITS["pairs"]) == set(PAIR_REGIMES)
+    for regime in PAIR_REGIMES:
+        t = pairs_truth(regime)
+        assert 0 < t["heralding-efficiency"]["heralding_efficiency"] < 1
+        assert t["accidentals"]["accidental_coincidences"] > 0
+    results = run("all", replicates=3, jobs=1)
+    assert len(results) == 2 + 3 * len(PAIR_REGIMES) + 1
+    (sparse,) = [r for r in results if r.calibration == "accidentals [sparse-snspd]"]
+    assert sparse.at_least and "at least" in str(sparse)
+
+
+def test_broad_peak_fits_without_crashing():
+    # Found by the broad-IRF gate regime: a +-50-bin moment start badly underestimated a 1.8 ns
+    # peak, and the unbounded fit overflowed or stopped at a singular Hessian.
+    from dadl.calibration.coverage import PAIR_REGIMES, pairs_truth
+
+    r = PAIR_REGIMES["broad-irf"]
+    truth = pairs_truth("broad-irf")["delay-jitter"]
+    for seed in range(5):
+        a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(seed))
+        cal = calibrate_delay(a, b, CHS, n_draws=10)
+        assert cal.converged
+        assert abs(cal.estimates["jitter_sigma_ps"].value / truth["jitter_sigma_ps"] - 1) < 0.1

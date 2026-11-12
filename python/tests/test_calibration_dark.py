@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from dadl.calibration import calibrate_dark
-from dadl.calibration.coverage import dark_coverage, gate
+from dadl.calibration.coverage import gate
 from dadl.closed_form import dark_afterpulse_rate
 from dadl.data import ChannelId
 from dadl.errors import InsufficientCounts
@@ -134,9 +134,12 @@ def test_gate_is_bonferroni_corrected():
 
 @pytest.mark.coverage
 def test_dark_calibration_coverage():
-    result = dark_coverage(1000)
-    print(result)
-    assert result.passed(), str(result)
+    from dadl.calibration.coverage import run
+
+    results = run("dark", 1000, jobs=2)
+    for r in results:
+        print(r)
+    assert all(r.passed() for r in results), "\n".join(map(str, results))
 
 
 def test_dead_time_interval_allows_for_whole_ps_tags():
