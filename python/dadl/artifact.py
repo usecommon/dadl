@@ -161,7 +161,12 @@ def build_manifest(
             name: {"value": iv.value, "low": iv.low, "high": iv.high, "level": iv.level, "unit": cal.units.get(name, "")}
             for name, iv in cal.estimates.items()
         },
-        "checks": {"converged": cal.converged, "ppc_pvalue": cal.ppc_pvalue, "prior_dominated_params": []},
+        "checks": {
+            "converged": cal.converged,
+            "ppc_pvalue": cal.ppc_pvalue,
+            "status": cal.status,
+            "prior_dominated_params": [],
+        },
         "unidentified_params": list(cal.unidentified),
         "notes": list(cal.notes),
         "supersedes": supersedes,

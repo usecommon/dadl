@@ -107,7 +107,12 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
 
 
 def write_tags(
-    path: str | Path, runs: Runs, channels: dict[int, str] | None = None, settings: Sequence = SETTING_PAIRS
+    path: str | Path,
+    runs: Runs,
+    channels: dict[int, str] | None = None,
+    settings: Sequence = SETTING_PAIRS,
+    *,
+    simulated: bool = False,
 ) -> Path:
     """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`)."""
     path = Path(path)
@@ -121,7 +126,8 @@ def write_tags(
     table = np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.int64)
     table = table[np.lexsort((table[:, 2], table[:, 1], table[:, 0]))]
     if path.suffix == ".npz":
-        np.savez_compressed(path, **{c: table[:, i] for i, c in enumerate(COLUMNS)})
+        extra = {"dadl_simulated": np.array(True)} if simulated else {}
+        np.savez_compressed(path, **{c: table[:, i] for i, c in enumerate(COLUMNS)}, **extra)
     elif path.suffix == ".csv":
         np.savetxt(path, table, fmt="%d", delimiter=",", header=",".join(COLUMNS), comments="")
     else:
@@ -147,6 +153,11 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
             tagset = PtuFile(path).read()
         except AdapterError as exc:
             raise ConfigError(str(exc)) from exc
+        if tagset.metadata.get("incomplete"):
+            raise ConfigError(
+                f"{path}: the acquisition lost data ({tagset.metadata.get('data_loss')}, from TTResult_StopReason); "
+                "DADL does not analyse incomplete files. Read it with dadl.adapters.PtuFile to inspect it."
+            )
         by_input = {ch.input: tagset[ch] for ch in tagset.channels}
         unknown = sorted(set(by_input) - set(channels))
         if unknown:
@@ -191,11 +202,21 @@ def write_ptu_dir(
 
 
 def tags_are_simulated(path: str | Path) -> bool:
-    """True for a folder of PTU files written by DADL's simulator (their header says so)."""
+    """True when the tags were written by DADL's simulator: a folder of PTU files whose headers say
+    so, or an .npz written by `write_tags` with simulated=True.
+
+    A folder mixing simulated and recorded files is refused: its provenance cannot be one label.
+    """
     path = Path(path)
+    if path.suffix == ".npz" and path.is_file():
+        with np.load(path, allow_pickle=False) as npz:
+            return "dadl_simulated" in npz.files and bool(npz["dadl_simulated"])
     if not path.is_dir():
         return False
-    from dadl.adapters.ptu import parse_header
+    from dadl.adapters.ptu import PtuFile
 
     files = sorted(path.glob("setting*.ptu"))
-    return bool(files) and all(parse_header(f.read_bytes()[:65536])[0].get("DADL_Simulated") is True for f in files)
+    flags = {PtuFile(f).header.get("DADL_Simulated") is True or PtuFile(f).header.get("CreatorSW_Name") == "DADL" for f in files}
+    if len(flags) > 1:
+        raise ConfigError(f"{path} mixes simulated and recorded PTU files; keep them in separate folders")
+    return bool(files) and flags == {True}

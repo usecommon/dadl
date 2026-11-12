@@ -13,6 +13,10 @@ from dadl.stats import Interval
 
 #: Posterior draws stored per artifact (docs/design.md, "Inference").
 N_DRAWS = 2000
+#: A predictive-check p-value below this marks the calibration a misfit: the model does not
+#: describe the data, and its intervals are not to be trusted (docs/design.md: artifacts are
+#: accepted only after the predictive check passes). 0.1% keeps false alarms rare.
+MISFIT_ALPHA = 0.001
 
 
 @dataclass(frozen=True)
@@ -53,10 +57,20 @@ class Calibration:
         if self.backend not in ("sim", "hardware"):
             raise ValueError(f"backend must be 'sim' or 'hardware', got {self.backend!r}")
 
+    @property
+    def status(self) -> str:
+        """"ok", or "misfit" when the predictive check fails (p < MISFIT_ALPHA)."""
+        return "misfit" if self.ppc_pvalue < MISFIT_ALPHA else "ok"
+
     def __str__(self) -> str:
         lines = [f"{self.kind} ({self.method} {self.method_version}) for {', '.join(map(str, self.channels))}"]
         for name, iv in self.estimates.items():
             lines.append(f"  {name:<20} {iv}  {self.units.get(name, '')}".rstrip())
-        lines.append(f"  converged: {self.converged}; predictive check p = {self.ppc_pvalue:.3f}")
+        lines.append(f"  converged: {self.converged}; predictive check p = {self.ppc_pvalue:.3g}")
+        if self.status == "misfit":
+            lines.append(
+                "  MISFIT: the model does not describe these data (predictive check p < "
+                f"{MISFIT_ALPHA:g}); do not use these intervals"
+            )
         lines.extend(f"  note: {n}" for n in self.notes)
         return "\n".join(lines)

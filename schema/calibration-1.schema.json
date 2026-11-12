@@ -185,6 +185,10 @@
           "minimum": 0,
           "maximum": 1
         },
+        "status": {
+          "description": "ok, or misfit when the posterior predictive check fails (p below 0.001): the model does not describe the data and the intervals must not be used.",
+          "enum": ["ok", "misfit"]
+        },
         "prior_dominated_params": {
           "type": "array",
           "items": {

@@ -76,8 +76,10 @@ def gamma_posterior(
         raise ValueError("exposure must be positive")
     dist = _st.gamma(count + 0.5, scale=1.0 / exposure)
     a = 1 - level
+    # At zero counts the lower limit is 0: the Jeffreys quantile is positive and excludes small means.
+    low = 0.0 if count == 0 else float(dist.ppf(a / 2))
     return (
-        Interval(count / exposure, float(dist.ppf(a / 2)), float(dist.ppf(1 - a / 2)), level),
+        Interval(count / exposure, low, float(dist.ppf(1 - a / 2)), level),
         dist.rvs(n_draws, random_state=rng),
     )
 

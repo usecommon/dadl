@@ -180,17 +180,30 @@ def test_calibrate_rejects_unknown_channel(tmp_path, capsys):
     assert "unknown channel" in capsys.readouterr().err
 
 
-def test_calibrate_pairs_writes_three_artifacts(tmp_path, capsys):
+def test_calibrate_pairs_refuses_bell_data_and_accepts_a_heralding_run(tmp_path, capsys):
+    # Expert review W1: on Bell (CHSH) tags the heralding ratio carries the analyser projection
+    # (0.06-0.33 for an efficiency of 0.5), so the command refuses CHSH and HOM setups unless the
+    # user confirms a heralding run with nothing in the path.
     from dadl.artifact import read_artifact
 
     tags = tmp_path / "tags.npz"
     assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
     out_dir = tmp_path / "art"
-    argv = ["calibrate", "pairs", "chsh-spad", "--tags", str(tags), "--herald", "A+", "--signal", "B+", "--out", str(out_dir)]
-    assert main(argv) == 0
+    argv = ["calibrate", "pairs", "chsh-spad", "--herald", "A+", "--signal", "B+", "--out", str(out_dir)]
+    assert main(argv + ["--tags", str(tags)]) == 1
+    assert "analysers" in capsys.readouterr().err and not out_dir.exists()
+
+    her = tmp_path / "her.npz"
+    assert main(["simulate", "chsh-spad", "--heralding", "--duration-s", "1", "--out", str(her)]) == 0
+    assert main(argv + ["--tags", str(her), "--no-analysers"]) == 0
     out = capsys.readouterr().out
     assert "delay_ps" in out and "accidental_coincidences" in out and "heralding_efficiency" in out
-    kinds = sorted(read_artifact(p)[0]["kind"] for p in out_dir.glob("*.json"))
-    assert kinds == ["accidentals", "delay-jitter", "heralding-efficiency"]
-    assert main(argv[:7] + ["--signal", "A+", "--out", str(out_dir)]) == 1
+    manifests = [read_artifact(p)[0] for p in out_dir.glob("*[0-9a-f].json")]
+    assert sorted(m["kind"] for m in manifests) == ["accidentals", "delay-jitter", "heralding-efficiency"]
+    for m in manifests:
+        assert m["conditions"]["analysers_in_path"] == 0.0 and m["conditions"]["rate_herald_cps"] > 0
+        assert m["checks"]["status"] == "ok"
+    (her_m,) = [m for m in manifests if m["kind"] == "heralding-efficiency"]
+    assert 0.38 < her_m["summary"]["heralding_efficiency"]["value"] < 0.41  # 0.5 x window capture x live fraction
+    assert main(argv[:3] + ["--tags", str(her), "--no-analysers", "--herald", "A+", "--signal", "A+", "--out", str(out_dir)]) == 1
     assert "different channels" in capsys.readouterr().err

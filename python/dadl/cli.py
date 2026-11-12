@@ -25,7 +25,7 @@ from dadl.closed_form import chsh_expected_grid, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
-from dadl.simsetup import simulate_setup, simulate_setup_dark
+from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
 from dadl.tagfile import read_tags, tags_are_simulated, write_ptu_dir, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
@@ -126,8 +126,9 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print()
     print("  Edit a copy of this setup with `dadl init`, then `dadl quickstart setup.yaml`.")
     print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
-    print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`; from pair data,")
-    print("  `dadl calibrate pairs chsh-spad --tags tags.npz --herald A+ --signal B+ --out artifacts/`.")
+    print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a heralding run (no")
+    print("  analysers): `dadl simulate chsh-spad --heralding --duration-s 2 --out her.npz`, then")
+    print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out artifacts/`.")
     print(f"  Corrected values arrive in phase 3. Overview: {SITE}")
     return 0
 
@@ -148,9 +149,14 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
     if not args.duration_s > 0:
         raise DadlError("--duration-s must be positive")
+    if args.dark and args.heralding:
+        raise DadlError("choose one of --dark and --heralding")
     if args.dark:
         runs = simulate_setup_dark(setup, args.duration_s)
         what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
+    elif args.heralding:
+        runs = simulate_setup_heralding(setup, args.duration_s)
+        what = f"heralding-run tags ({args.duration_s:g} s, no analysers or beamsplitter, setting 0)"
     else:
         runs = simulate_setup(setup)
         what = "HOM tags (setting 0 dip, 1 reference)" if setup.analysis_type == "hom" else "CHSH tags"
@@ -159,13 +165,25 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         print(f"Wrote simulated {what} for {setup.name} as {len(files)} {args.device} PTU files in {args.out}")
         print("  The files are marked as simulated (CreatorSW_Name DADL, DADL_Simulated) and read back as such.")
         return 0
-    out = write_tags(args.out, runs, setup.channels, setup.setting_keys)
+    out = write_tags(args.out, runs, setup.channels, setup.setting_keys, simulated=True)
     print(f"Wrote simulated {what} for {setup.name} to {out}")
     return 0
 
 
-def cmd_calibrate_dark(args: argparse.Namespace) -> int:
+def _write_checked(cal, out: str, accept_misfit: bool) -> str:
+    """Write the artifact, refusing a misfit unless the user accepts it (it is then marked misfit)."""
     from dadl.artifact import write_artifact
+
+    if cal.status == "misfit" and not accept_misfit:
+        raise DadlError(
+            f"{cal.kind} for {', '.join(map(str, cal.channels))}: the model does not describe these data "
+            f"(predictive check p = {cal.ppc_pvalue:.3g}). No artifact written. Inspect the data (drift, latching, "
+            "a timing tail, afterpulse structure, a pulsed source), or pass --accept-misfit to keep it marked misfit."
+        )
+    return str(write_artifact(cal, out))
+
+
+def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_dark
     from dadl.data import ChannelId
 
@@ -184,15 +202,14 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     for name in wanted:
         cal = calibrate_dark(tags[name], ChannelId(name, number[name]), backend=backend, seed=setup.seed)
-        path = write_artifact(cal, args.out)
         print()
         print(cal)
+        path = _write_checked(cal, args.out, args.accept_misfit)
         print(f"  artifact: {path}")
     return 0
 
 
 def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
-    from dadl.artifact import write_artifact
     from dadl.calibration import calibrate_accidentals, calibrate_delay, calibrate_heralding
     from dadl.data import ChannelId
 
@@ -202,6 +219,13 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     if not 0 <= args.setting < len(keys):
         raise DadlError(f"--setting must be 0..{len(keys) - 1}")
     tags = runs[keys[args.setting]]
+    if setup.analysis_type in ("chsh", "hom") and not args.no_analysers:
+        raise DadlError(
+            f"{setup.name} is a {setup.analysis_type} setup: its acquisitions pass through analysers or a "
+            "beamsplitter, which enter the heralding ratio directly (a Bell setting can read 0.06 for an "
+            "efficiency of 0.5). Record a heralding run with the source straight onto the detectors and pass "
+            "--no-analysers to confirm it (simulated: dadl simulate SETUP --heralding)."
+        )
     number = {name: num for num, name in setup.channels.items()}
     for name in (args.herald, args.signal):
         if name not in number:
@@ -213,7 +237,16 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     window = setup.window
     d_a, d_b = window.delays_ps.get(args.herald, 0), window.delays_ps.get(args.signal, 0)
     backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
-    common = {"backend": backend, "seed": setup.seed}
+    span_s = (max(int(a[-1]), int(b[-1])) - min(int(a[0]), int(b[0]))) / 1e12 if a.size and b.size else 0.0
+    run_conditions = {
+        "delay_herald_ps": float(d_a),
+        "delay_signal_ps": float(d_b),
+        "duration_s": span_s,
+        "rate_herald_cps": a.size / span_s if span_s else 0.0,
+        "rate_signal_cps": b.size / span_s if span_s else 0.0,
+        "analysers_in_path": 0.0,
+    }
+    common = {"backend": backend, "seed": setup.seed, "conditions": run_conditions}
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
     print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
     cals = [
@@ -224,9 +257,9 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
         ),
     ]
     for cal in cals:
-        path = write_artifact(cal, args.out)
         print()
         print(cal)
+        path = _write_checked(cal, args.out, args.accept_misfit)
         print(f"  artifact: {path}")
     fitted = cals[0].estimates["delay_ps"].value
     if abs(fitted - (d_b - d_a)) > window.width_ps / 4:
@@ -300,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim.add_argument("--device", choices=sorted(DEVICES), default="hydraharp", help="PTU device to mimic (default hydraharp)")
     sim.add_argument("--dark", action="store_true", help="simulate dark acquisitions (source off) for calibration")
+    sim.add_argument(
+        "--heralding", action="store_true",
+        help="simulate a heralding run: the pair source straight onto one detector per arm (for calibrate pairs)",
+    )
     sim.add_argument("--duration-s", type=float, default=20.0, help="dark acquisition length per channel (default 20)")
     sim.set_defaults(func=cmd_simulate)
 
@@ -321,6 +358,10 @@ def build_parser() -> argparse.ArgumentParser:
     dark.add_argument("--setting", type=int, default=0, help="which setting index holds the dark data (default 0)")
     dark.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
     dark.add_argument("--out", required=True, help="directory for the artifacts")
+    dark.add_argument(
+        "--accept-misfit", action="store_true",
+        help="write artifacts whose predictive check fails (p < 0.001), marked misfit; refused otherwise",
+    )
     dark.set_defaults(func=cmd_calibrate_dark)
 
     pairs = cal_sub.add_parser(
@@ -328,8 +369,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="delay, jitter, accidentals and heralding efficiency from a pair-source acquisition",
         description="Fit the delay and combined jitter of SIGNAL relative to HERALD from their cross-correlation, "
         "estimate off-peak accidentals in the declared window, and the heralding efficiency of SIGNAL. "
-        "Uses the window width and delays declared in the setup. For a heralding efficiency, record "
-        "without polarisation analysers in the path. Writes three content-addressed artifacts.",
+        "Uses the window width and delays declared in the setup. The acquisition must be a heralding run "
+        "with no analysers or beamsplitter between source and detectors; for CHSH and HOM setups confirm "
+        "this with --no-analysers. Writes three content-addressed artifacts.",
     )
     pairs.add_argument("setup", help="setup.yaml (channel map, window) or a bundled example name")
     pairs.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, with the pair-source acquisition")
@@ -339,6 +381,14 @@ def build_parser() -> argparse.ArgumentParser:
     pairs.add_argument("--range-ps", type=int, default=20_000, help="delay search range, +- ps (default 20000)")
     pairs.add_argument("--bin-width-ps", type=int, default=20, help="delay histogram bin width (default 20)")
     pairs.add_argument("--out", required=True, help="directory for the artifacts")
+    pairs.add_argument(
+        "--accept-misfit", action="store_true",
+        help="write artifacts whose predictive check fails (p < 0.001), marked misfit; refused otherwise",
+    )
+    pairs.add_argument(
+        "--no-analysers", action="store_true",
+        help="confirm the acquisition had no analysers or beamsplitter in the path (required for CHSH and HOM setups)",
+    )
     pairs.set_defaults(func=cmd_calibrate_pairs)
 
     ver = sub.add_parser("version", help="print the version")
