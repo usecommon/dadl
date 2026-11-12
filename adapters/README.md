@@ -1,22 +1,32 @@
 # Adapters
 
-Vendor adapters arrive in phase 2, starting with one tagger (Swabian) and an
-adapter template. PicoQuant, qutools and IDQ follow as "v0.2+ / seeking
-contributors".
+An adapter turns a vendor's files or device stream into DADL `TagSet`s:
+int64 picoseconds per channel on a declared clock, with every non-tag record
+reported as a typed event.
 
-**Until then:** export your tags to the generic format that `dadl analyze`
-reads: `.npz` or `.csv` with integer columns `setting`, `channel`,
-`timestamp_ps`. See "Using your own data" in the repository README and
-`python/dadl/tagfile.py`.
+| Adapter | Status | Module |
+| --- | --- | --- |
+| PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available on `main` (phase 2) | `dadl.adapters.ptu` |
+| PicoQuant T3 mode | Planned | |
+| Swabian Instruments, qutools, IDQ | Seeking contributors | |
 
-Planned design:
+```python
+from dadl.adapters import PtuFile
 
-- In-tree adapters implement the Rust `Adapter` trait.
-- Python-only vendor SDKs implement the equivalent Python Protocol and run
-  through the `PyAdapter` shim as a lower-throughput tier.
+reader = PtuFile("run.ptu")
+tags = reader.read()          # TagSet: {ChannelId(device, input): int64 ps}
+reader.events()               # rollovers, markers, unknown records, stop reason
+reader.config()               # scalar header entries, kept as provenance
+```
 
-Proprietary vendor SDKs are never committed to this repository. Every adapter
-must pass the shared conformance suite on recorded replay files, which are
-downloaded from release assets with hash checks rather than stored in git.
+The PTU reader is DADL's own (no vendor software). Its tests write PTU
+fixtures with `python/tests/ptu_writer.py` and, when the third-party
+`ptufile` package is installed, check that both readers give the same times.
 
-See `docs/design.md`, "Adapter contract".
+Other formats: export to the generic `.npz` / `.csv` tag file that
+`dadl analyze` reads (integer columns `setting`, `channel`, `timestamp_ps`).
+
+Writing an adapter: see [TEMPLATE.md](TEMPLATE.md). Proprietary vendor SDKs
+are never committed to this repository.
+
+See `docs/design.md`, "Adapter contract", for the Rust trait this mirrors.

@@ -40,7 +40,7 @@ from dadl.stats import Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -53,9 +53,11 @@ _SQRT2PI = math.sqrt(2 * math.pi)
 
 
 def _edges(n_bins: int, bin_width_ps: int, range_ps: int) -> np.ndarray:
+    """Model bin edges. Delays are whole ps, so the bin [e, e + w) holds the integers e .. e + w - 1,
+    which a continuous delay fills from e - 1/2 to e + w - 1/2 (ignoring this biased v1 by +0.5 ps)."""
     e = -range_ps + bin_width_ps * np.arange(n_bins + 1, dtype=float)
     e[-1] = min(e[-1], float(range_ps))
-    return e
+    return e - 0.5
 
 
 class _PeakModel:

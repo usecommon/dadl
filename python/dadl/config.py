@@ -1,8 +1,11 @@
 """Loading and validating setup.yaml files.
 
 `load_setup` returns a typed `Setup`. Every error is a `ConfigError` that names
-the offending key. A JSON Schema for setup files (dadl check-config) and
-migrations (dadl migrate) arrive in phase 2.
+the offending key. schema/setup-1.schema.json describes the same structure.
+
+Two analysis types: `chsh` (detectors A+, A-, B+, B-; four setting pairs) and
+`hom` (detectors A and B on the beamsplitter outputs; acquisitions "dip" at
+zero path delay and "reference" at `reference_delay_ps`).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import yaml
 
 from dadl import _checks
 from dadl.analysis.chsh import CHANNELS, Window
+from dadl.analysis.hom import HOM_CHANNELS, HOM_SETTINGS
 from dadl.errors import ConfigError
 from dadl.sim import CHSH_SETTINGS, DetectorParams, PairSource
 
@@ -27,8 +31,9 @@ DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
      "afterpulse_tau_ps", "delay_ps"}
 )
-SOURCE_KEYS = frozenset({"type", "pair_rate_per_s", "visibility"})
-ANALYSIS_KEYS = frozenset({"type", "settings_deg", "duration_s_per_setting", "window"})
+SOURCE_KEYS = frozenset({"type", "pair_rate_per_s", "visibility", "coherence_time_ps"})
+ANALYSIS_KEYS = frozenset({"type", "settings_deg", "duration_s_per_setting", "window", "reference_delay_ps"})
+ANALYSIS_TYPES = ("chsh", "hom")
 WINDOW_KEYS = frozenset({"width_ps", "source", "delays_ps"})
 
 
@@ -62,10 +67,26 @@ class Setup:
     settings_deg: dict[str, float]
     duration_s_per_setting: float
     window: Window
-    #: Maps channel numbers in a tag file to channel names (A+, A-, B+, B-).
+    #: Maps channel numbers in a tag file to channel names (CHSH: A+, A-, B+, B-; HOM: A, B).
     channels: dict[int, str]
     path: Path | None = None
     data: dict[str, Any] = field(default_factory=dict, repr=False)
+    analysis_type: str = "chsh"
+    #: HOM only: the path delay of the reference acquisition, far from the dip.
+    reference_delay_ps: float | None = None
+
+    @property
+    def channel_names(self) -> tuple[str, ...]:
+        return HOM_CHANNELS if self.analysis_type == "hom" else CHANNELS
+
+    @property
+    def setting_keys(self) -> tuple:
+        """Acquisition keys in tag-file setting order."""
+        if self.analysis_type == "hom":
+            return HOM_SETTINGS
+        from dadl.tagfile import SETTING_PAIRS
+
+        return SETTING_PAIRS
 
 
 def _mapping(value: Any, where: str) -> dict[Any, Any]:
@@ -152,6 +173,7 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         PairSource,
         pair_rate_per_s=src.get("pair_rate_per_s", PairSource.pair_rate_per_s),
         visibility=src.get("visibility", PairSource.visibility),
+        coherence_time_ps=src.get("coherence_time_ps", PairSource.coherence_time_ps),
     )
 
     # detectors
@@ -168,16 +190,33 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     # analysis
     analysis = _mapping(data["analysis"], "analysis")
     _no_unknown(analysis, ANALYSIS_KEYS, "analysis")
-    if analysis.get("type") != "chsh":
-        raise ConfigError(f"analysis.type must be 'chsh' in phase 1, got {analysis.get('type')!r}")
-    missing_ch = [ch for ch in CHANNELS if ch not in detectors]
+    kind = analysis.get("type")
+    if kind not in ANALYSIS_TYPES:
+        raise ConfigError(f"analysis.type must be one of {list(ANALYSIS_TYPES)}, got {kind!r}")
+    names = HOM_CHANNELS if kind == "hom" else CHANNELS
+    missing_ch = [ch for ch in names if ch not in detectors]
     if missing_ch:
-        raise ConfigError(f"a chsh setup needs detectors {list(CHANNELS)}; missing {missing_ch}")
-    settings = _mapping(analysis.get("settings_deg", dict(CHSH_SETTINGS)), "analysis.settings_deg")
-    missing_s = [s for s in CHSH_SETTINGS if s not in settings]
-    if missing_s:
-        raise ConfigError(f"analysis.settings_deg is missing {missing_s}")
-    settings_deg = {str(k): _wrap(f"analysis.settings_deg.{k}", _checks.finite, v, k) for k, v in settings.items()}
+        raise ConfigError(f"a {kind} setup needs detectors {list(names)}; missing {missing_ch}")
+    settings_deg: dict[str, float] = {}
+    reference_delay = None
+    if kind == "chsh":
+        if "reference_delay_ps" in analysis:
+            raise ConfigError("analysis.reference_delay_ps belongs to hom setups")
+        settings = _mapping(analysis.get("settings_deg", dict(CHSH_SETTINGS)), "analysis.settings_deg")
+        missing_s = [s for s in CHSH_SETTINGS if s not in settings]
+        if missing_s:
+            raise ConfigError(f"analysis.settings_deg is missing {missing_s}")
+        settings_deg = {str(k): _wrap(f"analysis.settings_deg.{k}", _checks.finite, v, k) for k, v in settings.items()}
+    else:
+        if "settings_deg" in analysis:
+            raise ConfigError("analysis.settings_deg belongs to chsh setups")
+        if "reference_delay_ps" not in analysis:
+            raise ConfigError("a hom setup needs analysis.reference_delay_ps (a path delay far from the dip)")
+        reference_delay = _wrap(
+            "analysis.reference_delay_ps", _checks.finite, analysis["reference_delay_ps"], "reference_delay_ps"
+        )
+        if reference_delay == 0:
+            raise ConfigError("analysis.reference_delay_ps must be away from the dip (non-zero)")
     duration = _wrap(
         "analysis.duration_s_per_setting",
         _checks.finite,
@@ -197,16 +236,16 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     delays = _mapping(win.get("delays_ps", {}), "analysis.window.delays_ps")
     window = _wrap("analysis.window", Window, width_ps=win["width_ps"], source="plan", delays_ps=delays)
 
-    # channel map for tag files: number -> name; default 0..3 -> A+, A-, B+, B-
-    raw_map = _mapping(data.get("channels", dict(enumerate(CHANNELS))), "channels")
+    # channel map for tag files: number -> name; default 0, 1, ... in channel-name order
+    raw_map = _mapping(data.get("channels", dict(enumerate(names))), "channels")
     channels: dict[int, str] = {}
     for num, ch in raw_map.items():
         num = _wrap("channels", _checks.integer, num, "channel number", minimum=0)
-        if ch not in CHANNELS:
-            raise ConfigError(f"channels: {num} maps to {ch!r}; names must be one of {list(CHANNELS)}")
+        if ch not in names:
+            raise ConfigError(f"channels: {num} maps to {ch!r}; names must be one of {list(names)}")
         channels[num] = ch
-    if sorted(channels.values()) != sorted(CHANNELS):
-        raise ConfigError(f"channels must map exactly one number to each of {list(CHANNELS)}")
+    if sorted(channels.values()) != sorted(names):
+        raise ConfigError(f"channels must map exactly one number to each of {list(names)}")
 
     return Setup(
         name=name,
@@ -219,4 +258,6 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         window=window,
         channels=channels,
         data=data,
+        analysis_type=kind,
+        reference_delay_ps=reference_delay,
     )

@@ -2,8 +2,8 @@
 
 A tag file is a table with three integer columns:
 
-    setting        0..3, the CHSH setting pair, in the order
-                   (a, b), (a, b'), (a', b), (a', b')
+    setting        CHSH: 0..3, the setting pair, in the order
+                   (a, b), (a, b'), (a', b), (a', b'); HOM: 0 dip, 1 reference
     channel        detector input number, mapped to A+, A-, B+, B- by the
                    `channels:` map in setup.yaml (default 0, 1, 2, 3)
     timestamp_ps   int64 time tag in picoseconds
@@ -13,13 +13,15 @@ Two encodings are accepted:
 - `.npz`: a NumPy archive with arrays named `setting`, `channel`, `timestamp_ps`;
 - `.csv`: a header line `setting,channel,timestamp_ps`, then one row per tag.
 
-Vendor formats (PTU, Swabian .ttbin, Photon-HDF5) arrive as adapters in
-phase 2; until then, export to one of these.
+PicoQuant PTU files are read directly by `dadl.adapters.ptu`; other vendor
+formats (Swabian .ttbin, Photon-HDF5) need exporting to one of these.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -30,13 +32,18 @@ from dadl.errors import ConfigError
 COLUMNS = ("setting", "channel", "timestamp_ps")
 SETTING_PAIRS: tuple[tuple[str, str], ...] = tuple(SIGNS)
 
-Runs = dict[tuple[str, str], dict[str, np.ndarray]]
+Runs = dict[Any, dict[str, np.ndarray]]
 
 
-def read_tags(path: str | Path, channels: dict[int, str] | None = None) -> Runs:
-    """Read a tag file into the `runs` structure that `dadl.chsh` takes."""
+def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings: Sequence = SETTING_PAIRS) -> Runs:
+    """Read a tag file into the `runs` structure that `dadl.chsh` takes.
+
+    `settings` names the setting indices in order (CHSH: the four setting
+    pairs; HOM: "dip", "reference").
+    """
     path = Path(path)
     channels = channels or dict(enumerate(CHANNELS))
+    settings = tuple(settings)
     try:
         if path.suffix == ".npz":
             with np.load(path, allow_pickle=False) as npz:
@@ -79,15 +86,15 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None) -> Runs:
         raise ConfigError(f"{path}: {exc}") from exc
     if not (setting.size == channel.size == stamps.size):
         raise ConfigError(f"{path}: columns have different lengths")
-    bad_s = np.setdiff1d(np.unique(setting), np.arange(len(SETTING_PAIRS)))
+    bad_s = np.setdiff1d(np.unique(setting), np.arange(len(settings)))
     if bad_s.size:
-        raise ConfigError(f"{path}: setting values must be 0..3, found {bad_s.tolist()}")
+        raise ConfigError(f"{path}: setting values must be 0..{len(settings) - 1}, found {bad_s.tolist()}")
     bad_c = np.setdiff1d(np.unique(channel), np.array(sorted(channels), dtype=np.int64))
     if bad_c.size:
         raise ConfigError(f"{path}: channel numbers {bad_c.tolist()} are not in the setup's channel map")
 
     runs: Runs = {}
-    for i, pair in enumerate(SETTING_PAIRS):
+    for i, pair in enumerate(settings):
         in_setting = setting == i
         runs[pair] = {
             name: np.sort(stamps[in_setting & (channel == num)]) for num, name in channels.items()
@@ -95,13 +102,15 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None) -> Runs:
     return runs
 
 
-def write_tags(path: str | Path, runs: Runs, channels: dict[int, str] | None = None) -> Path:
+def write_tags(
+    path: str | Path, runs: Runs, channels: dict[int, str] | None = None, settings: Sequence = SETTING_PAIRS
+) -> Path:
     """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`)."""
     path = Path(path)
     channels = channels or dict(enumerate(CHANNELS))
     number = {name: num for num, name in channels.items()}
     parts = []
-    for i, pair in enumerate(SETTING_PAIRS):
+    for i, pair in enumerate(settings):
         for name, tags in runs[pair].items():
             tags = np.asarray(tags, dtype=np.int64)
             parts.append(np.stack([np.full(tags.size, i), np.full(tags.size, number[name]), tags], axis=1))

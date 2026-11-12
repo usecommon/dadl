@@ -1,0 +1,50 @@
+# Hong-Ou-Mandel interference of SPDC photon pairs on a 50:50 beamsplitter,
+# detected by two superconducting nanowire detectors (SNSPDs).
+#
+# `dadl quickstart hom-snspd` simulates two acquisitions, at the dip (zero
+# path delay) and at the reference delay far from it, and reports the raw
+# dip visibility, then the accidental-subtracted value as a labelled
+# secondary result (allowed for HOM, refused for Bell-type claims).
+# To analyse your own tags: setting 0 = dip, 1 = reference in the tag file,
+# then `dadl analyze setup.yaml --tags tags.npz`.
+#
+# Units are in the key names: _ps picoseconds, _cps counts per second.
+schema_version: 1
+name: hom-snspd
+
+backend: sim
+seed: 2026
+
+source:
+  type: spdc-cw
+  pair_rate_per_s: 200000
+  visibility: 0.92          # two-photon indistinguishability (dip depth)
+  coherence_time_ps: 1.5    # dip shape exp(-(delay / coherence_time)^2)
+
+# Ground truth for the simulator. On hardware these become calibration targets.
+detectors:
+  A: &snspd
+    family: snspd
+    efficiency: 0.85
+    dark_rate_cps: 100
+    dead_time_ps: 30000
+    jitter_sigma_ps: 25
+    afterpulse_prob: 0.0
+    afterpulse_tau_ps: 50000
+    delay_ps: 0
+  B: *snspd
+
+# Channel numbers in a tag file -> channel names.
+channels: {0: A, 1: B}
+
+analysis:
+  type: hom
+  duration_s_per_setting: 1.0
+  reference_delay_ps: 15    # ten coherence times from the dip
+  # Declared before acquisition. Windows chosen from the data are refused.
+  window:
+    width_ps: 200
+    source: plan
+    delays_ps: {}
+
+policy: default

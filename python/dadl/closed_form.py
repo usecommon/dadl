@@ -156,3 +156,15 @@ def heralding_ratio_expected(
     _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s)
     capture = grid_capture_probability(jitter_combined_ps / math.sqrt(2.0), width_ps)
     return pair_rate_per_s * efficiency_a * (1 - fa) * efficiency_b * (1 - fb) * capture / ra
+
+
+def hom_split_probability(visibility: float, path_delay_ps: float, coherence_time_ps: float) -> float:
+    """Probability that the two photons leave a 50:50 beamsplitter by different ports."""
+    return 0.5 * (1.0 - visibility * math.exp(-((path_delay_ps / coherence_time_ps) ** 2)))
+
+
+def hom_visibility_expected(visibility: float, reference_delay_ps: float, coherence_time_ps: float) -> float:
+    """Dip visibility 1 - C(0) / C(reference) without accidentals, dead time or window losses."""
+    return 1.0 - hom_split_probability(visibility, 0.0, coherence_time_ps) / hom_split_probability(
+        visibility, reference_delay_ps, coherence_time_ps
+    )

@@ -47,6 +47,7 @@ __all__ = [
     "simulate_chsh",
     "simulate_chsh_setting",
     "simulate_dark",
+    "simulate_hom",
     "simulate_pairs",
 ]
 
@@ -80,11 +81,17 @@ class PairSource:
     """A CW polarization-entangled SPDC source producing a Werner-like Phi+ state."""
 
     pair_rate_per_s: float = 1e5  # pairs per second at the crystal
-    visibility: float = 0.95  # E(alpha, beta) = V cos 2(alpha - beta)
+    #: CHSH: E(alpha, beta) = V cos 2(alpha - beta). HOM: the dip depth (indistinguishability).
+    visibility: float = 0.95
+    #: HOM only: the dip is exp(-(delay / coherence_time)^2).
+    coherence_time_ps: float = 1.0
 
     def __post_init__(self) -> None:
         _checks.finite(self.pair_rate_per_s, "pair_rate_per_s", minimum=0.0)
         _checks.finite(self.visibility, "visibility", minimum=0.0, maximum=1.0)
+        c = _checks.finite(self.coherence_time_ps, "coherence_time_ps", minimum=0.0)
+        if c <= 0:
+            raise ValueError("coherence_time_ps must be positive")
 
 
 def poisson_times(rate: float, duration_s: float, rng: np.random.Generator) -> np.ndarray:
@@ -179,6 +186,45 @@ def simulate_pairs(
         raise ValueError("duration_s must be positive")
     t = poisson_times(pair_rate_per_s, duration_s, rng)
     return detect(t, det_a, duration_s, rng), detect(t, det_b, duration_s, rng)
+
+
+def simulate_hom(
+    source: PairSource,
+    det_a: DetectorParams,
+    det_b: DetectorParams,
+    path_delay_ps: float,
+    duration_s: float,
+    rng: np.random.Generator,
+) -> dict[str, np.ndarray]:
+    """Recorded tags on the two outputs ("A", "B") of a Hong-Ou-Mandel beamsplitter.
+
+    One photon of each pair is delayed by `path_delay_ps`. The photons leave
+    by different ports with probability (1 - V exp(-(delay / tau_c)^2)) / 2,
+    V = source.visibility and tau_c = source.coherence_time_ps; otherwise
+    both leave by the same port, where the detector (not photon-number
+    resolving) records at most one of them.
+    """
+    _checks.finite(path_delay_ps, "path_delay_ps")
+    _checks.finite(duration_s, "duration_s", minimum=0.0)
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    t1 = poisson_times(source.pair_rate_per_s, duration_s, rng)
+    t2 = t1 + path_delay_ps
+    g = math.exp(-((path_delay_ps / source.coherence_time_ps) ** 2))
+    split = rng.random(t1.size) < 0.5 * (1.0 - source.visibility * g)
+    first_to_a = rng.random(t1.size) < 0.5
+    to_a = np.concatenate([
+        t1[split & first_to_a], t2[split & ~first_to_a],  # one photon each way
+        t1[~split & first_to_a], t2[~split & first_to_a],  # both to A
+    ])
+    to_b = np.concatenate([
+        t2[split & first_to_a], t1[split & ~first_to_a],
+        t1[~split & ~first_to_a], t2[~split & ~first_to_a],  # both to B
+    ])
+    return {
+        "A": detect(np.sort(to_a), det_a, duration_s, rng),
+        "B": detect(np.sort(to_b), det_b, duration_s, rng),
+    }
 
 
 def simulate_chsh_setting(

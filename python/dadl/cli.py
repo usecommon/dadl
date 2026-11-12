@@ -3,7 +3,7 @@
     dadl quickstart [chsh-spad | path/to/setup.yaml]   simulate and analyse an example
     dadl init [DIR]                                     copy the example setup.yaml into DIR
     dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
-    dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S from your own tags
+    dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S or HOM visibility from your own tags
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
     dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR
                                                         delay, jitter, accidentals, heralding efficiency
@@ -22,15 +22,15 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.closed_form import chsh_expected_grid
+from dadl.closed_form import chsh_expected_grid, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
-from dadl.sim import simulate_chsh, simulate_dark
-from dadl.tagfile import SETTING_PAIRS, read_tags, write_tags
+from dadl.sim import simulate_chsh, simulate_dark, simulate_hom
+from dadl.tagfile import read_tags, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
-EXAMPLES = ("chsh-spad",)
+EXAMPLES = ("chsh-spad", "hom-snspd")
 
 
 def example_path(name: str) -> Path:
@@ -48,22 +48,67 @@ def _simulate(setup: Setup):
     if setup.backend != "sim":
         raise DadlError(f"{setup.name}: backend is {setup.backend!r}; only 'sim' setups can be simulated")
     rng = np.random.default_rng(setup.seed)
+    if setup.analysis_type == "hom":
+        delays = {"dip": 0.0, "reference": setup.reference_delay_ps}
+        return {
+            key: simulate_hom(
+                setup.source, setup.detectors["A"], setup.detectors["B"], delays[key],
+                setup.duration_s_per_setting, rng,
+            )
+            for key in setup.setting_keys
+        }
     return simulate_chsh(
         setup.source, setup.detectors, setup.duration_s_per_setting, rng, settings=setup.settings_deg
     )
 
 
-def _print_result(result: LabelledValue) -> None:
-    print(f"  Raw S = {result.raw}   ({UNCERTAINTY_KIND})")
-    print(f"  Labels: {'; '.join(result.labels)}")
+def _print_result(result: LabelledValue, symbol: str = "S") -> None:
+    print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
+    print(f"  Labels: {'; '.join(result.labels) or 'none'}")
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides else ' (default)'}")
 
 
+def _quickstart_hom(path: Path, setup: Setup) -> int:
+    from dadl.analysis.hom import hom_from_tags
+
+    runs = _simulate(setup)
+    result, counts = hom_from_tags(runs, setup.window)
+    det = setup.detectors["A"]
+    src = setup.source
+    print(f"DADL {__version__} quickstart: {setup.name} (simulated data, seed {setup.seed})")
+    print(f"  Setup: {path}")
+    print(
+        f"  Source: {src.pair_rate_per_s:.3g} pairs/s, indistinguishability {src.visibility}, coherence time "
+        f"{src.coherence_time_ps:g} ps; dip and reference ({setup.reference_delay_ps:g} ps) acquisitions of "
+        f"{setup.duration_s_per_setting} s"
+    )
+    print(
+        f"  Detector A{'' if setup.detectors['B'] == det else ' (B differs)'}: efficiency {det.efficiency}, "
+        f"dark {det.dark_rate_cps:.0f} cps, dead time {det.dead_time_ps / 1000:g} ns, jitter {det.jitter_sigma_ps:.0f} ps"
+    )
+    print()
+    print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
+    _print_result(result, "V")
+    if result.corrected is not None:
+        print(
+            f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
+            f"V = {result.corrected}"
+        )
+    expected = hom_visibility_expected(src.visibility, setup.reference_delay_ps, src.coherence_time_ps)
+    print(f"  Closed-form expectation (no accidentals, dead time or window losses): V = {expected:.4f}")
+    print()
+    print("  Edit a copy with `dadl init --example hom-snspd`, then `dadl quickstart setup.yaml`.")
+    print(f"  PicoQuant .ptu files: dadl.adapters.read_ptu. Overview: {SITE}")
+    return 0
+
+
 def cmd_quickstart(args: argparse.Namespace) -> int:
     path = _resolve(args.target)
     setup = load_setup(path)
+    if setup.analysis_type == "hom":
+        return _quickstart_hom(path, setup)
     runs = _simulate(setup)
     result = chsh(runs, setup.window)
     det = setup.detectors["A+"]
@@ -125,7 +170,7 @@ def _simulate_dark(setup: Setup, duration_s: float):
         for (_num, name), stream in zip(sorted(setup.channels.items()), streams)
     }
     empty = {name: np.empty(0, dtype=np.int64) for name in dark}
-    return {pair: (dark if i == 0 else empty) for i, pair in enumerate(SETTING_PAIRS)}
+    return {key: (dark if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:
@@ -135,8 +180,8 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
     else:
         runs = _simulate(setup)
-        what = "CHSH tags"
-    out = write_tags(args.out, runs, setup.channels)
+        what = "HOM tags (setting 0 dip, 1 reference)" if setup.analysis_type == "hom" else "CHSH tags"
+    out = write_tags(args.out, runs, setup.channels, setup.setting_keys)
     print(f"Wrote simulated {what} for {setup.name} to {out}")
     return 0
 
@@ -147,10 +192,11 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.data import ChannelId
 
     setup = load_setup(_resolve(args.setup))
-    runs = read_tags(args.tags, setup.channels)
-    if not 0 <= args.setting < len(SETTING_PAIRS):
-        raise DadlError(f"--setting must be 0..{len(SETTING_PAIRS) - 1}")
-    tags = runs[SETTING_PAIRS[args.setting]]
+    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
+    keys = setup.setting_keys
+    if not 0 <= args.setting < len(keys):
+        raise DadlError(f"--setting must be 0..{len(keys) - 1}")
+    tags = runs[keys[args.setting]]
     number = {name: num for num, name in setup.channels.items()}
     wanted = args.channel or [setup.channels[n] for n in sorted(setup.channels)]
     unknown = [c for c in wanted if c not in number]
@@ -173,10 +219,11 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     from dadl.data import ChannelId
 
     setup = load_setup(_resolve(args.setup))
-    runs = read_tags(args.tags, setup.channels)
-    if not 0 <= args.setting < len(SETTING_PAIRS):
-        raise DadlError(f"--setting must be 0..{len(SETTING_PAIRS) - 1}")
-    tags = runs[SETTING_PAIRS[args.setting]]
+    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
+    keys = setup.setting_keys
+    if not 0 <= args.setting < len(keys):
+        raise DadlError(f"--setting must be 0..{len(keys) - 1}")
+    tags = runs[keys[args.setting]]
     number = {name: num for num, name in setup.channels.items()}
     for name in (args.herald, args.signal):
         if name not in number:
@@ -215,9 +262,20 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
 
 def cmd_analyze(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
-    runs = read_tags(args.tags, setup.channels)
-    result = chsh(runs, setup.window)
+    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
     print(f"DADL {__version__} analyze: {setup.name}, tags from {args.tags}")
+    if setup.analysis_type == "hom":
+        from dadl.analysis.hom import hom_from_tags
+
+        result, counts = hom_from_tags(runs, setup.window)
+        print("  The tags are trusted as given.")
+        print()
+        print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
+        _print_result(result, "V")
+        if result.corrected is not None:
+            print(f"  Accidentals subtracted ({counts['accidentals']:.3g}, off-peak): V = {result.corrected}")
+        return 0
+    result = chsh(runs, setup.window)
     print("  Phase 1 trusts the tags as given and reports raw S only.")
     print()
     _print_result(result)
@@ -235,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     qs = sub.add_parser(
         "quickstart",
-        help="simulate an example (or your setup.yaml) and print raw CHSH S",
+        help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility)",
         description="Simulate a CHSH experiment from a setup file and analyse it with a fixed, planned window.",
     )
     qs.add_argument(
@@ -258,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument("--duration-s", type=float, default=20.0, help="dark acquisition length per channel (default 20)")
     sim.set_defaults(func=cmd_simulate)
 
-    an = sub.add_parser("analyze", help="raw CHSH S from your own tag file")
+    an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
     an.add_argument("--tags", required=True, help="tag file, .npz or .csv (columns setting, channel, timestamp_ps)")
     an.set_defaults(func=cmd_analyze)
