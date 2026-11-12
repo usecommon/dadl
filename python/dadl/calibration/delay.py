@@ -32,6 +32,7 @@ pulsed sources the side peaks must lie outside the range).
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -156,11 +157,15 @@ def calibrate_delay(
     seed: int | None = None,
     n_draws: int = N_DRAWS,
     conditions: dict[str, float] | None = None,
+    _refined: bool = False,
 ) -> Calibration:
     """Fit the delay of channel b relative to a (b - a, ps) and the combined jitter sigma.
 
     `a` and `b` are sorted int64 ps tags from one acquisition of a pair
-    source. The peak must lie within `range_ps` of zero.
+    source. The peak must lie within `range_ps` of zero. When the fitted jitter
+    is under two bin widths the fit is repeated once with bins of about a
+    third of the jitter (whole tagger ticks): a peak one or two bins wide has a
+    non-Gaussian likelihood and its intervals undercovered (92%).
     """
     if len(channels) != 2:
         raise ValueError("channels must be (channel a, channel b)")
@@ -242,6 +247,14 @@ def calibrate_delay(
     if not (edges[0] + 5 * sigma < theta[2] < edges[-1] - 5 * sigma):
         notes.append("the peak lies within 5 sigma of the edge of the histogram; widen range_ps")
         converged = False
+    finer = max(tick, int(sigma / 3) // tick * tick)
+    if not _refined and sigma < 2 * bin_width_ps and finer < bin_width_ps:
+        refined = calibrate_delay(
+            a, b, channels, range_ps=range_ps, bin_width_ps=finer, backend=backend, seed=seed,
+            n_draws=n_draws, conditions=conditions, _refined=True,
+        )
+        note = f"bins refined from {bin_width_ps} to {finer} ps because the jitter ({sigma:.3g} ps) is under two bin widths"
+        return dataclasses.replace(refined, notes=(note, *refined.notes))
     if sigma < bin_width_ps:
         notes.append(f"the fitted jitter ({sigma:.3g} ps) is below the bin width; use narrower bins")
 

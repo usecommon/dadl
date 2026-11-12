@@ -324,3 +324,25 @@ def test_broad_peak_fits_without_crashing():
         cal = calibrate_delay(a, b, CHS, n_draws=10)
         assert cal.converged
         assert abs(cal.estimates["jitter_sigma_ps"].value / truth["jitter_sigma_ps"] - 1) < 0.1
+
+
+def test_narrow_peak_bins_are_refined():
+    # Round 2 of the calibration probes: 5 ps jitter in 20 ps bins covered 92%; the fit now
+    # repeats itself with bins of about a third of the jitter.
+    det_a = DetectorParams(efficiency=0.8, jitter_sigma_ps=4.0, dark_rate_cps=50.0, dead_time_ps=30_000)
+    det_b = DetectorParams(efficiency=0.8, jitter_sigma_ps=3.0, dark_rate_cps=50.0, dead_time_ps=30_000, delay_ps=777)
+    a, b = simulate_pairs(2e4, det_a, det_b, 1.0, np.random.default_rng(1))
+    cal = calibrate_delay(a, b, CHS, n_draws=10)
+    assert any("bins refined from 20" in n for n in cal.notes)
+    assert cal.estimates["delay_ps"].contains(777.0) and cal.estimates["jitter_sigma_ps"].contains(5.0)
+
+
+def test_sparse_dispersion_check_is_exact():
+    # With far below one count per window the chi-square approximation flagged 4.5% of good runs
+    # at p < 0.01; the exact conditional test must stay at or below 1%.
+    from dadl.calibration.accidentals import dispersion_pvalue
+
+    rng = np.random.default_rng(0)
+    p = np.array([dispersion_pvalue(rng.poisson(0.05, 200)) for _ in range(400)])
+    assert np.mean(p < 0.01) <= 0.02
+    assert dispersion_pvalue(np.r_[np.zeros(199), 6]) < 0.01  # all counts in one window is structure
