@@ -132,3 +132,27 @@ def test_silent_loss_is_detected(hom_setup):
 def test_overlapping_overflows_are_refused(hom_setup):
     with pytest.raises(ValueError, match="overlap"):
         SimulatedTagger(hom_setup, faults=Faults(buffer_overflows=((0.1, 0.2), (0.2, 0.1))))
+
+
+@pytest.mark.parametrize("device", ["hydraharp", "picoharp", "multiharp", "timeharp260p"])
+def test_delay_fit_is_unbiased_on_every_device_tick(device):
+    # Found by running the existing calibrations on twin data: method v2 assumed 1 ps ticks
+    # and read 5 ps MultiHarp delays 2 ps high.
+    from dadl.calibration import calibrate_delay
+    from dadl.calibration.delay import tag_tick
+    from dadl.data import ChannelId
+    from dadl.sim import DetectorParams, simulate_pairs
+
+    _, tick, _ = DEVICES[device]
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100, dead_time_ps=30_000, jitter_sigma_ps=25)
+    est, notes = [], set()
+    for seed in range(8):
+        a, b = simulate_pairs(1e5, det, det, 1.0, np.random.default_rng(seed))
+        a, b = a // tick * tick, b // tick * tick
+        assert tag_tick(a, b) == tick
+        cal = calibrate_delay(a, b, (ChannelId("A", 0), ChannelId("B", 1)), n_draws=10)
+        est.append(cal.estimates["delay_ps"].value)
+        notes.update(cal.notes)
+        assert cal.conditions["tick_ps"] == tick
+    assert abs(np.mean(est)) < 0.3
+    assert any("raised" in n for n in notes) == (20 % tick != 0)

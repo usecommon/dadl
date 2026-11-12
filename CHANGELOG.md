@@ -126,6 +126,10 @@ from the packages.
   configuration changes as typed events; `check_accounting` verifies that
   tags delivered plus tags reported lost equal tags generated.
 - `dadl.simsetup` (`simulate_setup`, `simulate_setup_dark`), moved out of the CLI.
+- Fix found by running the existing calibrations on twin data: the delay fit
+  (method `xcorr-gaussian-mle` v3) finds the tagger tick from the data, rounds
+  the bin width up to whole ticks, and models each bin accordingly. Version 2
+  assumed 1 ps ticks and read 5 ps MultiHarp delays 2 ps high.
 
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 
