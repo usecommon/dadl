@@ -137,6 +137,17 @@ from the packages.
   A sparse, sharp coincidence peak no longer gives a NaN predictive check
   (which blocked saving the artifact); HOM says when accidentals are not
   subtracted.
+- Coverage gates run at more than one regime: the dark calibration at a Si
+  SPAD and a CMOS SPAD (20% afterpulsing), the pair calibrations at a CW SPAD
+  source, a sparse low-rate SNSPD source and a broad (about 1.8 ns) IRF:
+  12 gates, run in parallel (`--jobs`) in the existing CI check. In the sparse
+  regime about 0.2 off-peak counts are expected in all, so the accidentals
+  gate there requires coverage of at least 95% (declared before the first run).
+- Fix found by the broad-IRF regime: the delay fit crashed on broad peaks
+  (overflow, or a singular Hessian) because its starting width came from a
+  fixed +-50 bins. The start now widens until it holds +-4 sigma, the fit is
+  bounded, and when the background fits to zero the delay and jitter are
+  reported conditional on it, with a note, instead of failing.
 
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 

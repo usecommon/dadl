@@ -4,7 +4,12 @@ Each replicate simulates one acquisition from known parameters with an
 independent random stream, runs the calibration, and records whether each 95%
 interval contains the truth. Run from the command line:
 
-    python -m dadl.calibration.coverage {dark,pairs,dcr,all} --replicates 1000
+    python -m dadl.calibration.coverage {dark,pairs,dcr,all} --replicates 1000 [--jobs 4]
+
+Each calibration is gated at more than one point of parameter space (a
+"regime"), since a method can cover well at one point and fail at another:
+the dark calibration's dead-time interval covered 96% at the original gate
+point but 89% with fast afterpulsing (fixed in method v2).
 
 `pairs` covers three calibrations from one simulated pair acquisition per
 replicate (delay and jitter, accidentals, heralding efficiency), each with
@@ -17,7 +22,8 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -38,6 +44,16 @@ DARK_TRUTH = DetectorParams(
 )
 DARK_DURATION_S = 20.0
 
+#: Dark-calibration regimes: (detector, seconds per replicate).
+DARK_REGIMES: dict[str, tuple[DetectorParams, float]] = {
+    "si-spad": (DARK_TRUTH, DARK_DURATION_S),
+    # CMOS SPAD: strong, fast afterpulsing and a short dead time.
+    "cmos-spad": (
+        DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000, afterpulse_prob=0.2, afterpulse_tau_ps=20_000.0),
+        20.0,
+    ),
+}
+
 #: Pair source for the delay, accidentals and heralding gates: a CW SPDC
 #: source at 20,000 pairs/s, 2 s per replicate, a 2 ns fixed-grid window
 #: with exact declared delays.
@@ -46,6 +62,41 @@ PAIR_A = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=35
 PAIR_B = DetectorParams(efficiency=0.4, dark_rate_cps=2000.0, jitter_sigma_ps=200.0, delay_ps=3_217)
 PAIR_WIDTH_PS = 2_000
 PAIR_DURATION_S = 2.0
+
+
+@dataclass(frozen=True)
+class PairRegime:
+    rate: float
+    a: DetectorParams
+    b: DetectorParams
+    width_ps: int
+    duration_s: float
+    #: Gates that only require coverage of at least 95% (discrete counts too low for an exact 95%).
+    at_least: frozenset[str] = field(default_factory=frozenset)
+
+
+PAIR_REGIMES: dict[str, PairRegime] = {
+    "cw-spad": PairRegime(PAIR_RATE, PAIR_A, PAIR_B, PAIR_WIDTH_PS, PAIR_DURATION_S),
+    # Low-rate source on SNSPDs: few counts, a sharp peak, about 0.2 off-peak counts in all.
+    # Declared before the first run: with so few counts any valid interval over-covers, so the
+    # accidentals gate requires coverage of at least 95% only.
+    "sparse-snspd": PairRegime(
+        2e3,
+        DetectorParams(efficiency=0.8, dark_rate_cps=50.0, dead_time_ps=30_000, jitter_sigma_ps=20.0, delay_ps=0),
+        DetectorParams(efficiency=0.7, dark_rate_cps=50.0, dead_time_ps=30_000, jitter_sigma_ps=15.0, delay_ps=1_234),
+        200,
+        2.0,
+        frozenset({"accidentals"}),
+    ),
+    # Broad timing response (multimode fibre, slow detectors): sigma about 1.8 ns.
+    "broad-irf": PairRegime(
+        2e4,
+        DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=1500.0, delay_ps=0),
+        DetectorParams(efficiency=0.4, dark_rate_cps=2000.0, jitter_sigma_ps=1000.0, delay_ps=5_000),
+        4_000,
+        2.0,
+    ),
+}
 
 #: DCR(T) gate: Arrhenius generation, 200 cps at 273 K, 0.5 eV, five
 #: temperatures, a 10 s dark run at each.
@@ -72,20 +123,24 @@ class CoverageResult:
     replicates: int
     covered: dict[str, int]
     gate: tuple[float, float]
+    #: True when only the lower bound applies (coverage of at least 95%).
+    at_least: bool = False
 
     def fraction(self, name: str) -> float:
         return self.covered[name] / self.replicates
 
     def passed(self) -> bool:
         lo, hi = self.gate
-        return all(lo <= self.fraction(k) <= hi for k in self.covered)
+        return all(lo <= self.fraction(k) <= (1.0 if self.at_least else hi) for k in self.covered)
 
     def __str__(self) -> str:
         lo, hi = self.gate
-        lines = [f"{self.calibration}: {self.replicates} replicates, gate {lo:.1%}-{hi:.1%}"]
+        band = f"at least {lo:.1%}" if self.at_least else f"gate {lo:.1%}-{hi:.1%}"
+        lines = [f"{self.calibration}: {self.replicates} replicates, {band}"]
         for k in self.covered:
             f = self.fraction(k)
-            lines.append(f"  {k:<20} {f:.1%}  {'ok' if lo <= f <= hi else 'FAIL'}")
+            ok = lo <= f <= (1.0 if self.at_least else hi)
+            lines.append(f"  {k:<20} {f:.1%}  {'ok' if ok else 'FAIL'}")
         return "\n".join(lines)
 
 
@@ -94,24 +149,25 @@ def gate(replicates: int, n_params: int) -> tuple[float, float]:
     return coverage_band(replicates, confidence=1 - FALSE_FAIL / n_params)
 
 
-def dark_coverage(replicates: int = 1000, seed: int = 20261111) -> CoverageResult:
+def dark_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "si-spad") -> CoverageResult:
+    det, duration_s = DARK_REGIMES[regime]
     truth = {
-        "dark_rate_cps": DARK_TRUTH.dark_rate_cps,
-        "afterpulse_prob": DARK_TRUTH.afterpulse_prob,
-        "afterpulse_tau_ps": DARK_TRUTH.afterpulse_tau_ps,
-        "dead_time_ps": float(DARK_TRUTH.dead_time_ps),
+        "dark_rate_cps": det.dark_rate_cps,
+        "afterpulse_prob": det.afterpulse_prob,
+        "afterpulse_tau_ps": det.afterpulse_tau_ps,
+        "dead_time_ps": float(det.dead_time_ps),
     }
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
     for child in np.random.SeedSequence(seed).spawn(replicates):
         sim_rng, fit_seed = child.spawn(2)
-        tags = simulate_dark(DARK_TRUTH, DARK_DURATION_S, np.random.default_rng(sim_rng))
+        tags = simulate_dark(det, duration_s, np.random.default_rng(sim_rng))
         cal = calibrate_dark(tags, channel, backend="sim", seed=fit_seed.generate_state(1)[0], n_draws=10)
         for k, v in truth.items():
             iv = cal.estimates.get(k)
             if iv is not None and iv.contains(v):
                 covered[k] += 1
-    return CoverageResult("dark-afterpulse-deadtime", replicates, covered, gate(replicates, len(truth)))
+    return CoverageResult(f"dark-afterpulse-deadtime [{regime}]", replicates, covered, gate(replicates, len(truth)))
 
 
 def _covered(cal, truth: dict[str, float], covered: dict[str, int]) -> None:
@@ -121,45 +177,50 @@ def _covered(cal, truth: dict[str, float], covered: dict[str, int]) -> None:
             covered[k] += 1
 
 
-def pairs_truth() -> dict[str, dict[str, float]]:
-    a, b = PAIR_A, PAIR_B
-    rate_a = a.efficiency * PAIR_RATE + a.dark_rate_cps
-    rate_b = b.efficiency * PAIR_RATE + b.dark_rate_cps
+def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
+    r = PAIR_REGIMES[regime]
+    a, b = r.a, r.b
+    rate_a = a.efficiency * r.rate + a.dark_rate_cps
+    rate_b = b.efficiency * r.rate + b.dark_rate_cps
     jitter = math.hypot(a.jitter_sigma_ps, b.jitter_sigma_ps)
     return {
         "delay-jitter": {"delay_ps": float(b.delay_ps - a.delay_ps), "jitter_sigma_ps": jitter},
         "accidentals": {
             "accidental_coincidences": accidentals_expected(
-                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, PAIR_WIDTH_PS, PAIR_DURATION_S
+                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, r.width_ps, r.duration_s
             )
         },
         "heralding-efficiency": {
             "heralding_efficiency": heralding_ratio_expected(
-                PAIR_RATE, a.efficiency, b.efficiency, a.dark_rate_cps, b.dark_rate_cps,
-                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, PAIR_WIDTH_PS,
+                r.rate, a.efficiency, b.efficiency, a.dark_rate_cps, b.dark_rate_cps,
+                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, r.width_ps,
             )
         },
     }
 
 
-def pairs_coverage(replicates: int = 1000, seed: int = 20261111) -> list[CoverageResult]:
+def pairs_coverage(replicates: int = 1000, seed: int = 20261111, regime: str = "cw-spad") -> list[CoverageResult]:
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
-    truth = pairs_truth()
+    r = PAIR_REGIMES[regime]
+    truth = pairs_truth(regime)
     covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items()}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
-    common = {"width_ps": PAIR_WIDTH_PS, "backend": "sim", "n_draws": 10}
+    common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
     for child in np.random.SeedSequence(seed).spawn(replicates):
         sim_rng, fit_seed = child.spawn(2)
-        a, b = simulate_pairs(PAIR_RATE, PAIR_A, PAIR_B, PAIR_DURATION_S, np.random.default_rng(sim_rng))
+        a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(sim_rng))
         s = int(fit_seed.generate_state(1)[0])
-        delays = {"delay_a_ps": PAIR_A.delay_ps, "delay_b_ps": PAIR_B.delay_ps}
+        delays = {"delay_a_ps": r.a.delay_ps, "delay_b_ps": r.b.delay_ps}
         _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
         _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), truth["accidentals"], covered["accidentals"])
         her = calibrate_heralding(
-            a, b, chs, delay_herald_ps=PAIR_A.delay_ps, delay_signal_ps=PAIR_B.delay_ps, seed=s, **common
+            a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **common
         )
         _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
-    return [CoverageResult(kind, replicates, c, gate(replicates, len(c))) for kind, c in covered.items()]
+    return [
+        CoverageResult(f"{kind} [{regime}]", replicates, c, gate(replicates, len(c)), kind in r.at_least)
+        for kind, c in covered.items()
+    ]
 
 
 def dcr_coverage(replicates: int = 1000, seed: int = 20261111) -> CoverageResult:
@@ -180,19 +241,35 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111) -> CoverageResult
             )
         cal = calibrate_dcr_temperature(darks, reference_k=DCR_REF_K, seed=int(streams[-1].generate_state(1)[0]), n_draws=10)
         _covered(cal, truth, covered)
-    return CoverageResult("dcr-temperature", replicates, covered, gate(replicates, len(truth)))
+    return CoverageResult("dcr-temperature [five-temperatures]", replicates, covered, gate(replicates, len(truth)))
 
 
-def run(name: str, replicates: int = 1000, seed: int = 20261111) -> list[CoverageResult]:
+UNITS: dict[str, tuple[str, ...]] = {
+    "dark": tuple(DARK_REGIMES),
+    "pairs": tuple(PAIR_REGIMES),
+    "dcr": ("five-temperatures",),
+}
+
+
+def _unit(args: tuple[str, str, int, int]) -> list[CoverageResult]:
+    name, regime, replicates, seed = args
     if name == "dark":
-        return [dark_coverage(replicates, seed)]
+        return [dark_coverage(replicates, seed, regime)]
     if name == "pairs":
-        return pairs_coverage(replicates, seed)
-    if name == "dcr":
-        return [dcr_coverage(replicates, seed)]
-    if name == "all":
-        return [r for n in ("dark", "pairs", "dcr") for r in run(n, replicates, seed)]
-    raise ValueError(f"unknown calibration {name!r}")
+        return pairs_coverage(replicates, seed, regime)
+    return [dcr_coverage(replicates, seed)]
+
+
+def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) -> list[CoverageResult]:
+    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all")."""
+    names = list(UNITS) if name == "all" else [name]
+    if any(n not in UNITS for n in names):
+        raise ValueError(f"unknown calibration {name!r}")
+    units = [(n, r, replicates, seed) for n in names for r in UNITS[n]]
+    if jobs > 1:
+        with ProcessPoolExecutor(jobs) as ex:
+            return [res for part in ex.map(_unit, units) for res in part]
+    return [res for u in units for res in _unit(u)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,8 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "all"])
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
+    parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
     args = parser.parse_args(argv)
-    results = run(args.calibration, args.replicates, args.seed)
+    results = run(args.calibration, args.replicates, args.seed, args.jobs)
     for r in results:
         print(r)
     return 0 if all(r.passed() for r in results) else 1

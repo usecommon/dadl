@@ -79,7 +79,8 @@ class _PeakModel:
         self.w = self.hi - self.lo
 
     def _parts(self, theta: np.ndarray):
-        log_b, log_a, d, log_s = theta
+        log_b, log_a, d, log_s = (float(v) for v in theta)
+        log_b, log_a, log_s = min(log_b, 700.0), min(log_a, 700.0), min(max(log_s, -50.0), 700.0)
         s = math.exp(log_s)
         z_hi, z_lo = (self.hi - d) / s, (self.lo - d) / s
         g = special.ndtr(z_hi) - special.ndtr(z_lo)
@@ -185,13 +186,22 @@ def calibrate_delay(
             f"no coincidence peak: need at least {MIN_PEAK} coincidences above background within +-{range_ps} ps"
         )
 
-    # Starting values from the histogram's moments around its highest bin.
+    # Starting values from the histogram's moments around its highest bin, with the moment window
+    # widened until it holds +-4 sigma: a fixed +-50 bins badly underestimated broad peaks.
     k = int(np.argmax(counts))
     centres = 0.5 * (edges[:-1] + edges[1:])
-    near = slice(max(0, k - 50), min(hist.size, k + 51))
-    wts = np.clip(excess[near], 0, None)
-    d0 = float(np.sum(wts * centres[near]) / wts.sum())
-    s0 = max(float(math.sqrt(np.sum(wts * (centres[near] - d0) ** 2) / wts.sum())), bin_width_ps / 2)
+    d0, half_bins = float(centres[k]), 50
+    for _ in range(8):
+        near = slice(max(0, k - half_bins), min(hist.size, k + half_bins + 1))
+        wts = np.clip(excess[near], 0, None)
+        if wts.sum() <= 0:
+            break
+        d0 = float(np.sum(wts * centres[near]) / wts.sum())
+        s0 = max(float(math.sqrt(np.sum(wts * (centres[near] - d0) ** 2) / wts.sum())), bin_width_ps / 2)
+        need = int(math.ceil(4 * s0 / bin_width_ps))
+        if need <= half_bins:
+            break
+        half_bins = min(need * 2, hist.size)
     half = max(WINDOW_SIGMAS * s0, 50 * bin_width_ps)
     sel = (edges[1:] > d0 - half) & (edges[:-1] < d0 + half)
     idx = np.flatnonzero(sel)
@@ -201,11 +211,31 @@ def calibrate_delay(
     a0 = max(float(np.sum(counts[idx] - b0 * widths)), 1.0)
     x0 = np.array([math.log(b0), math.log(a0), d0, math.log(s0)])
 
+    lo_e, hi_e = float(model.lo[0]), float(model.hi[-1])
+    total = float(counts[idx].sum()) + 1.0
+    bounds = [
+        (math.log(1e-6 / float(widths.sum())), math.log(10 * total / bin_width_ps)),  # background per ps
+        (0.0, math.log(10 * total)),  # peak area
+        (lo_e, hi_e),  # delay
+        (math.log(max(tick / 4, 0.1)), math.log(hi_e - lo_e)),  # sigma
+    ]
+    x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        res = optimize.minimize(model.nll, x0, jac=model.grad, method="BFGS", options={"gtol": 1e-6, "maxiter": 2000})
+        res = optimize.minimize(model.nll, x0, jac=model.grad, method="L-BFGS-B", bounds=bounds,
+                                options={"ftol": 1e-15, "gtol": 1e-8, "maxiter": 5000})
     theta = res.x
     hess = numerical_hessian(model.grad, theta)
-    laplace = Laplace.from_hessian(theta, hess)
+    try:
+        laplace = Laplace.from_hessian(theta, hess)
+    except ValueError:
+        # No background to speak of: its rate runs to the lower bound and is not identified.
+        # Condition on it (it barely affects the peak) and keep the peak parameters' posterior.
+        sub_h = hess[1:, 1:]
+        inner = Laplace.from_hessian(theta[1:], sub_h)
+        cov = np.zeros((4, 4))
+        cov[1:, 1:] = inner.cov
+        laplace = Laplace(theta, cov)
+        notes.append("the background is not identified (it fits to zero); the delay and jitter are conditional on it")
     n_peak = math.exp(theta[1])
     converged = bool(res.success) or float(np.max(np.abs(model.grad(theta)))) < 1e-3 * math.sqrt(n_peak)
     sigma = math.exp(theta[3])
