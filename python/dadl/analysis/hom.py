@@ -63,6 +63,7 @@ def hom_from_tags(
     acc = float(side.sum()) / side.size
     acc_err = math.sqrt(float(side.sum())) / side.size
     counts = {"c_min": float(c_min), "c_max": float(c_max), "accidentals": acc, "accidentals_stderr": acc_err}
+    counts["subtracted"] = float(subtract_accidentals and acc <= c_min)
     if subtract_accidentals and acc <= c_min:
         result = hom_visibility(c_max, c_min, accidentals=acc, accidentals_stderr=acc_err, policy=policy)
     else:

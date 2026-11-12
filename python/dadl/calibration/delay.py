@@ -41,7 +41,7 @@ from scipy import stats as _st
 
 from dadl import _checks
 from dadl.calibration.base import N_DRAWS, Calibration
-from dadl.data import ChannelId, tags_sha256
+from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.histogram import cross_correlation
 from dadl.stats import Laplace, numerical_hessian
@@ -67,18 +67,6 @@ def _edges(n_bins: int, bin_width_ps: int, range_ps: int, tick_ps: int = 1) -> n
     e = -range_ps + bin_width_ps * np.arange(n_bins + 1, dtype=float)
     e[-1] = min(e[-1], float(range_ps))
     return e - tick_ps / 2
-
-
-def tag_tick(*streams: np.ndarray) -> int:
-    """The tagger tick in ps: the greatest common divisor of the tags' offsets from the first tag."""
-    nonempty = [s for s in streams if s.size]
-    if not nonempty:
-        return 1
-    origin = int(nonempty[0][0])
-    g = 0
-    for s in nonempty:
-        g = int(np.gcd.reduce(np.abs(s - origin), initial=g))
-    return max(g, 1)
 
 
 class _PeakModel:
@@ -134,9 +122,26 @@ def _grouped_pearson(n: np.ndarray, mu: np.ndarray, n_params: int) -> float:
         exp[-1] += acc_mu
     dof = len(exp) - n_params
     if dof < 1:
-        return float("nan")
+        return _bootstrap_deviance(n, mu)
     o, e = np.array(obs), np.array(exp)
     return float(_st.chi2.sf(float(np.sum((o - e) ** 2 / e)), dof))
+
+
+def _bootstrap_deviance(n: np.ndarray, mu: np.ndarray, n_sim: int = 1000) -> float:
+    """Parametric-bootstrap p-value of the Poisson deviance, for peaks too sparse for a chi-square.
+
+    Uses a fixed seed so the same data always give the same p-value. Parameters
+    are not refitted per simulation, so the test is mildly conservative.
+    """
+
+    def deviance(k: np.ndarray) -> np.ndarray:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(k > 0, k * np.log(k / mu), 0.0)
+        return 2.0 * np.sum(t - (k - mu), axis=-1)
+
+    rng = np.random.default_rng(0)
+    sims = deviance(rng.poisson(mu, size=(n_sim, mu.size)).astype(float))
+    return float((1 + np.sum(sims >= deviance(n))) / (n_sim + 1))
 
 
 def calibrate_delay(

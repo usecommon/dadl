@@ -12,7 +12,14 @@ Method `interarrival-mle`:
   distribution is m - tau ~ Exponential(n f(0)), with f(0) the fitted gap
   density just past the dead time; the point estimate is the median-unbiased
   m - ln(2)/(n f(0)) and the interval is [m - ln(40)/(n f(0)),
-  m - ln(40/39)/(n f(0))] and the draws follow the same law.
+  m - ln(40/39)/(n f(0))] and the draws follow the same law. Tags are whole
+  ticks, so m - tau is a whole number D of ticks with
+  P(D <= k) = 1 - exp(-lambda (k + 1/2)), lambda = n f(0) tick, and the
+  interval uses these exact quantiles. When D = 0 alone has more than 2.5%
+  probability the lower tail cannot be cut, so all 5% goes in the upper tail.
+  Fast afterpulsing puts the shortest gap within a few ps of the dead time;
+  the continuous interval of method v1 then covered the truth only 89% of the
+  time.
 - **Dark rate, afterpulse probability and time constant.** Maximum
   likelihood on the gaps past the dead time under `DarkAfterpulseModel`, with
   a Laplace posterior in (log r, logit p, log tau_a).
@@ -43,14 +50,14 @@ from scipy import stats as _st
 
 from dadl import _checks
 from dadl.calibration.base import N_DRAWS, Calibration
-from dadl.data import ChannelId, tags_sha256
+from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.models import DarkAfterpulseModel
 from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hessian
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 MIN_GAPS = 200
 PPC_BINS = 20
 PS_PER_S = 1e12
@@ -118,12 +125,21 @@ def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
     return float(_st.chi2.sf(chi2, PPC_BINS - 1))
 
 
-def _dead_time(m: int, n: int, f0: float, rng: np.random.Generator, n_draws: int) -> tuple[Interval, np.ndarray]:
-    rate = n * f0  # per ps
-    low = max(0.0, m - math.log(40.0) / rate)
-    high = m - math.log(40.0 / 39.0) / rate
-    draws = np.maximum(0.0, m - rng.exponential(1.0 / rate, n_draws))
-    return Interval(max(0.0, m - math.log(2.0) / rate), low, high), draws
+def _dead_time(
+    m: int, n: int, f0: float, rng: np.random.Generator, n_draws: int, tick: int = 1
+) -> tuple[Interval, np.ndarray]:
+    lam = n * f0 * tick  # per tick
+
+    def quantile(q: float) -> int:
+        """Smallest k with P(D <= k) >= q."""
+        return max(0, math.ceil(-math.log1p(-q) / lam - 0.5 - 1e-12))
+
+    k_lo = quantile(0.025)
+    k_hi = quantile(0.95 if k_lo == 0 and 1 - math.exp(-lam / 2) > 0.025 else 0.975)
+    point = max(0.0, m - math.log(2.0) / (n * f0))
+    low, high = max(0.0, m - k_hi * tick), float(m - k_lo * tick)
+    draws = np.maximum(0.0, m - tick * np.floor(rng.exponential(1.0 / lam, n_draws) + 0.5))
+    return Interval(min(max(point, low), high), low, high), draws
 
 
 def _p_upper_limit(s: np.ndarray, nll_null: float, log_r0: float) -> tuple[float, float, float]:
@@ -237,7 +253,7 @@ def calibrate_dark(
         converged = True
 
     f0 = _MODEL.density_at_zero(theta)
-    est_tau, tau_draws = _dead_time(m, n, f0, rng, n_draws)
+    est_tau, tau_draws = _dead_time(m, n, f0, rng, n_draws, tag_tick(tags))
 
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}
     columns = [r_draws]
