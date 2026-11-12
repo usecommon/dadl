@@ -1,7 +1,9 @@
 //! `dadl_core`: Python bindings to the DADL per-tag core.
 //!
 //! Inputs are 1-D NumPy int64 arrays. C-contiguous arrays are read in place
-//! (no copy); others are copied once. The GIL is released while the core runs.
+//! (no copy); others are copied once. The GIL is held while the core runs:
+//! releasing it while borrowing a NumPy buffer would let another Python thread
+//! write to the array during the read, which is a data race.
 //! Errors map to the exceptions the pure-Python reference raises, so both
 //! backends pass the shared vectors in tests/vectors/core.json.
 
@@ -30,7 +32,7 @@ fn view<'a>(arr: &'a PyReadonlyArray1<'_, i64>) -> Cow<'a, [i64]> {
 #[pyfunction]
 fn apply_nonparalyzable<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>, tau_ps: i64) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let t = view(&times);
-    let out = py.detach(|| deadtime::apply_nonparalyzable(&t, tau_ps)).map_err(to_py)?;
+    let out = deadtime::apply_nonparalyzable(&t, tau_ps).map_err(to_py)?;
     Ok(out.into_pyarray(py))
 }
 
@@ -38,14 +40,13 @@ fn apply_nonparalyzable<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>,
 #[pyfunction]
 fn apply_paralyzable<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>, tau_ps: i64) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let t = view(&times);
-    let out = py.detach(|| deadtime::apply_paralyzable(&t, tau_ps)).map_err(to_py)?;
+    let out = deadtime::apply_paralyzable(&t, tau_ps).map_err(to_py)?;
     Ok(out.into_pyarray(py))
 }
 
 /// Fixed-grid coincidences: slots of width `width_ps` occupied by both channels after their delays.
 #[pyfunction]
 fn grid_coincidences(
-    py: Python<'_>,
     a: PyReadonlyArray1<'_, i64>,
     b: PyReadonlyArray1<'_, i64>,
     width_ps: i64,
@@ -53,14 +54,14 @@ fn grid_coincidences(
     delay_b_ps: i64,
 ) -> PyResult<u64> {
     let (a, b) = (view(&a), view(&b));
-    py.detach(|| coincidences::grid_coincidences(&a, &b, width_ps, delay_a_ps, delay_b_ps)).map_err(to_py)
+    coincidences::grid_coincidences(&a, &b, width_ps, delay_a_ps, delay_b_ps).map_err(to_py)
 }
 
 /// Sorted, de-duplicated slot indices occupied by `times` after removing `delay_ps`.
 #[pyfunction]
 fn occupied_slots<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>, width_ps: i64, delay_ps: i64) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let t = view(&times);
-    let out = py.detach(|| coincidences::occupied_slots(&t, width_ps, delay_ps)).map_err(to_py)?;
+    let out = coincidences::occupied_slots(&t, width_ps, delay_ps).map_err(to_py)?;
     Ok(out.into_pyarray(py))
 }
 
@@ -68,7 +69,7 @@ fn occupied_slots<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>, width
 #[pyfunction]
 fn interarrival<'py>(py: Python<'py>, times: PyReadonlyArray1<'py, i64>, bin_width_ps: i64, n_bins: usize) -> PyResult<Bound<'py, PyArray1<u64>>> {
     let t = view(&times);
-    let out = py.detach(|| histogram::interarrival(&t, bin_width_ps, n_bins)).map_err(to_py)?;
+    let out = histogram::interarrival(&t, bin_width_ps, n_bins).map_err(to_py)?;
     Ok(out.into_pyarray(py))
 }
 
@@ -82,7 +83,7 @@ fn cross_correlation<'py>(
     range_ps: i64,
 ) -> PyResult<Bound<'py, PyArray1<u64>>> {
     let (a, b) = (view(&a), view(&b));
-    let out = py.detach(|| histogram::cross_correlation(&a, &b, bin_width_ps, range_ps)).map_err(to_py)?;
+    let out = histogram::cross_correlation(&a, &b, bin_width_ps, range_ps).map_err(to_py)?;
     Ok(out.into_pyarray(py))
 }
 

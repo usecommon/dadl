@@ -99,3 +99,16 @@ def test_manifest_validates_against_the_schema(cal):
     manifest, _ = build_manifest(cal, created=CREATED, valid_until=CREATED + dt.timedelta(days=7))
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(manifest)
+
+
+def test_write_leaves_no_temporary_files_and_refuses_bad_manifests(cal, tmp_path):
+    path = write_artifact(cal, tmp_path, created=CREATED)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([path.name, path.stem + ".posterior.npy"])
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest["posterior"]
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    target = bad / f"{artifact_id(manifest)}.json"
+    target.write_bytes(canonical_json(manifest))
+    with pytest.raises(ArtifactError, match="posterior"):
+        read_artifact(target)

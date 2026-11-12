@@ -17,11 +17,14 @@ when it arrives. Reading an artifact verifies both hashes.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import io
 import json
 import math
+import os
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -187,7 +190,16 @@ def write_artifact(cal: Calibration, directory: str | Path, **kwargs: Any) -> Pa
             if path.read_bytes() != data:
                 raise ArtifactError(f"{path} exists with different content")
             continue
-        path.write_bytes(data)
+        # Write to a temporary file and rename, so a crash never leaves a partial artifact.
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     return mpath
 
 
@@ -200,6 +212,9 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
         raise ArtifactError(f"cannot read artifact {path}: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ArtifactError(f"{path}: not a {SCHEMA} manifest")
+    post_meta = manifest.get("posterior")
+    if not isinstance(post_meta, dict) or not {"sha256", "n_samples", "params"} <= post_meta.keys():
+        raise ArtifactError(f"{path}: the manifest has no valid posterior entry")
     aid = artifact_id(manifest)
     if path.name != f"{aid}.json":
         raise ArtifactError(f"{path}: content hash {aid} does not match the file name")

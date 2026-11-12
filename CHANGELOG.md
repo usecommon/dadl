@@ -95,7 +95,8 @@ from the packages.
   `dadl_core`, abi3 wheels for Python 3.10+). It exposes dead time,
   occupied slots, fixed-grid coincidences, inter-arrival and
   cross-correlation histograms over NumPy int64 arrays, reading contiguous
-  arrays in place and releasing the GIL.
+  arrays in place. The GIL is held while the core runs, so no other Python
+  thread can write to an array the core is reading.
 - `dadl.backend()` and `DADL_BACKEND` (`python` / `rust`): `dadl` uses the
   compiled core when it is installed, else the pure-Python reference.
   Argument types are checked in Python for both; the shared vectors and
@@ -108,6 +109,19 @@ from the packages.
   every test with `DADL_BACKEND=rust`. Release: abi3 wheels (manylinux2014
   x86-64 and aarch64, macOS universal2, Windows x64) and an sdist for
   `dadl-quantum-core`, published with Trusted Publishing.
+
+### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
+
+- Bindings hold the GIL while reading NumPy buffers (releasing it allowed a
+  data race with other Python threads).
+- Heralding efficiency counts heralds per slot (method `herald-ratio` v2):
+  two pairs in one slot no longer halve it.
+- Artifacts are written atomically; a manifest without a valid posterior
+  entry raises `ArtifactError`.
+- `dadl-quantum` uses `dadl-quantum-core` only when the versions match.
+- CI builds the release wheels of `dadl-quantum-core` on every pull request.
+- Notes: the dark rate includes undetected afterpulses (bounded by the upper
+  limit); PTU files are read whole.
 
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.

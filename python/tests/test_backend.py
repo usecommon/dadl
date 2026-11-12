@@ -61,3 +61,24 @@ def test_errors_match():
             occupied_slots(np.array([-(2**63) + 5]), 1000, 1000)
         with pytest.raises(ValueError):
             interarrival(np.array([1, 2]), 0, 3)
+
+
+def test_mismatched_core_version_is_not_used(monkeypatch):
+    import importlib
+    import sys
+    import types
+
+    fake = types.ModuleType("dadl_core")
+    fake.__version__ = "0.0.0-other"
+    monkeypatch.setitem(sys.modules, "dadl_core", fake)
+    monkeypatch.delenv("DADL_BACKEND", raising=False)
+    try:
+        with pytest.warns(RuntimeWarning, match="does not match"):
+            importlib.reload(_backend)
+        assert _backend.name() == "python"
+        monkeypatch.setenv("DADL_BACKEND", "rust")
+        with pytest.raises(ImportError, match="does not match"):
+            importlib.reload(_backend)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(_backend)

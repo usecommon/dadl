@@ -8,6 +8,10 @@ reference runs. Both are held to the shared vectors in tests/vectors/core.json.
     DADL_BACKEND=rust     require the compiled core (ImportError if missing)
     (unset)               the core if installed, else the reference
 
+The core must come from the same release as `dadl` (same version). A core
+from another release is ignored with a warning (or refused under
+DADL_BACKEND=rust), since the two are only tested together.
+
 Argument types are checked in Python for both backends; sorting, range and
 overflow checks run in whichever backend does the work, and raise the same
 exception types.
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import warnings
 from collections.abc import Iterator
 from types import ModuleType
 
@@ -33,6 +38,19 @@ if _forced != "python":
                 "DADL_BACKEND=rust but the compiled core is not installed: pip install dadl-quantum-core"
             ) from None
         _loaded = None
+    if _loaded is not None:
+        from dadl import __version__ as _dadl_version
+
+        _core_version = getattr(_loaded, "__version__", "?")
+        if _core_version != _dadl_version:
+            message = (
+                f"dadl-quantum-core {_core_version} does not match dadl-quantum {_dadl_version}; "
+                "install the same version of both"
+            )
+            if _forced == "rust":
+                raise ImportError(message)
+            warnings.warn(message + ". Using the pure-Python reference.", RuntimeWarning, stacklevel=2)
+            _loaded = None
     _core = _loaded
 _installed = _core
 
