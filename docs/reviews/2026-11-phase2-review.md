@@ -56,6 +56,9 @@ remains the top open item.
   are refused.
 - **Parsers.** YAML uses a safe loader with a 1 MB limit and duplicate-key refusal. `.npz` and
   `.npy` files are loaded with `allow_pickle=False`. PTU header lengths are checked against the file size.
+- **DCR(T) coverage.** It was on the low side on the pre-set seed (DCR_ref 93.9%, Ea 93.4%), so a
+  weighted-least-squares bias was suspected. Two independent seeds gave 95.4% / 94.6% and
+  94.8% / 95.2%, and pooled over 3,000 replicates coverage is 94.7% and 94.4%: chance, not bias.
 - **HOM.** Bunched photons on one detector are recorded at most once, and singles fall as
   eta(2 − eta)/2 per pair (tested). The simulated dip matches the closed form.
 
@@ -65,7 +68,6 @@ remains the top open item.
 | --- | --- | --- |
 | 3 | Each gate tests one parameter point per calibration. Low counts, strong afterpulsing and broad IRFs are not covered | Adds CI time; plan a second regime per calibration in phase 3 |
 | 3 | The gate rule changed twice after seeing results (milestones 1 and 2), both disclosed | Future changes should be decided before running |
-| 2 | DCR(T) coverage on the pre-set seed is on the low side (93.9% and 93.4%, gate 92.4–97.2%) | See the independent-seed check below |
 | 8 | PTU files are read whole; T3 mode is refused | Chunked reading and T3 are planned |
 | 11 | The `setup-1` schema allows `reference_delay_ps` in a CHSH setup and A/B names in either type; the loader refuses both | Express with `if`/`then` in the schema later |
 | 2 | The delay fit assumes a Gaussian IRF; a tail shows as a failing predictive check, not a better fit | The design's IRF has an exponential tail; fit it in phase 3 |
