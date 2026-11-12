@@ -5,32 +5,37 @@ Fitted jointly from the inter-arrival gaps of a single channel with no light
 `dark-afterpulse-deadtime` (docs/design.md, "Joint posteriors and data
 reuse").
 
-Method `interarrival-mle`:
+Method `interarrival-mle` (v4):
 
 - **Dead time.** No gap is shorter than the (effective, detector plus TDC)
-  dead time, so its estimate is the shortest gap m. Its sampling
-  distribution is m - tau ~ Exponential(n f(0)), with f(0) the fitted gap
-  density just past the dead time; the point estimate is the median-unbiased
-  m - ln(2)/(n f(0)) and the interval is [m - ln(40)/(n f(0)),
-  m - ln(40/39)/(n f(0))] and the draws follow the same law. Tags are whole
-  ticks, so m - tau is a whole number D of ticks with
-  P(D <= k) = 1 - exp(-lambda (k + 1/2)), lambda = n f(0) tick, and the
-  interval uses these exact quantiles. When D = 0 alone has more than 2.5%
-  probability the lower tail cannot be cut, so all 5% goes in the upper tail.
-  Fast afterpulsing puts the shortest gap within a few ps of the dead time;
-  the continuous interval of method v1 then covered the truth only 89% of the
-  time.
+  dead time, so its estimate is the shortest gap m. m - tau is a whole number
+  D of tags' ticks with P(D <= k) = 1 - exp(-lambda (k + 1/2)), lambda =
+  n f(0) tick, f(0) the gap density just past the dead time. The interval
+  uses these exact quantiles averaged over the posterior of f(0); the point
+  estimate is the median-unbiased m - ln(2)/(n f(0)). When afterpulsing is
+  not detected it is not ruled out either, and an undetected afterpulse
+  usually supplies the shortest gap, so the interval then runs up to m. (v1
+  ignored the ticks: 89% coverage with fast afterpulsing. v2-v3 treated f(0)
+  as known and the dark-count law as certain without detected afterpulsing:
+  as low as 0% coverage with a few hundred gaps.)
 - **Dark rate, afterpulse probability and time constant.** Maximum
   likelihood on the gaps past the dead time under `DarkAfterpulseModel`, with
-  a Laplace posterior in (log r, logit p, log tau_a).
+  a Laplace posterior in (log r, logit p, log tau_a) for the draws and the
+  rate. Below PROFILE_BELOW gaps the intervals for p and tau_a come from the
+  profile likelihood (chi-square(1) at 95%), which is accurate with few counts
+  where the Gaussian shape is not (tau_a covered 82% at 50 gaps).
 - **No afterpulsing detected.** The time constant is searched from 1 ns to
   a tenth of the mean gap. If the likelihood ratio against a pure Poisson
   model is below the 99.9% chi-square(2) point (a stringent level, because of
   that search), or the time constant fits to the edge of the range, the dark
-  rate comes
-  from its exact Gamma posterior, the afterpulse probability is reported as a
-  one-sided 95% upper limit from the profile likelihood, and the time
-  constant is marked unidentified.
+  rate comes from its exact Gamma posterior, the time constant is marked
+  unidentified, and p is reported from 0 to the larger of its profile
+  interval's upper end and the largest upper limit over a grid of time
+  constants. Undetected samples hold fewer afterpulses than expected, so a
+  less conservative limit undercovers there.
+- **Few counts.** At least MIN_GAPS (20) gaps are needed; below a few hundred
+  the afterpulse parameters are rarely identified, but the rate and dead time
+  keep their coverage (probed down to 12 gaps).
 - **Predictive check.** The fitted survival function maps the gaps to
   uniforms; a chi-square test on 20 equal bins (19 degrees of freedom,
   conservative because the fit is unbinned) gives the p-value recorded in the
@@ -57,8 +62,10 @@ from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hess
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "2"
-MIN_GAPS = 200
+METHOD_VERSION = "4"
+MIN_GAPS = 20
+#: Posterior samples of f(0) averaged over in the dead-time interval.
+F0_SAMPLES = 4000
 PPC_BINS = 20
 PS_PER_S = 1e12
 #: Afterpulse time constants the fit considers, in ps. Shorter afterpulses
@@ -125,30 +132,129 @@ def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
     return float(_st.chi2.sf(chi2, PPC_BINS - 1))
 
 
+#: Below this many gaps the afterpulse intervals come from the profile likelihood; above it the
+#: Laplace (Gaussian) intervals are as accurate (93-95% coverage in the regime probes) and faster.
+PROFILE_BELOW = 5000
+#: Profile-likelihood threshold for a two-sided 95% interval: chi-square(1) at 95%.
+PROFILE_TARGET = 3.841
+#: logit(p) limits of the profile search: p from about 3e-7 (reported as 0) to 0.9975.
+LOGIT_P_RANGE = (-15.0, 6.0)
+
+
+def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarray | None) -> float:
+    """Smallest negative log-likelihood with coordinate `index` of theta fixed at `value`."""
+    lo_tau, hi_tau = _tau_bounds(s)
+    bounds = [(math.log(r0) - 5, math.log(r0) + 5), LOGIT_P_RANGE, (math.log(lo_tau), math.log(hi_tau))]
+    free = [j for j in range(3) if j != index]
+
+    def full(x: np.ndarray) -> np.ndarray:
+        th = np.empty(3)
+        th[index] = value
+        th[free] = x
+        return th
+
+    def nll(x: np.ndarray) -> float:
+        return -_MODEL.log_likelihood(s, full(x))
+
+    def grad(x: np.ndarray) -> np.ndarray:
+        return _MODEL.gradient(s, full(x))[free]
+
+    starts = []
+    if warm is not None:
+        starts.append(np.clip(np.asarray(warm, dtype=float)[free], [bounds[j][0] for j in free], [bounds[j][1] for j in free]))
+    if index == 1:
+        starts += [np.array([math.log(r0), z]) for z in np.linspace(bounds[2][0], bounds[2][1], 3)]
+    else:
+        starts += [np.array([math.log(r0), y]) for y in (math.log(0.01 / 0.99), math.log(0.1 / 0.9))]
+    best = math.inf
+    for x0 in starts:
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            res = optimize.minimize(nll, x0, jac=grad, method="L-BFGS-B", bounds=[bounds[j] for j in free],
+                                    options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 500})
+        if np.isfinite(res.fun):
+            best = min(best, float(res.fun))
+    return best
+
+
+def _profile_interval(
+    s: np.ndarray, r0: float, index: int, centre: float, nll_min: float, limits: tuple[float, float],
+    warm: np.ndarray | None,
+) -> tuple[float, float]:
+    """{v : 2 (profile(v) - nll_min) <= PROFILE_TARGET}, clipped to `limits` (in fit coordinates)."""
+
+    def excess(v: float) -> float:
+        return 2.0 * (_profile(s, r0, index, v, warm) - nll_min) - PROFILE_TARGET
+
+    lo_lim, hi_lim = limits
+    centre = min(max(centre, lo_lim), hi_lim)
+    hi = hi_lim if excess(hi_lim) < 0 else optimize.brentq(excess, centre, hi_lim, xtol=1e-3)
+    lo = lo_lim if centre <= lo_lim or excess(lo_lim) < 0 else optimize.brentq(excess, lo_lim, centre, xtol=1e-3)
+    return lo, hi
+
+
 def _dead_time(
-    m: int, n: int, f0: float, rng: np.random.Generator, n_draws: int, tick: int = 1
+    m: int,
+    n: int,
+    f0: float,
+    f0_samples: np.ndarray,
+    rng: np.random.Generator,
+    n_draws: int,
+    tick: int = 1,
+    afterpulsing_ruled_out: bool = True,
 ) -> tuple[Interval, np.ndarray]:
-    lam = n * f0 * tick  # per tick
+    """Interval and draws for the dead time from the shortest gap m.
+
+    m - tau is a whole number D of ticks with P(D <= k) = 1 - exp(-lambda (k + 1/2)),
+    lambda = n f(0) tick. f(0) is itself estimated, so the law is averaged over
+    `f0_samples` from its posterior: with few gaps f(0) is loose, and treating it
+    as known made the interval far too narrow.
+
+    When afterpulsing was not detected it is not ruled out either: an afterpulse
+    below the detection threshold usually supplies the shortest gap, within
+    nanoseconds of the dead time. The interval then runs up to m itself and puts
+    all 5% in the lower tail, which is exact without afterpulsing and conservative
+    with it. (Method v2 used the dark-count law alone there and covered 0% of
+    runs with undetected afterpulsing.)
+    """
+    lam = n * np.asarray(f0_samples, dtype=float) * tick  # per tick, one per posterior sample
+
+    def cdf(y: float) -> float:
+        return float(np.mean(-np.expm1(-lam * y)))
 
     def quantile(q: float) -> int:
-        """Smallest k with P(D <= k) >= q."""
-        return max(0, math.ceil(-math.log1p(-q) / lam - 0.5 - 1e-12))
+        """Smallest whole k with P(D <= k) >= q (y = k + 1/2)."""
+        if cdf(0.5) >= q:
+            return 0
+        hi = 1.0
+        while cdf(hi) < q:
+            hi *= 2.0
+        y = optimize.brentq(lambda v: cdf(v) - q, 0.5, hi, xtol=1e-9)
+        return max(0, math.ceil(y - 0.5 - 1e-12))
 
-    k_lo = quantile(0.025)
-    k_hi = quantile(0.95 if k_lo == 0 and 1 - math.exp(-lam / 2) > 0.025 else 0.975)
+    if afterpulsing_ruled_out:
+        k_lo = quantile(0.025)
+        k_hi = quantile(0.95 if k_lo == 0 and cdf(0.5) > 0.025 else 0.975)
+    else:
+        k_lo, k_hi = 0, quantile(0.95)
     point = max(0.0, m - math.log(2.0) / (n * f0))
     low, high = max(0.0, m - k_hi * tick), float(m - k_lo * tick)
-    draws = np.maximum(0.0, m - tick * np.floor(rng.exponential(1.0 / lam, n_draws) + 0.5))
+    pick = rng.integers(0, lam.size, n_draws)
+    draws = np.maximum(0.0, m - tick * np.floor(rng.exponential(1.0 / lam[pick]) + 0.5))
     return Interval(min(max(point, low), high), low, high), draws
 
 
+
 def _p_upper_limit(s: np.ndarray, nll_null: float, log_r0: float) -> tuple[float, float, float]:
-    """One-sided 95% upper limit on p, the largest over a grid of tau_a (r profiled).
+    """Upper limit on p, the largest over a grid of tau_a (r profiled), at the two-sided 95% threshold.
+
+    Taking the largest limit over the grid keeps it conservative when afterpulsing went
+    undetected: those are the samples with fewer afterpulses than expected, and a limit
+    profiled over tau_a as well undercovered there (41% at 200 gaps).
 
     Returns (limit, tau_min, tau_max): the limit holds for afterpulse time
     constants in [tau_min, tau_max] ps.
     """
-    target = 2.706  # chi-square(1) 90% two-sided point = one-sided 95%
+    target = PROFILE_TARGET
     lo_tau, hi_tau = _tau_bounds(s)
     if hi_tau <= lo_tau:
         return 1.0, lo_tau, lo_tau
@@ -222,11 +328,31 @@ def calibrate_dark(
             notes.append(f"afterpulse fit not identified ({exc}); reporting the no-afterpulse model")
             detected = False
 
+    # The afterpulse probability gets one profile-likelihood interval whether or not afterpulsing
+    # is detected, so the choice between an interval and a limit never depends on the data
+    # (switching on detection undercovered: 82-90% when afterpulsing went undetected).
+    use_profile = n < PROFILE_BELOW
+    nll_min = min(nll_null, float(res.fun)) if res is not None else nll_null
+    p_centre = float(res.x[1]) if res is not None and res.fun <= nll_null else LOGIT_P_RANGE[0]
+    if use_profile or not detected:
+        p_lo, p_hi = _profile_interval(s, r0, 1, p_centre, nll_min, LOGIT_P_RANGE, res.x if res is not None else None)
+        p_low = 0.0 if p_lo <= LOGIT_P_RANGE[0] else float(expit(p_lo))
+
     if detected and laplace is not None:
         theta = res.x
         est_r = laplace.interval(0, lambda x: math.exp(x) * PS_PER_S)
-        est_p = laplace.interval(1, lambda y: float(expit(y)))
-        est_ta = laplace.interval(2, math.exp)
+        if use_profile:
+            est_p = Interval(float(expit(theta[1])), p_low, float(expit(p_hi)))
+            lo_tau, hi_tau = _tau_bounds(s)
+            z_lo, z_hi = _profile_interval(
+                s, r0, 2, float(theta[2]), float(res.fun), (math.log(lo_tau), math.log(hi_tau)), theta
+            )
+            est_ta = Interval(math.exp(theta[2]), math.exp(z_lo), math.exp(z_hi))
+            if z_lo <= math.log(lo_tau) + 1e-6 or z_hi >= math.log(hi_tau) - 1e-6:
+                notes.append("the afterpulse time constant's interval reaches the edge of its search range")
+        else:
+            est_p = laplace.interval(1, lambda y: float(expit(y)))
+            est_ta = laplace.interval(2, math.exp)
         d = laplace.draws(rng, n_draws)
         r_draws = np.exp(d[:, 0]) * PS_PER_S
         p_draws = expit(d[:, 1])
@@ -238,13 +364,14 @@ def calibrate_dark(
         est_r, r_draws = gamma_posterior(n, exposure, rng, n_draws)
         est_r = Interval(est_r.value * PS_PER_S, est_r.low * PS_PER_S, est_r.high * PS_PER_S)
         r_draws = r_draws * PS_PER_S
-        p_hi, t_lo, t_hi = _p_upper_limit(s, nll_null, math.log(r0))
-        est_p = Interval(0.0, 0.0, p_hi)
+        ul, t_lo, t_hi = _p_upper_limit(s, nll_null, math.log(r0))
+        est_p = Interval(0.0, 0.0, max(ul, float(expit(p_hi))))
         est_ta = None
         unidentified = ("afterpulse_tau_ps",)
         notes.append(
-            f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is a one-sided 95% "
-            f"upper limit for afterpulse time constants from {t_lo:.3g} to {t_hi:.3g} ps"
+            f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
+            f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
+            f"from {t_lo:.3g} to {t_hi:.3g} ps"
         )
         notes.append(
             "the dark rate counts every avalanche past the dead time, so undetected afterpulses (at most the "
@@ -253,7 +380,19 @@ def calibrate_dark(
         converged = True
 
     f0 = _MODEL.density_at_zero(theta)
-    est_tau, tau_draws = _dead_time(m, n, f0, rng, n_draws, tag_tick(tags))
+    # Posterior samples of f(0) for the dead-time law (fixed seed: the interval depends on the data only).
+    if detected and laplace is not None:
+        th = Laplace(laplace.mean, laplace.cov).draws(np.random.default_rng(0), F0_SAMPLES)
+        r_s = np.exp(np.clip(th[:, 0], -80, 0))
+        p_s = expit(np.clip(th[:, 1], -40, 40))
+        ta_s = np.exp(np.clip(th[:, 2], -20, 45))
+        f0_samples = r_s * (1 - p_s) + p_s * (r_s + 1 / ta_s)
+    else:
+        q = (np.arange(F0_SAMPLES) + 0.5) / F0_SAMPLES
+        f0_samples = _st.gamma.ppf(q, n + 0.5, scale=1.0 / exposure)
+    est_tau, tau_draws = _dead_time(
+        m, n, f0, f0_samples, rng, n_draws, tag_tick(tags), afterpulsing_ruled_out=bool(detected)
+    )
 
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}
     columns = [r_draws]

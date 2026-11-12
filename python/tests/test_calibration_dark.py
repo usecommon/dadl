@@ -107,7 +107,7 @@ def test_misfit_is_flagged_by_the_predictive_check():
 
 def test_too_few_counts_is_refused():
     with pytest.raises(InsufficientCounts):
-        calibrate_dark(np.arange(0, 100 * 50_000, 50_000, dtype=np.int64), CH)
+        calibrate_dark(np.arange(0, 10 * 50_000, 50_000, dtype=np.int64), CH)
 
 
 def test_float_and_unsorted_tags_are_refused():
@@ -157,3 +157,29 @@ def test_dead_time_interval_allows_for_whole_ps_tags():
             on_the_edge += 1
             assert iv.contains(10_000.0)
     assert on_the_edge >= 1
+
+
+def test_low_counts_keep_honest_intervals():
+    # Round 1 of the calibration probes: with a few hundred gaps and afterpulsing present,
+    # v3's dead-time interval covered as little as 0% when afterpulsing went undetected,
+    # and the afterpulse intervals undercovered. Checked here on 150 short runs.
+    det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000, afterpulse_prob=0.03, afterpulse_tau_ps=50_000.0)
+    dead = rate = prob = 0
+    runs = 150
+    for seed in range(runs):
+        cal = calibrate_dark(dark(det, 0.1, seed=seed), CH, seed=seed, n_draws=10)
+        e = cal.estimates
+        dead += e["dead_time_ps"].contains(22_000.0)
+        rate += e["dark_rate_cps"].contains(1000.0)
+        prob += e["afterpulse_prob"].contains(0.03)
+    for name, k in (("dead time", dead), ("rate", rate), ("afterpulse_prob", prob)):
+        assert k >= 0.89 * runs, (name, k)  # 95% coverage; 0.89 is below the 99.9% binomial band
+
+
+def test_twenty_gaps_are_enough_and_fewer_are_refused():
+    det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000)
+    tags = dark(det, 1.0, seed=3)[:21]
+    cal = calibrate_dark(tags, CH, seed=0)
+    assert cal.unidentified == ("afterpulse_tau_ps",) and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
+    with pytest.raises(InsufficientCounts):
+        calibrate_dark(tags[:15], CH)
