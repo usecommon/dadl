@@ -230,6 +230,10 @@ def calibrate_dark(
             f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is a one-sided 95% "
             f"upper limit for afterpulse time constants from {t_lo:.3g} to {t_hi:.3g} ps"
         )
+        notes.append(
+            "the dark rate counts every avalanche past the dead time, so undetected afterpulses (at most the "
+            "upper limit on afterpulse_prob, as a fraction) are included in it"
+        )
         converged = True
 
     f0 = _MODEL.density_at_zero(theta)

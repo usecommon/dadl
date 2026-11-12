@@ -1,6 +1,6 @@
 """Heralding efficiency of a signal channel from a pair source.
 
-Method `herald-ratio`: with S herald detections, C fixed-grid coincidences
+Method `herald-ratio`: with S slots holding a herald, C fixed-grid coincidences
 in the declared window and lambda the expected accidentals in that window
 (estimated off-peak, as in `dadl.calibration.accidentals`),
 
@@ -16,6 +16,10 @@ Posterior: the accidental part of C, A, has the Gamma-Poisson
 coincidences C - A out of S heralds have the Jeffreys Beta posterior. The
 interval is computed from the exact mixture CDF, so it is deterministic;
 draws sample A, then eta.
+
+Heralds are counted per slot, the unit C is counted in: two heralds in one
+slot (possible when the window is longer than the herald's dead time) would
+otherwise lower eta. The notes say when this happens.
 
 The predictive check is the off-peak dispersion test.
 
@@ -33,14 +37,14 @@ from scipy import stats as _st
 from dadl import _checks
 from dadl.calibration.accidentals import GUARD_PS, N_SIDE, dispersion_pvalue, shifted_coincidences, side_offsets
 from dadl.calibration.base import N_DRAWS, Calibration
-from dadl.coincidences import grid_coincidences
+from dadl.coincidences import grid_coincidences, occupied_slots
 from dadl.data import ChannelId, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.stats import LEVEL, Interval
 
 KIND = "heralding-efficiency"
 METHOD = "herald-ratio"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 MIN_HERALDS = 100
 
 UNITS = {"heralding_efficiency": "probability per herald"}
@@ -60,7 +64,9 @@ def _interval(c: int, s: int, k: np.ndarray, w: np.ndarray, level: float = LEVEL
     alpha, beta = pairs + 0.5, s - pairs + 0.5
 
     def cdf(x: float) -> float:
-        return float(np.sum(w * _st.beta.cdf(x, alpha, beta)))
+        # SciPy 1.10 warns at the x = 1 boundary although the result is exact.
+        with np.errstate(divide="ignore"):
+            return float(np.sum(w * _st.beta.cdf(x, alpha, beta)))
 
     q = (1 - level) / 2
     lo = optimize.brentq(lambda x: cdf(x) - q, 0.0, 1.0, xtol=1e-12)
@@ -92,9 +98,10 @@ def calibrate_heralding(
     _checks.check_sorted(herald, "herald")
     _checks.check_sorted(signal, "signal")
     width_ps = _checks.integer(width_ps, "width_ps", minimum=1)
-    s = int(herald.size)
+    s = int(occupied_slots(herald, width_ps, delay_herald_ps).size)
+    shared = int(herald.size) - s
     if s < MIN_HERALDS:
-        raise InsufficientCounts(f"need at least {MIN_HERALDS} herald detections, got {s}")
+        raise InsufficientCounts(f"need at least {MIN_HERALDS} herald slots, got {s}")
     c = grid_coincidences(herald, signal, width_ps, delay_herald_ps, delay_signal_ps)
     offsets = side_offsets(width_ps, rep_period_ps=rep_period_ps, n_side=n_side, guard_ps=guard_ps)
     side = shifted_coincidences(herald, signal, width_ps, delay_herald_ps, delay_signal_ps, offsets)
@@ -110,9 +117,11 @@ def calibrate_heralding(
     draws = rng.beta(pairs + 0.5, s - pairs + 0.5)
 
     notes = [
-        f"{c} coincidences for {s} heralds; {lam:.4g} expected accidentals from {m} shifted windows",
+        f"{c} coincidences for {s} herald slots; {lam:.4g} expected accidentals from {m} shifted windows",
         "system efficiency as detected (detector x coupling), including window losses at slot edges",
     ]
+    if shared:
+        notes.append(f"{shared} heralds shared a slot with another herald; heralds are counted per slot")
     return Calibration(
         kind=KIND,
         method=METHOD,

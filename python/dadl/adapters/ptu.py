@@ -21,6 +21,9 @@ that is a whole number of ps (1, 4, 5, 80 ps, ...) the conversion is exact
 integer arithmetic; otherwise tags are rounded to the nearest ps and a note
 says so.
 
+The whole file is read into memory (about 50 bytes per record while
+decoding); chunked reading for very large files is planned.
+
 Every record is accounted for: tags, rollovers, markers and unrecognised
 special records add up to `TTResult_NumberOfRecords`, and a file shorter or
 longer than the header says is refused. Rollovers and unknown records are
@@ -206,7 +209,8 @@ class PtuFile:
         if family == "picoharp":
             channels = (0, 1)
         elif isinstance(n_inputs, int) and n_inputs > 0:
-            channels = tuple(range(n_inputs))  # sync (0) plus n_inputs - 1 detector inputs
+            # As the header reports it; check against the inputs that carry tags after `read`.
+            channels = tuple(range(n_inputs))
         else:
             channels = ()
         return DeviceInfo(

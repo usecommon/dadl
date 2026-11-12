@@ -270,3 +270,13 @@ def test_delay_is_unbiased_for_narrow_peaks():
         a, b = simulate_pairs(1e5, det, det, 1.0, np.random.default_rng(seed))
         est.append(calibrate_delay(a, b, CHS, n_draws=10).estimates["delay_ps"].value)
     assert abs(np.mean(est)) < 0.2
+
+
+def test_heralds_sharing_a_slot_are_counted_once():
+    # Two pairs per 2 ns slot, each herald with its own signal: eta is 1 per herald slot.
+    t = np.arange(0, 10**10, 10**6)
+    herald = np.sort(np.concatenate([t, t + 500]))
+    signal = np.sort(np.concatenate([t + 100, t + 600]))
+    cal = calibrate_heralding(herald, signal, CHS, width_ps=2000)
+    assert cal.estimates["heralding_efficiency"].value == pytest.approx(1.0)
+    assert any("shared a slot" in n for n in cal.notes)
