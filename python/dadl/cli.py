@@ -5,6 +5,8 @@
     dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S from your own tags
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
+    dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR
+                                                        delay, jitter, accidentals, heralding efficiency
     dadl version
 """
 
@@ -93,7 +95,8 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print()
     print("  Edit a copy of this setup with `dadl init`, then `dadl quickstart setup.yaml`.")
     print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
-    print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`.")
+    print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`; from pair data,")
+    print("  `dadl calibrate pairs chsh-spad --tags tags.npz --herald A+ --signal B+ --out artifacts/`.")
     print(f"  Corrected values arrive in phase 3. Overview: {SITE}")
     return 0
 
@@ -164,6 +167,52 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
+    from dadl.artifact import write_artifact
+    from dadl.calibration import calibrate_accidentals, calibrate_delay, calibrate_heralding
+    from dadl.data import ChannelId
+
+    setup = load_setup(_resolve(args.setup))
+    runs = read_tags(args.tags, setup.channels)
+    if not 0 <= args.setting < len(SETTING_PAIRS):
+        raise DadlError(f"--setting must be 0..{len(SETTING_PAIRS) - 1}")
+    tags = runs[SETTING_PAIRS[args.setting]]
+    number = {name: num for num, name in setup.channels.items()}
+    for name in (args.herald, args.signal):
+        if name not in number:
+            raise DadlError(f"unknown channel {name!r}; the setup's channels are {sorted(number)}")
+    if args.herald == args.signal:
+        raise DadlError("--herald and --signal must be different channels")
+    chs = (ChannelId(args.herald, number[args.herald]), ChannelId(args.signal, number[args.signal]))
+    a, b = tags[args.herald], tags[args.signal]
+    window = setup.window
+    d_a, d_b = window.delays_ps.get(args.herald, 0), window.delays_ps.get(args.signal, 0)
+    backend = "sim" if setup.backend == "sim" else "hardware"
+    common = {"backend": backend, "seed": setup.seed}
+    print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
+    print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
+    cals = [
+        calibrate_delay(a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, **common),
+        calibrate_accidentals(a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **common),
+        calibrate_heralding(
+            a, b, chs, width_ps=window.width_ps, delay_herald_ps=d_a, delay_signal_ps=d_b, **common
+        ),
+    ]
+    for cal in cals:
+        path = write_artifact(cal, args.out)
+        print()
+        print(cal)
+        print(f"  artifact: {path}")
+    fitted = cals[0].estimates["delay_ps"].value
+    if abs(fitted - (d_b - d_a)) > window.width_ps / 4:
+        print()
+        print(
+            f"  The fitted delay ({fitted:.0f} ps) differs from the declared one ({d_b - d_a} ps) by more than a "
+            "quarter window. Declare it in the plan before analysis; DADL never moves the window to fit the data."
+        )
+    return 0
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels)
@@ -228,6 +277,24 @@ def build_parser() -> argparse.ArgumentParser:
     dark.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
     dark.add_argument("--out", required=True, help="directory for the artifacts")
     dark.set_defaults(func=cmd_calibrate_dark)
+
+    pairs = cal_sub.add_parser(
+        "pairs",
+        help="delay, jitter, accidentals and heralding efficiency from a pair-source acquisition",
+        description="Fit the delay and combined jitter of SIGNAL relative to HERALD from their cross-correlation, "
+        "estimate off-peak accidentals in the declared window, and the heralding efficiency of SIGNAL. "
+        "Uses the window width and delays declared in the setup. For a heralding efficiency, record "
+        "without polarisation analysers in the path. Writes three content-addressed artifacts.",
+    )
+    pairs.add_argument("setup", help="setup.yaml (channel map, window) or a bundled example name")
+    pairs.add_argument("--tags", required=True, help="tag file with the pair-source acquisition")
+    pairs.add_argument("--setting", type=int, default=0, help="which setting index holds the data (default 0)")
+    pairs.add_argument("--herald", required=True, help="herald channel name")
+    pairs.add_argument("--signal", required=True, help="signal channel name")
+    pairs.add_argument("--range-ps", type=int, default=20_000, help="delay search range, +- ps (default 20000)")
+    pairs.add_argument("--bin-width-ps", type=int, default=20, help="delay histogram bin width (default 20)")
+    pairs.add_argument("--out", required=True, help="directory for the artifacts")
+    pairs.set_defaults(func=cmd_calibrate_pairs)
 
     ver = sub.add_parser("version", help="print the version")
     ver.set_defaults(func=lambda _args: print(__version__) or 0)

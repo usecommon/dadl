@@ -35,6 +35,12 @@ fn run(case: &Value) -> Result<Value, DadlError> {
             i("bin_width"),
             usize::try_from(i("n_bins")).expect("n_bins"),
         )?),
+        "cross_correlation" => Value::from(histogram::cross_correlation(
+            &ints(&case["a"]),
+            &ints(&case["b"]),
+            i("bin_width"),
+            i("range"),
+        )?),
         op => panic!("unknown op {op}"),
     })
 }

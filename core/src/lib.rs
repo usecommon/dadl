@@ -17,7 +17,8 @@
 //! - [`deadtime`]: non-paralyzable and paralyzable dead-time filters.
 //! - [`coincidences`]: fixed-grid (clock-locked) coincidence counting, the
 //!   only coincidence method allowed for Bell-type analyses.
-//! - [`histogram`]: inter-arrival histograms for dead-time and afterpulse fits.
+//! - [`histogram`]: inter-arrival histograms for dead-time and afterpulse fits,
+//!   and cross-correlation (delay) histograms for delay, jitter and heralding.
 
 pub mod coincidences;
 pub mod deadtime;

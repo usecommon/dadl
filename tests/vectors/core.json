@@ -22,6 +22,17 @@
     {"name": "histogram drops long gaps", "op": "interarrival", "times": [0, 100], "bin_width": 10, "n_bins": 4, "expect": [0, 0, 0, 0]},
     {"name": "histogram zero bins", "op": "interarrival", "times": [0, 5], "bin_width": 10, "n_bins": 0, "expect": []},
     {"name": "histogram unsorted", "op": "interarrival", "times": [30, 0, 5], "bin_width": 10, "n_bins": 4, "expect": {"error": "Unsorted"}},
-    {"name": "histogram span overflow", "op": "interarrival", "times": [-9223372036854775808, 9223372036854775807], "bin_width": 10, "n_bins": 4, "expect": {"error": "Overflow"}}
+    {"name": "histogram span overflow", "op": "interarrival", "times": [-9223372036854775808, 9223372036854775807], "bin_width": 10, "n_bins": 4, "expect": {"error": "Overflow"}},
+    {"name": "xcorr basic", "op": "cross_correlation", "a": [0, 10], "b": [5, 12], "bin_width": 5, "range": 10, "expect": [0, 1, 1, 1]},
+    {"name": "xcorr partial last bin", "op": "cross_correlation", "a": [0], "b": [2, 9], "bin_width": 6, "range": 10, "expect": [0, 0, 1, 1]},
+    {"name": "xcorr range edges", "op": "cross_correlation", "a": [100], "b": [90, 110], "bin_width": 5, "range": 10, "expect": [1, 0, 0, 0]},
+    {"name": "xcorr equal tags and repeats", "op": "cross_correlation", "a": [0, 0, 3], "b": [0, 3, 3], "bin_width": 1, "range": 4, "expect": [0, 1, 0, 0, 4, 0, 0, 4]},
+    {"name": "xcorr empty", "op": "cross_correlation", "a": [], "b": [1, 2], "bin_width": 4, "range": 8, "expect": [0, 0, 0, 0]},
+    {"name": "xcorr unsorted a", "op": "cross_correlation", "a": [5, 0], "b": [1], "bin_width": 4, "range": 8, "expect": {"error": "Unsorted"}},
+    {"name": "xcorr unsorted b", "op": "cross_correlation", "a": [0], "b": [3, 1], "bin_width": 4, "range": 8, "expect": {"error": "Unsorted"}},
+    {"name": "xcorr zero width", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 0, "range": 8, "expect": {"error": "NonPositiveWidth"}},
+    {"name": "xcorr zero range", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 4, "range": 0, "expect": {"error": "NonPositiveWidth"}},
+    {"name": "xcorr range overflow", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 4, "range": 9223372036854775807, "expect": {"error": "Overflow"}},
+    {"name": "xcorr tag overflow", "op": "cross_correlation", "a": [0], "b": [9223372036854775804], "bin_width": 4, "range": 8, "expect": {"error": "Overflow"}}
   ]
 }

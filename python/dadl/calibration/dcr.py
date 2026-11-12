@@ -1,0 +1,115 @@
+"""Temperature dependence of the dark count rate, DCR(T).
+
+Method `arrhenius-wls`: thermal generation follows
+
+    DCR(T) = DCR_ref * exp(-(Ea / k) (1/T - 1/T_ref)),
+
+so log DCR is linear in 1/T. Each input is a dark calibration
+(`dark-afterpulse-deadtime`) of the same channel at a recorded temperature
+(`conditions["temperature_K"]`); its dark-rate estimate and interval give
+log DCR and its standard error, and a weighted least-squares line gives
+DCR_ref and the activation energy Ea with their joint Gaussian posterior.
+Using the dark calibrations, not raw counts, keeps afterpulses and dead
+time out of the rates.
+
+T_ref defaults to the inverse of the weighted mean of 1/T (weights 1/se^2),
+where the two parameters are uncorrelated. The predictive check is the chi-square of the residuals
+with n - 2 degrees of freedom, so at least three temperatures are needed.
+
+Phase 2 limits: generation only; the field-dependent tunnelling term of
+DCR(T, V) and bias-voltage scans are not fitted.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+
+import numpy as np
+from scipy import stats as _st
+
+from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.dark import KIND as DARK_KIND
+from dadl.closed_form import K_B_EV
+from dadl.stats import LEVEL, Laplace
+
+KIND = "dcr-temperature"
+METHOD = "arrhenius-wls"
+METHOD_VERSION = "1"
+MIN_TEMPERATURES = 3
+
+UNITS = {"dcr_ref_cps": "1/s", "activation_energy_ev": "eV"}
+
+
+def calibrate_dcr_temperature(
+    darks: Sequence[Calibration],
+    *,
+    reference_k: float | None = None,
+    seed: int | None = None,
+    n_draws: int = N_DRAWS,
+) -> Calibration:
+    """Fit DCR_ref (at `reference_k`) and the activation energy from dark calibrations at several temperatures."""
+    darks = list(darks)
+    if len(darks) < MIN_TEMPERATURES:
+        raise ValueError(f"need dark calibrations at {MIN_TEMPERATURES} or more temperatures, got {len(darks)}")
+    for d in darks:
+        if d.kind != DARK_KIND:
+            raise ValueError(f"expected {DARK_KIND} calibrations, got {d.kind!r}")
+        if "temperature_K" not in d.conditions:
+            raise ValueError("every dark calibration needs conditions['temperature_K']")
+    channels = {d.channels for d in darks}
+    if len(channels) != 1:
+        raise ValueError("all dark calibrations must be of the same channel")
+    backends = {d.backend for d in darks}
+    if len(backends) != 1:
+        raise ValueError("cannot mix simulated and hardware calibrations")
+
+    temps = np.array([float(d.conditions["temperature_K"]) for d in darks])
+    if np.any(temps <= 0):
+        raise ValueError("temperature_K must be positive (kelvin)")
+    if np.unique(temps).size < MIN_TEMPERATURES:
+        raise ValueError(f"need {MIN_TEMPERATURES} or more distinct temperatures")
+    z = float(_st.norm.ppf(0.5 + LEVEL / 2))
+    y, se = [], []
+    for d in darks:
+        iv = d.estimates["dark_rate_cps"]
+        if not (iv.value > 0 and iv.low > 0):
+            raise ValueError("every dark rate must be positive to take its logarithm")
+        y.append(math.log(iv.value))
+        se.append((math.log(iv.high) - math.log(iv.low)) / (2 * z))
+    y_arr, w = np.array(y), 1.0 / np.square(se)
+    t_ref = float(np.sum(w) / np.sum(w / temps)) if reference_k is None else float(reference_k)
+    x = (1.0 / temps - 1.0 / t_ref) / K_B_EV  # log DCR = log DCR_ref - Ea * x
+    design = np.column_stack([np.ones_like(x), -x])
+    info = design.T @ (w[:, None] * design)
+    beta = np.linalg.solve(info, design.T @ (w * y_arr))
+    laplace = Laplace.from_hessian(beta, info)
+    resid = y_arr - design @ beta
+    chi2 = float(np.sum(w * resid**2))
+    dof = len(darks) - 2
+
+    rng = np.random.default_rng(seed)
+    draws = laplace.draws(rng, n_draws)
+    inputs = tuple(dict.fromkeys(i for d in darks for i in d.inputs))
+    return Calibration(
+        kind=KIND,
+        method=METHOD,
+        method_version=METHOD_VERSION,
+        channels=next(iter(channels)),
+        estimates={
+            "dcr_ref_cps": laplace.interval(0, math.exp),
+            "activation_energy_ev": laplace.interval(1, lambda v: v),
+        },
+        units=dict(UNITS),
+        samples=np.column_stack([np.exp(draws[:, 0]), draws[:, 1]]),
+        sample_params=("dcr_ref_cps", "activation_energy_ev"),
+        converged=True,
+        ppc_pvalue=float(_st.chi2.sf(chi2, dof)),
+        inputs=inputs,
+        backend=next(iter(backends)),
+        conditions={"reference_K": t_ref},
+        notes=(f"{len(darks)} dark calibrations from {temps.min():g} K to {temps.max():g} K; chi-square {chi2:.3g} on {dof} dof",),
+    )
+
+
+__all__ = ["KIND", "calibrate_dcr_temperature"]

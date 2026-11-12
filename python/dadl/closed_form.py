@@ -103,3 +103,56 @@ def chsh_expected_grid(
     r = pair_rate_per_s * efficiency / 2.0 + dark_rate_cps
     a = 4.0 * r * r * (width_ps * 1e-12) * duration_s
     return chsh_with_accidentals(visibility, c, a)
+
+
+#: Boltzmann constant in eV/K.
+K_B_EV = 8.617333262e-5
+
+
+def arrhenius_dark_rate(dcr_ref_cps: float, activation_energy_ev: float, temperature_k: float, reference_k: float) -> float:
+    """Dark count rate at `temperature_k` for Arrhenius generation: DCR_ref * exp(-Ea/k (1/T - 1/T_ref))."""
+    if temperature_k <= 0 or reference_k <= 0:
+        raise ValueError("temperatures must be positive (kelvin)")
+    return dcr_ref_cps * math.exp(-activation_energy_ev / K_B_EV * (1.0 / temperature_k - 1.0 / reference_k))
+
+
+def _recorded(rate_in: float, dead_time_s: float) -> tuple[float, float]:
+    """Recorded rate and dead fraction of a non-paralyzable detector fed a Poisson rate."""
+    x = rate_in * dead_time_s
+    return rate_in / (1.0 + x), x / (1.0 + x)
+
+
+def accidentals_expected(
+    rate_a_in: float, rate_b_in: float, dead_time_a_s: float, dead_time_b_s: float, width_ps: float, duration_s: float
+) -> float:
+    """Expected fixed-grid accidental coincidences: R1 R2 width duration with the recorded rates.
+
+    Exact for stationary streams with at most one tag per slot per channel
+    (width below the dead time), counted far from the pair peak.
+    """
+    ra, _ = _recorded(rate_a_in, dead_time_a_s)
+    rb, _ = _recorded(rate_b_in, dead_time_b_s)
+    return ra * rb * width_ps * 1e-12 * duration_s
+
+
+def heralding_ratio_expected(
+    pair_rate_per_s: float,
+    efficiency_a: float,
+    efficiency_b: float,
+    dark_a_cps: float,
+    dark_b_cps: float,
+    dead_time_a_s: float,
+    dead_time_b_s: float,
+    jitter_combined_ps: float,
+    width_ps: float,
+) -> float:
+    """Expected (C - A) / S for herald a and signal b, a CW pair source and exact declared delays.
+
+    Pair photons are recorded with probability eta (1 - dead fraction) on each
+    arm; both land in one slot with grid_capture_probability. Correlations of
+    the two arms' dead states enter at order (pair rate x dead time)^2.
+    """
+    ra, fa = _recorded(efficiency_a * pair_rate_per_s + dark_a_cps, dead_time_a_s)
+    _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s)
+    capture = grid_capture_probability(jitter_combined_ps / math.sqrt(2.0), width_ps)
+    return pair_rate_per_s * efficiency_a * (1 - fa) * efficiency_b * (1 - fb) * capture / ra
