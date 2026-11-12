@@ -4,7 +4,12 @@ All notable changes. DADL is pre-alpha: in 0.0.x anything may change between
 releases. The `calibration/1` schema is a draft and is versioned separately
 from the packages.
 
-## 0.0.3 (unreleased)
+## Unreleased
+
+- Release: the crate is now published to crates.io by the release workflow with
+  Trusted Publishing, in a `crates` environment, instead of by hand with a token.
+
+## 0.0.3 (2026-11-11)
 
 Applies the third review ([docs/reviews/2026-11-council.md](docs/reviews/2026-11-council.md)).
 

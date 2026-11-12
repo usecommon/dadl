@@ -174,31 +174,31 @@ The review is still agent-only. A human physicist's review remains the top open 
 
 These were not changed by the review. Each needs the repository owner.
 
-- [ ] **Private vulnerability reporting.** SECURITY.md relies on it, and it is currently off.
+- [x] **Private vulnerability reporting.** SECURITY.md relies on it, and it is currently off.
   - Repo → Settings → Security (Code security / Advanced Security) → Private vulnerability reporting → Enable.
-- [ ] **Protect the `pypi` environment.**
+- [x] **Protect the `pypi` environment.**
   - Settings → Environments → pypi:
     - Required reviewers: add yourself.
     - Deployment branches and tags: Selected, with a tag rule `v*`.
     - Untick "Allow administrators to bypass".
-- [ ] **Tag ruleset.**
+- [x] **Tag ruleset.**
   - Settings → Rules → Rulesets → New tag ruleset.
   - Target `v*`.
   - Restrict creations, updates and deletions to the owner (via the bypass list).
-- [ ] **Branch ruleset on `main`.**
+- [x] **Branch ruleset on `main`.**
   - Require a pull request.
   - Require status checks (the CI jobs).
   - Require linear history.
   - Block force pushes and deletion.
-- [ ] **Actions settings.**
+- [x] **Actions settings.**
   - Settings → Actions → General.
   - Workflow permissions: Read.
   - Require approval for fork pull requests.
-- [ ] **crates.io.**
+- [x] **crates.io.**
   - crates.io → dadl → Settings → Trusted Publishing: add repository `usecommon/dadl`, workflow `release.yml`, environment `crates`.
   - Then Account Settings → API Tokens: revoke the manual token, and run `cargo logout`.
-  - After that, a `rust-lang/crates-io-auth-action` job can replace manual publishing.
-- [ ] **PyPI.**
+  - Done: the `publish-crate` job in `release.yml` now publishes with `rust-lang/crates-io-auth-action`.
+- [x] **PyPI.**
   - Confirm the Trusted Publisher names environment `pypi`.
   - Confirm no API tokens exist (Account → API tokens).
-- [ ] **Dependabot.** Enable Dependabot alerts and security updates: Settings → Security.
+- [x] **Dependabot.** Enable Dependabot alerts and security updates: Settings → Security.
