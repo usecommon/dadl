@@ -110,6 +110,23 @@ from the packages.
   x86-64 and aarch64, macOS universal2, Windows x64) and an sdist for
   `dadl-quantum-core`, published with Trusted Publishing.
 
+### Hardware twin
+
+- `dadl simulate SETUP --out DIR --format ptu [--device hydraharp|multiharp|picoharp|timeharp260p]`
+  writes each simulated acquisition as a T2 PTU file (`setting0.ptu`, ...),
+  with the device's tick, timer rollovers and header. `--tags DIR` reads such
+  a folder in `analyze` and `calibrate`. The CHSH quickstart gives the same S
+  through PTU files as through a tag file.
+- `dadl.adapters.ptu_write.write_ptu`: a vectorized PTU writer, byte-for-byte
+  equal to the independent writer in the test suite. Files it writes carry
+  `CreatorSW_Name = DADL` and `DADL_Simulated = True`; the reader marks them
+  `simulated`, and calibrations from them are recorded as `backend: sim`.
+- `dadl.adapters.SimulatedTagger`: a live tagger emulated from a setup,
+  streaming batches and injecting buffer overflows, dropped batches and
+  configuration changes as typed events; `check_accounting` verifies that
+  tags delivered plus tags reported lost equal tags generated.
+- `dadl.simsetup` (`simulate_setup`, `simulate_setup_dark`), moved out of the CLI.
+
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 
 - Bindings hold the GIL while reading NumPy buffers (releasing it allowed a
