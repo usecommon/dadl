@@ -156,3 +156,48 @@ def test_delay_fit_is_unbiased_on_every_device_tick(device):
         assert cal.conditions["tick_ps"] == tick
     assert abs(np.mean(est)) < 0.3
     assert any("raised" in n for n in notes) == (20 % tick != 0)
+
+
+def test_accounting_compares_times_not_counts(hom_setup):
+    # Time-tagging review W11: count-only accounting passed lost-plus-duplicated, shifted, swapped
+    # and extra data. Every one of those must now show up.
+    from dadl.data import ChannelId, TagSet
+
+    dev = SimulatedTagger(hom_setup, "dip")
+    good = dev.read()
+    truth = dev.truth()
+    assert all(v == 0 for v in check_accounting(good, (), truth).values())
+    (c0, c1) = good.channels
+
+    def variant(arr0, arr1):
+        return TagSet({c0: np.sort(arr0), c1: np.sort(arr1)})
+
+    a, b = good[c0], good[c1]
+    cases = {
+        "lost and duplicated": variant(np.concatenate([a[500:], a[:500][::-1][:0], np.repeat(a[500:1000], 1)]), b),
+        "shifted": variant(a + 1_000_000, b),
+        "swapped": variant(b, a),
+    }
+    for name, ts in cases.items():
+        assert sum(check_accounting(ts, (), truth).values()) > 0, name
+    extra = TagSet({c0: a, c1: b, ChannelId(c0.device, 7): np.array([5])})
+    assert check_accounting(extra, (), truth)[7] == 1
+
+
+def test_presets_refuse_inputs_the_device_lacks(tmp_path):
+    with pytest.raises(ValueError, match="do not exist"):
+        write_ptu(tmp_path / "f.ptu", {0: np.array([1]), 3: np.array([2])}, device="picoharp")
+    write_ptu(tmp_path / "g.ptu", {0: np.array([1]), 1: np.array([2])}, device="picoharp")
+
+
+def test_declared_tick_overrides_a_spoiled_gcd():
+    # Time-tagging review Q6: an 80 ps tick with one channel offset by 30 ps made the GCD 10 ps.
+    from dadl.calibration import calibrate_delay
+    from dadl.data import ChannelId
+    from dadl.sim import DetectorParams, simulate_pairs
+
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100, dead_time_ps=30_000, jitter_sigma_ps=60)
+    a, b = simulate_pairs(1e5, det, det, 1.0, np.random.default_rng(2))
+    a, b = a // 80 * 80, b // 80 * 80 + 30
+    cal = calibrate_delay(a, b, (ChannelId("A", 0), ChannelId("B", 1)), tick_ps=80, n_draws=10)
+    assert cal.conditions["tick_ps"] == 80 and any("tick grid" in n for n in cal.notes)

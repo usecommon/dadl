@@ -5,8 +5,10 @@ instrument would have written: the PTU header, then 32-bit T2 records with
 the device's own tick, timer width and rollover records. Simulated data then
 enters DADL through the same adapter (`dadl.adapters.ptu`) as a recording.
 
-Tags are quantized to the device tick (floor), as the instrument does; with
-the HydraHarp's 1 ps tick, simulated ps tags pass through unchanged.
+Tags are quantized to the device tick (floor), as an ideal TDC does; with
+the HydraHarp's 1 ps tick, simulated ps tags pass through unchanged. The twin
+models no TDC dead time, differential non-linearity or overrun stop: its
+files are structurally valid, not a model of every instrument behaviour.
 
 Every file this module writes says so: the header carries
 `CreatorSW_Name = "DADL"` and `DADL_Simulated = True`, and the reader marks
@@ -35,8 +37,11 @@ DEVICES: dict[str, tuple[int, int, str]] = {
     "picoharp": (ptu.PICOHARP_T2, 4, "PicoHarp 300"),
     "hydraharp": (ptu.HYDRAHARP2_T2, 1, "HydraHarp"),
     "timeharp260p": (ptu.TIMEHARP260P_T2, 25, "TimeHarp 260 P"),
-    "multiharp": (ptu.MULTIHARP_T2, 5, "MultiHarp"),
+    "multiharp": (ptu.MULTIHARP_T2, 5, "MultiHarp 160"),
+    "multiharp150n": (ptu.MULTIHARP_T2, 80, "MultiHarp 150 N"),
 }
+#: Highest input number each preset can record (HydraHarp family: 0 is the sync input).
+MAX_INPUT: dict[str, int] = {"picoharp": 1, "hydraharp": 8, "timeharp260p": 2, "multiharp": 64, "multiharp150n": 16}
 
 _HH2_MAX_COUNT = (1 << 25) - 1
 
@@ -141,6 +146,12 @@ def write_ptu(
     if device not in DEVICES:
         raise ValueError(f"device must be one of {sorted(DEVICES)}, got {device!r}")
     record_type, tick_ps, hw_type = DEVICES[device]
+    too_high = sorted(int(k) for k in tags if int(k) > MAX_INPUT[device])
+    if too_high:
+        raise ValueError(
+            f"{hw_type} records inputs 0-{MAX_INPUT[device]}; inputs {too_high} do not exist on it "
+            "(choose a device with more inputs, or fewer channels)"
+        )
     parts_t, parts_i, parts_m = [], [], []
     for inp, arr in sorted(tags.items()):
         arr = np.asarray(arr, dtype=np.int64)

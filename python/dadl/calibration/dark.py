@@ -62,8 +62,17 @@ from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hess
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "4"
+METHOD_VERSION = "5"
 MIN_GAPS = 20
+#: Below this many expected afterpulses (n p) the profile intervals are used even with many gaps
+#: (statistician review: tau_a covered 87% at 20,000 gaps with about 10 afterpulses).
+PROFILE_BELOW_AFTERPULSES = 500
+#: Laplace draws importance-reweighted by the exact likelihood when the profile path is used,
+#: so stored draws agree with the reported intervals (Laplace draws alone covered as little as 73%).
+IMPORTANCE_DRAWS = 4000
+#: A shortest gap this many typical edge spacings below the next is an outlier (a double trigger
+#: or reflection), not the dead time; one such tag collapsed the estimate to 2 ns.
+OUTLIER_SPACINGS = 30
 #: Posterior samples of f(0) averaged over in the dead-time interval.
 F0_SAMPLES = 4000
 PPC_BINS = 20
@@ -78,9 +87,9 @@ DETECTION_LR = 13.82
 
 UNITS = {
     "dark_rate_cps": "1/s",
-    "afterpulse_prob": "probability per avalanche",
+    "afterpulse_prob": "probability per avalanche, past the effective dead time (single-exponential effective value)",
     "afterpulse_tau_ps": "ps",
-    "dead_time_ps": "ps",
+    "dead_time_ps": "ps (effective channel dead time: the longer of detector and tagger)",
 }
 
 _MODEL = DarkAfterpulseModel()
@@ -195,6 +204,22 @@ def _profile_interval(
     return lo, hi
 
 
+def _reweighted_draws(s: np.ndarray, laplace: Laplace, rng: np.random.Generator, n_draws: int) -> np.ndarray:
+    """Posterior draws (flat prior in the fit coordinates): Laplace proposals reweighted by the exact likelihood."""
+    prop = laplace.draws(rng, IMPORTANCE_DRAWS)
+    prop = np.clip(prop, (-80.0, -40.0, -20.0), (0.0, 40.0, 45.0))
+    r, p, ta = np.exp(prop[:, 0]), expit(prop[:, 1]), np.exp(prop[:, 2])
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        dens = r[:, None] * (1 - p[:, None]) + p[:, None] * (r[:, None] + 1 / ta[:, None]) * np.exp(-s[None, :] / ta[:, None])
+        loglik = np.sum(np.log(dens), axis=1) - r * s.sum()
+    diff = prop - laplace.mean
+    logq = -0.5 * np.einsum("ij,jk,ik->i", diff, np.linalg.inv(laplace.cov), diff)
+    logw = np.where(np.isfinite(loglik), loglik - logq, -np.inf)
+    w = np.exp(logw - np.max(logw))
+    w /= w.sum()
+    return prop[rng.choice(prop.shape[0], size=n_draws, p=w)]
+
+
 def _dead_time(
     m: int,
     n: int,
@@ -304,6 +329,23 @@ def calibrate_dark(
         raise InsufficientCounts(f"need at least {MIN_GAPS} gaps between dark counts, got {gaps.size}")
     rng = np.random.default_rng(seed)
 
+    notes: list[str] = []
+    order = np.argsort(gaps, kind="stable")
+    dropped = 0
+    # A lone gap far shorter than the next few is a double trigger or reflection, not the dead time.
+    while dropped < 3 and order.size - dropped > 5:
+        g = gaps[order[dropped : dropped + 5]].astype(float)
+        typical = (g[4] - g[1]) / 3.0
+        if g[1] - g[0] > OUTLIER_SPACINGS * max(typical, 1.0):
+            dropped += 1
+        else:
+            break
+    if dropped:
+        notes.append(
+            f"{dropped} gap(s) far shorter than all others (double triggers or reflections?) were left out of "
+            "the dead-time estimate and the fit"
+        )
+    gaps = np.delete(gaps, order[:dropped])
     m = int(gaps.min())
     # The shortest gap defines m; it sits at s = 0 by construction, so it is left
     # out of the shape fit (otherwise it reads as a spurious, very fast afterpulse).
@@ -316,7 +358,6 @@ def calibrate_dark(
     nll_null = -(n * math.log(r0) - r0 * exposure)
 
     res = _fit(s, r0)
-    notes: list[str] = []
     unidentified: tuple[str, ...] = ()
     lr = 0.0 if res is None else 2.0 * (nll_null - float(res.fun))
     detected = res is not None and lr > DETECTION_LR
@@ -336,7 +377,9 @@ def calibrate_dark(
     # The afterpulse probability gets one profile-likelihood interval whether or not afterpulsing
     # is detected, so the choice between an interval and a limit never depends on the data
     # (switching on detection undercovered: 82-90% when afterpulsing went undetected).
-    use_profile = n < PROFILE_BELOW
+    use_profile = n < PROFILE_BELOW or (
+        res is not None and n * float(expit(res.x[1])) < PROFILE_BELOW_AFTERPULSES
+    )
     nll_min = min(nll_null, float(res.fun)) if res is not None else nll_null
     p_centre = float(res.x[1]) if res is not None and res.fun <= nll_null else LOGIT_P_RANGE[0]
     if use_profile or not detected:
@@ -358,7 +401,10 @@ def calibrate_dark(
         else:
             est_p = laplace.interval(1, lambda y: float(expit(y)))
             est_ta = laplace.interval(2, math.exp)
-        d = laplace.draws(rng, n_draws)
+        if use_profile:
+            d = _reweighted_draws(s, laplace, rng, n_draws)
+        else:
+            d = laplace.draws(rng, n_draws)
         r_draws = np.exp(d[:, 0]) * PS_PER_S
         p_draws = expit(d[:, 1])
         ta_draws = np.exp(d[:, 2])
@@ -371,6 +417,7 @@ def calibrate_dark(
         r_draws = r_draws * PS_PER_S
         ul, t_lo, t_hi = _p_upper_limit(s, nll_null, math.log(r0))
         est_p = Interval(0.0, 0.0, max(ul, float(expit(p_hi))))
+        p_draws = rng.uniform(0.0, est_p.high, n_draws)
         est_ta = None
         unidentified = ("afterpulse_tau_ps",)
         notes.append(
@@ -382,6 +429,7 @@ def calibrate_dark(
             "the dark rate counts every avalanche past the dead time, so undetected afterpulses (at most the "
             "upper limit on afterpulse_prob, as a fraction) are included in it"
         )
+        notes.append("afterpulse_prob draws are uniform on [0, upper limit]: a conservative stand-in, not a posterior")
         converged = True
 
     f0 = _MODEL.density_at_zero(theta)
@@ -407,10 +455,12 @@ def calibrate_dark(
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}
     columns = [r_draws]
     names = ["dark_rate_cps"]
+    columns.append(p_draws)
+    names.append("afterpulse_prob")
     if est_ta is not None:
         estimates["afterpulse_tau_ps"] = est_ta
-        columns += [p_draws, ta_draws]
-        names += ["afterpulse_prob", "afterpulse_tau_ps"]
+        columns.append(ta_draws)
+        names.append("afterpulse_tau_ps")
     estimates["dead_time_ps"] = est_tau
     columns.append(tau_draws)
     names.append("dead_time_ps")

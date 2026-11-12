@@ -15,8 +15,10 @@ posterior in (log beta, log A, d, log sigma); the background and peak area
 are nuisance parameters and are not stored.
 
 Tagger tick: delays come in whole ticks (1 ps for a HydraHarp, 5 ps for a
-MultiHarp, 25 ps for a TimeHarp 260 P). The tick is found from the data (the
-greatest common divisor of the tags), the bin width is rounded up to a whole
+MultiHarp 160, 80 ps for a MultiHarp 150 N, 25 ps for a TimeHarp 260 P). The
+tick is passed by the caller when the adapter knows it (`tick_ps`); otherwise
+it is found from the data (the greatest common divisor of the tags, which a
+non-tick offset between channels would spoil). The bin width is rounded up to a whole
 number of ticks, and each bin [e, e + w) is modelled as the continuous delays
 from e - tick/2 to e + w - tick/2. The tick's quantization noise (variance
 tick^2 / 6 for two channels) is part of the fitted jitter, as it is part of
@@ -157,6 +159,7 @@ def calibrate_delay(
     seed: int | None = None,
     n_draws: int = N_DRAWS,
     conditions: dict[str, float] | None = None,
+    tick_ps: int | None = None,
     _refined: bool = False,
 ) -> Calibration:
     """Fit the delay of channel b relative to a (b - a, ps) and the combined jitter sigma.
@@ -173,8 +176,17 @@ def calibrate_delay(
     b = _checks.timestamps(b, "b")
     bin_width_ps = _checks.integer(bin_width_ps, "bin_width_ps", minimum=1)
     range_ps = _checks.integer(range_ps, "range_ps", minimum=1)
-    tick = tag_tick(a, b)
+    found = tag_tick(a, b)
     notes: list[str] = []
+    if tick_ps is None:
+        tick = found
+    else:
+        tick = _checks.integer(tick_ps, "tick_ps", minimum=1)
+        if found % tick:
+            notes.append(
+                f"the tags are not all on the {tick} ps tick grid (their common step is {found} ps): an offset "
+                "between channels? The declared tick is used"
+            )
     if bin_width_ps % tick:
         new = -(-bin_width_ps // tick) * tick
         notes.append(f"bin width raised from {bin_width_ps} to {new} ps, a whole number of {tick} ps tagger ticks")
@@ -251,12 +263,17 @@ def calibrate_delay(
     if not _refined and sigma < 2 * bin_width_ps and finer < bin_width_ps:
         refined = calibrate_delay(
             a, b, channels, range_ps=range_ps, bin_width_ps=finer, backend=backend, seed=seed,
-            n_draws=n_draws, conditions=conditions, _refined=True,
+            n_draws=n_draws, conditions=conditions, tick_ps=tick_ps, _refined=True,
         )
         note = f"bins refined from {bin_width_ps} to {finer} ps because the jitter ({sigma:.3g} ps) is under two bin widths"
         return dataclasses.replace(refined, notes=(note, *refined.notes))
     if sigma < bin_width_ps:
         notes.append(f"the fitted jitter ({sigma:.3g} ps) is below the bin width; use narrower bins")
+    if tick > sigma / 2:
+        notes.append(
+            f"the {tick} ps tick is coarse against the {sigma:.3g} ps jitter: the Gaussian model ignores the tick's "
+            "quantization shape, so the predictive check may fail and the jitter read low"
+        )
 
     rng = np.random.default_rng(seed)
     draws = laplace.draws(rng, n_draws)

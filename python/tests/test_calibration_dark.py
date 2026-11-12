@@ -89,7 +89,9 @@ def test_no_afterpulsing_gives_an_upper_limit():
     assert p.low == 0.0 and 0.0 < p.high < 0.01
     assert cal.estimates["dark_rate_cps"].contains(1000.0)
     assert any("upper limit" in n for n in cal.notes)
-    assert cal.sample_params == ("dark_rate_cps", "dead_time_ps")
+    # Statistician review: the posterior table now carries p even when it is only an upper limit.
+    assert cal.sample_params == ("dark_rate_cps", "afterpulse_prob", "dead_time_ps")
+    assert cal.samples[:, 1].max() <= p.high
 
 
 def test_misfit_is_flagged_by_the_predictive_check():
@@ -191,3 +193,24 @@ def test_low_rate_dead_time_is_an_upper_bound_not_zero():
     tags = dark(det, 60.0, seed=1)
     iv = calibrate_dark(tags, CH, seed=1).estimates["dead_time_ps"]
     assert iv.value == iv.high == int(np.diff(tags).min()) and iv.low == 0.0 and iv.contains(30_000.0)
+
+
+
+def test_a_lone_double_trigger_does_not_become_the_dead_time():
+    # Time-tagging review: one tag 2 ns after another collapsed the dead time to about 2 ns.
+    tags = dark(TRUTH, 5.0, seed=4)
+    spoiled = np.sort(np.append(tags, tags[100] + 2_000))
+    cal = calibrate_dark(spoiled, CH, seed=1, n_draws=10)
+    assert cal.estimates["dead_time_ps"].contains(22_000.0)
+    assert any("double triggers" in n for n in cal.notes)
+
+
+def test_profile_path_draws_agree_with_the_intervals():
+    # Statistician review: below 5,000 gaps the Laplace draws for p and tau_a disagreed with the
+    # profile intervals (draw coverage down to 73%); they are now importance-reweighted.
+    cal = calibrate_dark(dark(TRUTH, 3.0, seed=6), CH, seed=2)
+    for name in ("afterpulse_prob", "afterpulse_tau_ps"):
+        iv = cal.estimates[name]
+        lo, hi = np.quantile(cal.samples[:, cal.sample_params.index(name)], [0.025, 0.975])
+        width = iv.high - iv.low
+        assert abs(lo - iv.low) < 0.25 * width and abs(hi - iv.high) < 0.25 * width, (name, lo, hi, iv)

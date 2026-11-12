@@ -200,11 +200,42 @@ class SimulatedTagger:
 
 
 def check_accounting(delivered: TagSet, events: tuple[Event, ...], generated: Mapping[int, np.ndarray]) -> dict[int, int]:
-    """For each input: generated - delivered - reported lost. All zeros means nothing was lost silently."""
-    lost: dict[int, int] = {k: 0 for k in generated}
-    for e in events:
-        if e.kind in ("buffer-overflow", "dropped-batch"):
-            for k, n in e.detail.get("per_input", {}).items():
-                lost[k] = lost.get(k, 0) + int(n)
-    got = {ch.input: delivered[ch].size for ch in delivered.channels}
-    return {k: int(generated[k].size) - got.get(k, 0) - lost.get(k, 0) for k in generated}
+    """For each input, the number of tags not accounted for; all zeros means nothing was lost silently.
+
+    Compares times, not just counts: every delivered tag must be a generated tag (no duplicates,
+    shifts or extra inputs), and every generated tag that was not delivered must fall inside a
+    reported loss (a buffer overflow window or a dropped batch). Needs the generated truth, so it
+    applies to the simulated tagger; for a real device the adapter's rule is record accounting
+    plus the vendor's own loss flags (adapters/TEMPLATE.md).
+    """
+    devices = {ch.device for ch in delivered.channels}
+    if len(devices) > 1:
+        raise ValueError(f"delivered tags come from several devices {sorted(devices)}; check each device separately")
+    windows = [
+        (int(e.time_ps), int(e.detail["until_ps"]))
+        for e in events
+        if e.kind in ("buffer-overflow", "dropped-batch") and e.time_ps is not None and "until_ps" in e.detail
+    ]
+    got = {ch.input: np.asarray(delivered[ch]) for ch in delivered.channels}
+    out: dict[int, int] = {}
+    for k in sorted(set(generated) | set(got)):
+        truth = np.sort(np.asarray(generated.get(k, np.empty(0, dtype=np.int64))))
+        seen = np.sort(got.get(k, np.empty(0, dtype=np.int64)))
+        values, t_count = np.unique(truth, return_counts=True)
+        s_values, s_count = np.unique(seen, return_counts=True)
+        idx = np.searchsorted(values, s_values)
+        idx_ok = idx < values.size
+        match = np.zeros(s_values.size, dtype=bool)
+        match[idx_ok] = values[idx[idx_ok]] == s_values[idx_ok]
+        # Delivered tags that were never generated, or delivered more often than generated.
+        extra = int(s_count[~match].sum())
+        over = np.zeros(values.size, dtype=np.int64)
+        over[idx[match]] = s_count[match]
+        extra += int(np.clip(over - t_count, 0, None).sum())
+        missing_counts = np.clip(t_count - over, 0, None)
+        missing = np.repeat(values, missing_counts)
+        covered = np.zeros(missing.size, dtype=bool)
+        for lo, hi in windows:
+            covered |= (missing >= lo) & (missing < hi)
+        out[k] = extra + int((~covered).sum())
+    return out

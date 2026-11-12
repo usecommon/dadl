@@ -201,6 +201,21 @@ def write_ptu_dir(
     return out
 
 
+def tag_tick_ps(path: str | Path) -> int | None:
+    """The tagger tick in whole ps for a folder of PTU files (from the header), else None."""
+    path = Path(path)
+    if not path.is_dir():
+        return None
+    from dadl.adapters.ptu import PtuFile
+
+    files = sorted(path.glob("setting*.ptu"))
+    if not files:
+        return None
+    res = PtuFile(files[0]).resolution_s * 1e12
+    whole = round(res)
+    return whole if whole >= 1 and abs(res - whole) <= 1e-9 * res else None
+
+
 def tags_are_simulated(path: str | Path) -> bool:
     """True when the tags were written by DADL's simulator: a folder of PTU files whose headers say
     so, or an .npz written by `write_tags` with simulated=True.

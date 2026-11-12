@@ -26,7 +26,7 @@ from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
-from dadl.tagfile import read_tags, tags_are_simulated, write_ptu_dir, write_tags
+from dadl.tagfile import read_tags, tag_tick_ps, tags_are_simulated, write_ptu_dir, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -248,7 +248,9 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
     print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
     cals = [
-        calibrate_delay(a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, **common),
+        calibrate_delay(
+            a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_tick_ps(args.tags), **common
+        ),
         calibrate_accidentals(a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **common),
         calibrate_heralding(
             a, b, chs, width_ps=window.width_ps, delay_herald_ps=d_a, delay_signal_ps=d_b, **common
