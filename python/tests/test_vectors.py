@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from dadl import _backend
+
 from dadl.coincidences import grid_coincidences
 from dadl.deadtime import apply_nonparalyzable, apply_paralyzable
 from dadl.histogram import cross_correlation, interarrival
@@ -37,13 +39,21 @@ def run(case):
     raise AssertionError(f"unknown op {op}")
 
 
+BACKENDS = [
+    pytest.param("python"),
+    pytest.param("rust", marks=pytest.mark.skipif("rust" not in _backend.available(), reason="dadl-quantum-core not installed")),
+]
+
+
 @pytest.mark.skipif(not CASES, reason="shared vectors not present (e.g. running from the sdist)")
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
-def test_shared_vector(case):
+def test_shared_vector(case, backend):
     expect = case["expect"]
-    if isinstance(expect, dict):
-        exc, match = ERRORS[expect["error"]]
-        with pytest.raises(exc, match=match):
-            run(case)
-    else:
-        assert run(case) == expect
+    with _backend.use(backend):
+        if isinstance(expect, dict):
+            exc, match = ERRORS[expect["error"]]
+            with pytest.raises(exc, match=match):
+                run(case)
+        else:
+            assert run(case) == expect

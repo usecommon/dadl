@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes the Python package to PyPI and the Rust crate to crates.io with
+# Publishes the Python packages (dadl-quantum and the compiled
+# dadl-quantum-core) to PyPI and the Rust crate to crates.io with
 # Trusted Publishing (OIDC): no registry token is stored anywhere. Triggered by
 # pushing a tag like v0.0.4 that points at a commit on main.
 #
@@ -11,6 +12,9 @@ name: Release
 # One-time setup on pypi.org (Account settings -> Publishing): project
 # "dadl-quantum", owner "usecommon", repository "dadl", workflow
 # "release.yml", environment "pypi".
+#
+# The same PyPI setup is needed for project "dadl-quantum-core" (same
+# workflow and environment) before its first release.
 #
 # One-time setup on crates.io (crate "dadl" -> Settings -> Trusted Publishing):
 # owner "usecommon", repository "dadl", workflow "release.yml", environment
@@ -41,8 +45,10 @@ jobs:
         run: |
           py=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' python/dadl/__init__.py)
           rs=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          core=$(sed -n 's/^version = "\(.*\)"/\1/p' bindings/python/Cargo.toml | head -1)
           test "v${py}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != python ${py}"; exit 1; }
           test "v${rs}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != rust ${rs}"; exit 1; }
+          test "v${core}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != bindings ${core}"; exit 1; }
       - name: Tagged commit must be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Test
@@ -73,6 +79,81 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+
+  core-wheels:
+    name: Build dadl-quantum-core (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64, manylinux: "2014"}
+          - {os: ubuntu-latest, target: aarch64, manylinux: "2014"}
+          - {os: macos-latest, target: universal2-apple-darwin, manylinux: "off"}
+          - {os: windows-latest, target: x64, manylinux: "off"}
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      # actions/setup-python v5.3.0, pinned by commit SHA
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: "3.12"
+      # PyO3/maturin-action v1.51.0, pinned by commit SHA
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          working-directory: bindings/python
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out ../../dist
+      # actions/upload-artifact v4.6.2, pinned by commit SHA
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  core-sdist:
+    name: Build dadl-quantum-core sdist
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      # PyO3/maturin-action v1.51.0, pinned by commit SHA
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          working-directory: bindings/python
+          command: sdist
+          args: --out ../../dist
+      # actions/upload-artifact v4.6.2, pinned by commit SHA
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-sdist
+          path: dist/
+          if-no-files-found: error
+
+  publish-core:
+    name: Publish dadl-quantum-core to PyPI
+    needs: [core-wheels, core-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      # actions/download-artifact v4.3.0, pinned by commit SHA
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: core-*
+          merge-multiple: true
+          path: dist/
+      # pypa/gh-action-pypi-publish v1.14.3, pinned by commit SHA (PEP 740 attestations on by default)
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+        with:
+          packages-dir: dist/
 
   publish:
     name: Publish to PyPI

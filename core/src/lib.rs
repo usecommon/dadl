@@ -1,9 +1,9 @@
 //! Per-tag processing core for DADL, the Detector-Aware Data Layer.
 //!
-//! Every loop that touches individual time tags will live here once the
-//! Python bindings land (phase 2); until then the pure-Python package is the
-//! reference implementation and both are held to the shared test vectors in
-//! `tests/vectors/core.json`.
+//! Every loop that touches individual time tags lives here. Python reaches it
+//! through the optional `dadl-quantum-core` package (`bindings/python`); the
+//! pure-Python package is the reference implementation, and both are held to
+//! the shared test vectors in `tests/vectors/core.json`.
 //!
 //! Contract, identical in Rust and Python:
 //! - timestamps are `i64` picoseconds on a declared clock;

@@ -1,10 +1,10 @@
-"""Histograms used by calibration fits (reference for core/src/histogram.rs)."""
+"""Histograms used by calibration fits (the Rust core when installed, else this reference)."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from dadl import _checks
+from dadl import _backend, _checks
 
 
 def interarrival(times: np.ndarray, bin_width_ps: int, n_bins: int) -> np.ndarray:
@@ -13,6 +13,13 @@ def interarrival(times: np.ndarray, bin_width_ps: int, n_bins: int) -> np.ndarra
     Bin k counts gaps in [k * bin_width_ps, (k + 1) * bin_width_ps). Gaps
     beyond the last bin are dropped. `times` must be sorted ascending.
     """
+    core = _backend.core()
+    if core is not None:
+        return core.interarrival(
+            _checks.timestamps(times),
+            _checks.integer(bin_width_ps, "bin_width_ps"),
+            _checks.integer(n_bins, "n_bins", minimum=0),
+        )
     bin_width_ps = _checks.integer(bin_width_ps, "bin_width_ps", minimum=1)
     n_bins = _checks.integer(n_bins, "n_bins", minimum=0)
     times = _checks.timestamps(times)
@@ -40,6 +47,14 @@ def cross_correlation(a: np.ndarray, b: np.ndarray, bin_width_ps: int, range_ps:
     Both inputs must be sorted ascending. Reference for
     core/src/histogram.rs, held to the same vectors.
     """
+    core = _backend.core()
+    if core is not None:
+        return core.cross_correlation(
+            _checks.timestamps(a, "a"),
+            _checks.timestamps(b, "b"),
+            _checks.integer(bin_width_ps, "bin_width_ps"),
+            _checks.integer(range_ps, "range_ps"),
+        )
     bin_width_ps = _checks.integer(bin_width_ps, "bin_width_ps")
     range_ps = _checks.integer(range_ps, "range_ps")
     if bin_width_ps <= 0 or range_ps <= 0:

@@ -14,11 +14,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from dadl import _checks
+from dadl import _backend, _checks
 
 
 def occupied_slots(times: np.ndarray, width_ps: int, delay_ps: int = 0) -> np.ndarray:
     """Sorted, de-duplicated slot indices occupied by `times` after removing `delay_ps`."""
+    core = _backend.core()
+    if core is not None:
+        return core.occupied_slots(
+            _checks.timestamps(times), _checks.integer(width_ps, "width_ps"), _checks.integer(delay_ps, "delay_ps")
+        )
     width_ps = _checks.integer(width_ps, "width_ps", minimum=1)
     delay_ps = _checks.integer(delay_ps, "delay_ps")
     times = _checks.timestamps(times)
@@ -37,6 +42,17 @@ def grid_coincidences(
     delay_b_ps: int = 0,
 ) -> int:
     """Number of slots occupied by both channels."""
+    core = _backend.core()
+    if core is not None:
+        return int(
+            core.grid_coincidences(
+                _checks.timestamps(a, "a"),
+                _checks.timestamps(b, "b"),
+                _checks.integer(width_ps, "width_ps"),
+                _checks.integer(delay_a_ps, "delay_a_ps"),
+                _checks.integer(delay_b_ps, "delay_b_ps"),
+            )
+        )
     slots_a = occupied_slots(a, width_ps, delay_a_ps)
     slots_b = occupied_slots(b, width_ps, delay_b_ps)
     return int(np.intersect1d(slots_a, slots_b, assume_unique=True).size)

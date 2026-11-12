@@ -1,4 +1,4 @@
-"""Dead-time filters (pure-Python reference; the Rust core has the fast versions).
+"""Dead-time filters (the Rust core when installed, else this pure-Python reference).
 
 Timestamps are int64 picoseconds, sorted ascending. Unsorted input is refused:
 a dead-time filter applied to unsorted tags gives a plausible-looking but
@@ -9,11 +9,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from dadl import _checks
+from dadl import _backend, _checks
 
 
 def apply_nonparalyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
     """Drop arrivals within `tau_ps` of the last recorded event."""
+    core = _backend.core()
+    if core is not None:
+        return core.apply_nonparalyzable(_checks.timestamps(times), _checks.integer(tau_ps, "dead time tau_ps"))
+    return _reference_nonparalyzable(times, tau_ps)
+
+
+def apply_paralyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
+    """Record an arrival only if the previous arrival (recorded or not) is at least `tau_ps` earlier."""
+    core = _backend.core()
+    if core is not None:
+        return core.apply_paralyzable(_checks.timestamps(times), _checks.integer(tau_ps, "dead time tau_ps"))
+    return _reference_paralyzable(times, tau_ps)
+
+
+def _reference_nonparalyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
     tau_ps = _checks.integer(tau_ps, "dead time tau_ps", minimum=0)
     times = _checks.timestamps(times)
     _checks.check_sorted(times)
@@ -30,8 +45,7 @@ def apply_nonparalyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
     return out[:n]
 
 
-def apply_paralyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
-    """Record an arrival only if the previous arrival (recorded or not) is at least `tau_ps` earlier."""
+def _reference_paralyzable(times: np.ndarray, tau_ps: int) -> np.ndarray:
     tau_ps = _checks.integer(tau_ps, "dead time tau_ps", minimum=0)
     times = _checks.timestamps(times)
     _checks.check_sorted(times)
