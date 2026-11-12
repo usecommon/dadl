@@ -183,3 +183,11 @@ def test_twenty_gaps_are_enough_and_fewer_are_refused():
     assert cal.unidentified == ("afterpulse_tau_ps",) and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
     with pytest.raises(InsufficientCounts):
         calibrate_dark(tags[:15], CH)
+
+
+def test_low_rate_dead_time_is_an_upper_bound_not_zero():
+    # Round 3 of the calibration probes: at SNSPD dark rates the dead time was reported as 0 ps.
+    det = DetectorParams(dark_rate_cps=100.0, dead_time_ps=30_000, afterpulse_prob=0.0)
+    tags = dark(det, 60.0, seed=1)
+    iv = calibrate_dark(tags, CH, seed=1).estimates["dead_time_ps"]
+    assert iv.value == iv.high == int(np.diff(tags).min()) and iv.low == 0.0 and iv.contains(30_000.0)

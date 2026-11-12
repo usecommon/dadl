@@ -118,3 +118,25 @@ probed at six points, 1,000 replicates each (95% intervals; band about 92.6–97
    and `ptu`. A parametrised table of bad inputs would cover most of them cheaply.
 6. **PTU edge cases.** Header types not yet exercised (float arrays, bitsets, dates), T3 mode, and
    one real recording per device family.
+
+## Calibration probe campaign (2026-11-12)
+
+Three rounds of regime and misspecification probes, 300–1,000 replicates per case, until a round
+found nothing significant in a well-specified case. Each finding was fixed and tested; the 12 CI
+gates were rerun after every change and pass on seed 20261111 with their earlier numbers, except
+where a fix was meant to change them (noted).
+
+| Round | Cases | Found | Fix | Before → after |
+| --- | --- | --- | --- | --- |
+| 1 | 15 | Dead-time interval with few gaps and afterpulsing (method treated f(0) as known, and the dark-count law as certain when afterpulsing was not detected) | Exact tick law averaged over the posterior of f(0); interval up to m when afterpulsing is not ruled out | 0–85% → 96–98% (50–200 gaps) |
+| 1 | | Afterpulse p and τa intervals at low counts (detection-dependent switch; Gaussian shape) | Profile-likelihood intervals below 5,000 gaps; conservative grid limit when undetected | p 90.9% → 94.8–99.6%; τa 82–91% → 89–95% |
+| 1 | | DCR(T) refused cold or dim scans (200-gap minimum) | Minimum 20 gaps | 100% errors → 93–97.5% coverage |
+| 2 | 19 | Narrow peaks (5 ps jitter, 20 ps bins) | Refit with bins of about a third of the jitter | 92% → 94–95% |
+| 2 | | Accidentals dispersion check gave false alarms with sparse counts | Exact conditional test below 5 counts per window | 4.5% → 0.1% of good runs flagged |
+| 3 | 19 | Low-rate dead time reported as 0 ps (point estimate clipped) | Maximum-likelihood value m, with a note that the data only bound it above | value 0 → m |
+
+Round 3 (fresh seed, 600 replicates per case): every well-specified case inside the 99.9% band,
+every predictive check flagging 0.2–1.7% of good runs (nominal 1%), and wrong-model DCR(T) data (an
+unmodelled 50 cps tunnelling floor) flagged in 100% of runs. Remaining limits: below about 30 gaps
+the afterpulse time constant is rarely identified and covers about 88% when it is; one-sided limits
+at p = 0 and sparse accidentals over-cover by design.
