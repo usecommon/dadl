@@ -158,6 +158,10 @@ from the packages.
   - delay: narrow peaks are refitted with finer bins (92% to 94-95%);
   - accidentals: an exact dispersion check for sparse counts (false alarms
     from 4.5% to 0.1%).
+  - the coverage gates split each regime's replicates across processes
+    (results identical to a serial run) and the profile intervals compute to
+    the precision they need: all 12 gates in 95 s on 4 local cores, after the
+    low-count fixes had pushed the CI job to 36 minutes.
 
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 
