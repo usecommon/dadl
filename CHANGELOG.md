@@ -148,6 +148,16 @@ from the packages.
   fixed +-50 bins. The start now widens until it holds +-4 sigma, the fit is
   bounded, and when the background fits to zero the delay and jitter are
   reported conditional on it, with a note, instead of failing.
+- Calibration probe campaign (three rounds; [review record](docs/reviews/2026-11-phase2-review.md#calibration-probe-campaign-2026-11-12)):
+  - dark calibration v4: the dead-time interval averages the shortest-gap law
+    over the uncertainty of f(0) and runs up to m when afterpulsing is not
+    detected (it covered as little as 0% with a few hundred gaps); afterpulse
+    intervals come from the profile likelihood below 5,000 gaps; the minimum
+    is 20 gaps instead of 200, so cold DCR(T) runs calibrate; at low dark
+    rates the dead time is reported as the bound it is, not as 0 ps;
+  - delay: narrow peaks are refitted with finer bins (92% to 94-95%);
+  - accidentals: an exact dispersion check for sparse counts (false alarms
+    from 4.5% to 0.1%).
 
 ### Twenty-round review of phase 2 ([docs/reviews/2026-11-phase2-review.md](docs/reviews/2026-11-phase2-review.md))
 

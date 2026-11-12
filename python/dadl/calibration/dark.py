@@ -236,8 +236,10 @@ def _dead_time(
         k_hi = quantile(0.95 if k_lo == 0 and cdf(0.5) > 0.025 else 0.975)
     else:
         k_lo, k_hi = 0, quantile(0.95)
-    point = max(0.0, m - math.log(2.0) / (n * f0))
     low, high = max(0.0, m - k_hi * tick), float(m - k_lo * tick)
+    # Median-unbiased when afterpulsing is detected; otherwise the maximum-likelihood value m,
+    # since the dark-count law alone would put the estimate microseconds below m (often at 0).
+    point = max(0.0, m - math.log(2.0) / (n * f0)) if afterpulsing_ruled_out else float(m)
     pick = rng.integers(0, lam.size, n_draws)
     draws = np.maximum(0.0, m - tick * np.floor(rng.exponential(1.0 / lam[pick]) + 0.5))
     return Interval(min(max(point, low), high), low, high), draws
@@ -393,6 +395,11 @@ def calibrate_dark(
     est_tau, tau_draws = _dead_time(
         m, n, f0, f0_samples, rng, n_draws, tag_tick(tags), afterpulsing_ruled_out=bool(detected)
     )
+    if est_tau.low == 0.0:
+        notes.append(
+            f"the dead time is only bounded above (<= {est_tau.high:.6g} ps): too few gaps fall near it to "
+            "bound it below; measure it with light on the detector"
+        )
 
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}
     columns = [r_draws]
