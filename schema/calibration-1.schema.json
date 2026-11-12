@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/usecommon/dadl/main/schema/calibration-1.schema.json",
   "title": "DADL calibration artifact manifest, version 1 (draft)",
-  "description": "DRAFT: may change until phase 2 produces real artifacts. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units and parameter transforms per posterior parameter arrive in calibration/2.",
+  "description": "DRAFT: may change until phase 2 produces real artifacts. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -145,7 +145,11 @@
       ],
       "properties": {
         "format": {
-          "const": "arrow"
+          "enum": [
+            "npy",
+            "arrow"
+          ],
+          "description": "npy: a <id>.posterior.npy file next to the manifest, little-endian float64, one row per draw, one column per name in params. arrow is reserved for the Photon-HDF5 store."
         },
         "sha256": {
           "type": "string",
@@ -250,6 +254,54 @@
         "sig": {
           "type": "string"
         }
+      }
+    },
+    "summary": {
+      "description": "Point estimate and two-sided interval per parameter, for reading without loading the posterior.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "low",
+          "high",
+          "level",
+          "unit"
+        ],
+        "properties": {
+          "value": {
+            "type": "number"
+          },
+          "low": {
+            "type": "number"
+          },
+          "high": {
+            "type": "number"
+          },
+          "level": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 1
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "unidentified_params": {
+      "description": "Parameters the data could not identify; they are absent from the posterior or reported as limits.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "description": "Human-readable caveats from the fit.",
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     }
   }

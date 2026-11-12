@@ -37,6 +37,20 @@ def patil_usman_hybrid_rate(true_rate: float, tau_p_s: float, tau_np_s: float) -
     return true_rate * math.exp(-true_rate * tau_p_s) / (1.0 + true_rate * tau_np_s)
 
 
+def dark_afterpulse_rate(dark_rate: float, afterpulse_prob: float, afterpulse_tau_s: float, dead_time_s: float) -> float:
+    """Recorded rate of a dark detector with non-paralyzable dead time and cascading afterpulses.
+
+    Each recorded avalanche blocks `dead_time_s`; after it, the next event is
+    the first of a Poisson dark count (rate r) and, with probability p, its own
+    afterpulse after an exponential delay (mean tau_a). The gaps are a renewal
+    process with survival S(s) = exp(-r s) (1 - p + p exp(-s / tau_a)) past the
+    dead time, so the mean gap is tau + (1 - p) / r + p / (r + 1 / tau_a).
+    """
+    r, p, ta = dark_rate, afterpulse_prob, afterpulse_tau_s
+    mean_gap = dead_time_s + (1.0 - p) / r + p / (r + 1.0 / ta)
+    return 1.0 / mean_gap
+
+
 def chsh_werner(visibility: float) -> float:
     """S = 2 sqrt(2) V for a Werner-like Phi+ state at the optimal settings."""
     return 2.0 * math.sqrt(2.0) * visibility

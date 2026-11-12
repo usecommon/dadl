@@ -153,3 +153,28 @@ def test_tag_file_errors(tmp_path):
     p.write_text("setting,channel,timestamp_ps\n0,0,1.5\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         read_tags(p)
+
+
+def test_simulate_dark_then_calibrate(tmp_path, capsys):
+    from dadl.artifact import read_artifact
+
+    tags = tmp_path / "dark.npz"
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "10", "--out", str(tags)]) == 0
+    capsys.readouterr()
+    runs = read_tags(tags)
+    assert all(runs[("a", "b'")][ch].size == 0 for ch in ("A+", "B-"))
+    assert main(["calibrate", "dark", "chsh-spad", "--tags", str(tags), "--channel", "B+", "--out", str(tmp_path / "art")]) == 0
+    out = capsys.readouterr().out
+    assert "dark_rate_cps" in out and "artifact:" in out
+    (path,) = (tmp_path / "art").glob("*.json")
+    manifest, samples = read_artifact(path)
+    assert manifest["channels"] == [{"device": "B+", "input": 2}]
+    assert manifest["backend"] == "sim"
+    assert manifest["summary"]["dark_rate_cps"]["low"] < 500 < manifest["summary"]["dark_rate_cps"]["high"]
+
+
+def test_calibrate_rejects_unknown_channel(tmp_path, capsys):
+    tags = tmp_path / "dark.npz"
+    main(["simulate", "chsh-spad", "--dark", "--duration-s", "1", "--out", str(tags)])
+    assert main(["calibrate", "dark", "chsh-spad", "--tags", str(tags), "--channel", "C", "--out", str(tmp_path)]) == 1
+    assert "unknown channel" in capsys.readouterr().err

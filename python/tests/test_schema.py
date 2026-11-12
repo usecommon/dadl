@@ -37,3 +37,34 @@ def test_timestamps_must_be_utc():
     bad = {**load(EXAMPLE), "created": "last tuesday"}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema, format_checker=jsonschema.FormatChecker())
+
+
+SETUP_SCHEMA = ROOT / "schema" / "setup-1.schema.json"
+
+
+def test_setup_schema_accepts_the_examples():
+    yaml = pytest.importorskip("yaml")
+    schema = load(SETUP_SCHEMA)
+    jsonschema.Draft202012Validator.check_schema(schema)
+    for path in (ROOT / "examples" / "chsh-spad" / "setup.yaml", ROOT / "python" / "dadl" / "examples" / "chsh-spad" / "setup.yaml"):
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data["channels"] = {str(k): v for k, v in data["channels"].items()}  # YAML int keys -> JSON strings
+        jsonschema.validate(data, schema)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"schema_version": 2},
+        {"policy": "loose"},
+        {"extra": 1},
+        {"analysis": {"type": "chsh", "window": {"width_ps": 1000, "source": "data"}}},
+    ],
+)
+def test_setup_schema_rejects_bad_setups(patch):
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load((ROOT / "examples" / "chsh-spad" / "setup.yaml").read_text(encoding="utf-8"))
+    data["channels"] = {str(k): v for k, v in data["channels"].items()}
+    data.update(patch)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, load(SETUP_SCHEMA))

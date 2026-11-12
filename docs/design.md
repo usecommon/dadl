@@ -115,7 +115,7 @@ Each example is a folder with a config file, a seeded simulation recipe (data is
 
 ### One config file per setup
 
-A single `setup.yaml` describes channels, detector families and serials, the tagger, analyses, the pre-declared coincidence window and the guardrail policy. Users adapt the kit mostly by editing this file, not code. It carries a schema\_version. Phase 1 validates it in code: types, units in key names, unknown and duplicate keys, and a 1 MB size cap. A generated JSON Schema (`dadl check-config`) and `dadl migrate` arrive in phase 2. Phase 1 accepts only `policy: default`; rules are loosened in code with `Policy.allow(analysis, correction, reason)`. YAML 1.1 reads `1.0e5` as a string, so the loader refuses it; write `100000` or `1.0e+5`.
+A single `setup.yaml` describes channels, detector families and serials, the tagger, analyses, the pre-declared coincidence window and the guardrail policy. Users adapt the kit mostly by editing this file, not code. It carries a schema\_version. Phase 1 validates it in code: types, units in key names, unknown and duplicate keys, and a 1 MB size cap. Its structure is published as a JSON Schema, `schema/setup-1.schema.json` (phase 2); a `dadl check-config` command and `dadl migrate` come later in phase 2. Phase 1 accepts only `policy: default`; rules are loosened in code with `Policy.allow(analysis, correction, reason)`. YAML 1.1 reads `1.0e5` as a string, so the loader refuses it; write `100000` or `1.0e+5`.
 
 ### Extension points
 
@@ -432,7 +432,7 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 
 **Inference.**
 
-- Calibration fits use MCMC (NUTS) and store a fixed number of posterior samples per artifact (target 2,000). The probabilistic-programming library (NumPyro, PyMC or Stan) is chosen in phase 1 after an install benchmark on Windows.
+- Calibration fits store a fixed number of posterior samples per artifact (target 2,000). Phase 2 uses maximum likelihood with SciPy: exact conjugate posteriors where they exist (Beta for heralding ratios, Gamma for Poisson rates) and Laplace posteriors in log or logit coordinates otherwise. MCMC (NUTS) arrives with the joint model in phase 3; the probabilistic-programming library (NumPyro, PyMC or Stan) is chosen then, after an install benchmark on Windows.
 - Between calibrations, drift is tracked by a state-space filter with explicit process noise per parameter, in logit or log coordinates, so uncertainty grows with time since the last calibration instead of shrinking.
 - Every filter state used in a correction is snapshotted as an artifact. Data is never corrected with parameters updated from that same data.
 - An artifact is accepted only after posterior predictive checks pass on held-out bins; otherwise the previous artifact stays current. A prior-sensitivity check in CI flags any parameter whose posterior is mostly prior.
@@ -441,7 +441,7 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 
 An artifact is a small JSON manifest plus a posterior sample table, addressed by the SHA-256 of its canonical manifest. It is stored under `/calibration/artifacts/<id>` and can also live as a standalone file.
 
-The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until phase 2 produces real artifacts):
+The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until every phase 2 calibration writes artifacts; `dadl calibrate dark` already does):
 
 ```json
 {
@@ -484,7 +484,7 @@ The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`
     "bias_V": 2.5
   },
   "posterior": {
-    "format": "arrow",
+    "format": "npy",
     "sha256": "00ff6f13379089e601cac18e06329d5376881931a6832f6f26b29f8d0253c391",
     "n_samples": 2000,
     "params": [
@@ -616,7 +616,7 @@ Proposed sequence. Each phase gates the next, and each gate is a named CI job wi
 | Phase | Delivers | Gate (CI job) | Status |
 | --- | --- | --- | --- |
 | 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): afterpulse closed-form test and crosstalk simulation outstanding |
-| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated and replayed Swabian data; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration; 95% interval coverage within 93.6–96.4% (binomial 99%) | Not started |
+| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated and replayed Swabian data; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration; each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 1% per calibration (Bonferroni across its parameters: 93.1–96.7% for one parameter, 92.8–97.0% for four) | In progress: data types, intervals, artifacts, setup schema and the dark/afterpulse/dead-time calibration done |
 | 3. Inference and plans | Forward model, joint Monte Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n) coincidences | `guardrails`: every regression case refuses, including window shopping under a signed plan | Not started |
 | 4. Explain (v0.2+) | Attribution with family-wise-adjusted 95% intervals and a misfit interval | `explain`: N named scenarios, correct top attribution in ≥ 90% | Seeking contributors |
 | 5. Hardware pilot | One SPDC lab, one network testbed | Hardware A/B results published, including disagreements | Conditional on a design partner |
@@ -678,7 +678,7 @@ The project is fully open source and developed in public on GitHub. There is no 
 | License | Dual-licensed MIT OR Apache-2.0 (decided): Rust ecosystem convention, Apache's patent grant for vendor contributions, MIT for simplicity. Check the licenses of wrapped dependencies (Kwiat, ETA, ptufile, QCoDeS drivers) before writing wrappers; any GPL tool becomes an optional extra run as a separate process |
 | Repository | One GitHub repo: `core/` (Rust), `python/` (API, simulator in `dadl/sim.py`), `tests/vectors/` (shared Rust/Python cases), `schema/` (calibration spec and examples), `adapters/` and `mcp/` (placeholders), `docs/` (this doc and the GitHub Pages report) |
 | Distribution | abi3 wheels for Windows x86-64 (tier 1), Linux and macOS, built with maturin on GitHub Actions, plus crates.io crates; dadl doctor detects installed vendor SDKs; semantic versioning; schema versioned separately |
-| CI | GitHub Actions runs guardrail regression cases and fast coverage checks on every pull request, on Windows, Linux and macOS; full coverage runs nightly; adapters are tested against recorded replay files |
+| CI | GitHub Actions runs guardrail regression cases on Windows, Linux and macOS and the 1,000-replicate coverage gate on every pull request; adapters are tested against recorded replay files |
 | Reference data | Simulated and hardware A/B datasets published as release assets or in a linked data repository |
 | Governance | Maintainer-led at first; CONTRIBUTING, SECURITY.md, CHANGELOG and CITATION.cff now; a code of conduct and issue templates once there are outside contributors; RFCs in GitHub Discussions for schema and guardrail changes |
 | Security | Private vulnerability reporting through GitHub security advisories; signed releases |
