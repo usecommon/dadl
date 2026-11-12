@@ -25,7 +25,11 @@ experiment, its guardrails and its roadmap.
   with 95% intervals whose coverage is checked in CI, written as
   content-addressed artifacts:
   `dadl simulate chsh-spad --dark --out dark.npz`, then
-  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`.
+  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a
+  pair-source acquisition, `dadl calibrate pairs` fits the relative delay and
+  combined jitter, off-peak accidentals in the declared window and the
+  heralding efficiency; `calibrate_dcr_temperature` fits DCR(T) (Arrhenius)
+  from dark calibrations at several temperatures.
 - `setup.yaml` drives everything: copy it with `dadl init`, edit it, run it.
 - Raw CHSH S from fixed-grid coincidences with a planned window, from
   simulated tags or **your own tags** (`dadl analyze`).
@@ -34,8 +38,8 @@ experiment, its guardrails and its roadmap.
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 
-Not yet: the other calibrations, calibration uncertainty in results, corrected CHSH, signing,
-vendor adapters, the explain engine, MCP. Uncertainties today are statistical
+Not yet: a vendor tagger adapter, calibration uncertainty in results, corrected CHSH, signing,
+the explain engine, MCP. Uncertainties today are statistical
 only (Gaussian, 1σ).
 
 ## What DADL will not do

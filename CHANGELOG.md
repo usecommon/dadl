@@ -30,6 +30,33 @@ from the packages.
 - CI: a coverage job runs the 1,000-replicate gate on every pull request.
 - New dependency: SciPy (>= 1.10).
 
+### Phase 2, milestone 2: delay, jitter, accidentals, heralding, DCR(T)
+
+- `dadl.histogram.cross_correlation` and `dadl::histogram::cross_correlation`
+  (Rust): histogram of delays b - a within a range, held to new shared vectors.
+- `calibrate_delay` (kind `delay-jitter`): relative delay and combined jitter
+  from a Gaussian peak plus flat background fitted to the cross-correlation
+  (Poisson maximum likelihood, Laplace posterior, grouped chi-square check).
+- `calibrate_accidentals` (kind `accidentals`, new in `calibration/1`):
+  expected accidentals in the declared fixed-grid window from 200 shifted
+  windows beyond a 200 ns guard (CW) or at the side peaks of a pulsed pump;
+  Gamma posterior and an off-peak dispersion check. R1·R2·Δt is a
+  cross-check only.
+- `calibrate_heralding` (kind `heralding-efficiency`): (C - A) / S with the
+  accidentals' Gamma-Poisson uncertainty and a Beta posterior; an exact,
+  deterministic interval.
+- `calibrate_dcr_temperature` (kind `dcr-temperature`, new in
+  `calibration/1`): Arrhenius fit of dark calibrations taken at several
+  temperatures (`conditions["temperature_K"]`).
+- `dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR`
+  writes the delay/jitter, accidentals and heralding artifacts, using the
+  setup's declared window and delays, and warns when the fitted delay
+  disagrees with the declared one (it never moves the window).
+- `simulate_pairs` and closed forms `arrhenius_dark_rate`,
+  `accidentals_expected` and `heralding_ratio_expected`.
+- Coverage gate: `python -m dadl.calibration.coverage {dark,pairs,dcr,all}`;
+  the CI job now runs all six calibrations.
+
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
 

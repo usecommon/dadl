@@ -8,7 +8,7 @@ import pytest
 
 from dadl.coincidences import grid_coincidences
 from dadl.deadtime import apply_nonparalyzable, apply_paralyzable
-from dadl.histogram import interarrival
+from dadl.histogram import cross_correlation, interarrival
 
 VECTORS = Path(__file__).resolve().parents[2] / "tests" / "vectors" / "core.json"
 CASES = json.loads(VECTORS.read_text(encoding="utf-8"))["cases"] if VECTORS.exists() else []
@@ -32,6 +32,8 @@ def run(case):
         return grid_coincidences(arr(case["a"]), arr(case["b"]), case["width"], case["delay_a"], case["delay_b"])
     if op == "interarrival":
         return interarrival(arr(case["times"]), case["bin_width"], case["n_bins"]).tolist()
+    if op == "cross_correlation":
+        return cross_correlation(arr(case["a"]), arr(case["b"]), case["bin_width"], case["range"]).tolist()
     raise AssertionError(f"unknown op {op}")
 
 

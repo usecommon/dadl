@@ -178,3 +178,19 @@ def test_calibrate_rejects_unknown_channel(tmp_path, capsys):
     main(["simulate", "chsh-spad", "--dark", "--duration-s", "1", "--out", str(tags)])
     assert main(["calibrate", "dark", "chsh-spad", "--tags", str(tags), "--channel", "C", "--out", str(tmp_path)]) == 1
     assert "unknown channel" in capsys.readouterr().err
+
+
+def test_calibrate_pairs_writes_three_artifacts(tmp_path, capsys):
+    from dadl.artifact import read_artifact
+
+    tags = tmp_path / "tags.npz"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    out_dir = tmp_path / "art"
+    argv = ["calibrate", "pairs", "chsh-spad", "--tags", str(tags), "--herald", "A+", "--signal", "B+", "--out", str(out_dir)]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "delay_ps" in out and "accidental_coincidences" in out and "heralding_efficiency" in out
+    kinds = sorted(read_artifact(p)[0]["kind"] for p in out_dir.glob("*.json"))
+    assert kinds == ["accidentals", "delay-jitter", "heralding-efficiency"]
+    assert main(argv[:7] + ["--signal", "A+", "--out", str(out_dir)]) == 1
+    assert "different channels" in capsys.readouterr().err

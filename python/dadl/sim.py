@@ -47,6 +47,7 @@ __all__ = [
     "simulate_chsh",
     "simulate_chsh_setting",
     "simulate_dark",
+    "simulate_pairs",
 ]
 
 
@@ -158,6 +159,26 @@ def simulate_dark(det: DetectorParams, duration_s: float, rng: np.random.Generat
     if duration_s <= 0:
         raise ValueError("duration_s must be positive")
     return detect(np.empty(0), det, duration_s, rng)
+
+
+def simulate_pairs(
+    pair_rate_per_s: float,
+    det_a: DetectorParams,
+    det_b: DetectorParams,
+    duration_s: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Recorded tags of two detectors, each receiving one photon of every pair (a CW SPDC source).
+
+    Channel b's photon arrives at the same time as channel a's; the relative
+    delay of the recorded tags is det_b.delay_ps - det_a.delay_ps and the
+    width of the coincidence peak comes from both detectors' jitter.
+    """
+    _checks.finite(duration_s, "duration_s", minimum=0.0)
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    t = poisson_times(pair_rate_per_s, duration_s, rng)
+    return detect(t, det_a, duration_s, rng), detect(t, det_b, duration_s, rng)
 
 
 def simulate_chsh_setting(
