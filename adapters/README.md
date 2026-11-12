@@ -8,6 +8,7 @@ reported as a typed event.
 | --- | --- | --- |
 | PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available on `main` (phase 2) | `dadl.adapters.ptu` |
 | PicoQuant T3 mode | Planned | |
+| Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available on `main` (phase 2) | `dadl.adapters.simdevice` |
 | Swabian Instruments, qutools, IDQ | Seeking contributors | |
 
 ```python
@@ -22,6 +23,37 @@ reader.config()               # scalar header entries, kept as provenance
 The PTU reader is DADL's own (no vendor software). Its tests write PTU
 fixtures with `python/tests/ptu_writer.py` and, when the third-party
 `ptufile` package is installed, check that both readers give the same times.
+
+## Hardware twin
+
+With no instrument at hand, DADL can stand in for one:
+
+```bash
+dadl simulate chsh-spad --out run/ --format ptu --device hydraharp   # setting0.ptu ... setting3.ptu
+dadl analyze chsh-spad --tags run/                                    # read through the PTU adapter
+```
+
+The files are real T2 PTU files (header, device tick, timer rollovers), so
+simulated data enters through the same adapter as a recording, with known
+ground truth. They carry `CreatorSW_Name = DADL` and `DADL_Simulated = True`;
+DADL marks them simulated, and calibrations from them are recorded with
+`backend: sim`.
+
+`SimulatedTagger` emulates a live device: it streams batches and injects
+faults, each reported as an event. `check_accounting` checks the rule every
+adapter must meet: tags delivered plus tags reported lost equal tags generated.
+
+```python
+from dadl import load_setup
+from dadl.adapters import Faults, SimulatedTagger, check_accounting
+
+dev = SimulatedTagger(load_setup("setup.yaml"), faults=Faults(dropped_batches=(3,)))
+for batch in dev.stream(): ...            # TagSet per 0.1 s batch
+check_accounting(dev.read(), dev.events(), dev.truth())   # {input: 0, ...}
+```
+
+A twin reproduces only the behaviour we model. Instrument quirks still need
+one real recording.
 
 Other formats: export to the generic `.npz` / `.csv` tag file that
 `dadl analyze` reads (integer columns `setting`, `channel`, `timestamp_ps`).

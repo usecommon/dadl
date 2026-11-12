@@ -83,4 +83,23 @@ class Adapter(Protocol):
 
 from dadl.adapters.ptu import PtuFile, read_ptu  # noqa: E402
 
-__all__ = ["Adapter", "Capabilities", "DeviceInfo", "Event", "PtuFile", "read_ptu"]
+
+def __getattr__(name: str):  # SimulatedTagger loads the simulator, so import it on first use
+    if name in ("SimulatedTagger", "Faults", "check_accounting"):
+        from dadl.adapters import simdevice
+
+        return getattr(simdevice, name)
+    raise AttributeError(name)
+
+
+__all__ = [
+    "Adapter",
+    "Capabilities",
+    "DeviceInfo",
+    "Event",
+    "Faults",
+    "PtuFile",
+    "SimulatedTagger",
+    "check_accounting",
+    "read_ptu",
+]

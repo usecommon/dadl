@@ -285,6 +285,8 @@ class PtuFile:
             "record_type": f"0x{self.record_type:08X}",
             "resolution_ps": info.resolution_ps,
             "exact_ps": exact,
+            # Written by DADL's hardware twin (dadl.adapters.ptu_write), not by an instrument.
+            "simulated": self.header.get("DADL_Simulated") is True,
         }
         if not exact:
             metadata["note"] = "the tick is not a whole number of ps; tags were rounded to the nearest ps"

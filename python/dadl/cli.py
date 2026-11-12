@@ -18,7 +18,6 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
@@ -26,8 +25,8 @@ from dadl.closed_form import chsh_expected_grid, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
-from dadl.sim import simulate_chsh, simulate_dark, simulate_hom
-from dadl.tagfile import read_tags, write_tags
+from dadl.simsetup import simulate_setup, simulate_setup_dark
+from dadl.tagfile import read_tags, tags_are_simulated, write_ptu_dir, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -44,22 +43,7 @@ def _resolve(target: str) -> Path:
     return example_path(target) if target in EXAMPLES else Path(target)
 
 
-def _simulate(setup: Setup):
-    if setup.backend != "sim":
-        raise DadlError(f"{setup.name}: backend is {setup.backend!r}; only 'sim' setups can be simulated")
-    rng = np.random.default_rng(setup.seed)
-    if setup.analysis_type == "hom":
-        delays = {"dip": 0.0, "reference": setup.reference_delay_ps}
-        return {
-            key: simulate_hom(
-                setup.source, setup.detectors["A"], setup.detectors["B"], delays[key],
-                setup.duration_s_per_setting, rng,
-            )
-            for key in setup.setting_keys
-        }
-    return simulate_chsh(
-        setup.source, setup.detectors, setup.duration_s_per_setting, rng, settings=setup.settings_deg
-    )
+_simulate = simulate_setup
 
 
 def _print_result(result: LabelledValue, symbol: str = "S") -> None:
@@ -158,29 +142,21 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _simulate_dark(setup: Setup, duration_s: float):
-    """One dark acquisition per channel (source off), stored as setting 0 of a tag file."""
-    if setup.backend != "sim":
-        raise DadlError(f"{setup.name}: backend is {setup.backend!r}; only 'sim' setups can be simulated")
-    if not duration_s > 0:
-        raise DadlError("--duration-s must be positive")
-    streams = np.random.SeedSequence(setup.seed).spawn(len(setup.channels))
-    dark = {
-        name: simulate_dark(setup.detectors[name], duration_s, np.random.default_rng(stream))
-        for (_num, name), stream in zip(sorted(setup.channels.items()), streams)
-    }
-    empty = {name: np.empty(0, dtype=np.int64) for name in dark}
-    return {key: (dark if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}
-
-
 def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
+    if not args.duration_s > 0:
+        raise DadlError("--duration-s must be positive")
     if args.dark:
-        runs = _simulate_dark(setup, args.duration_s)
+        runs = simulate_setup_dark(setup, args.duration_s)
         what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
     else:
-        runs = _simulate(setup)
+        runs = simulate_setup(setup)
         what = "HOM tags (setting 0 dip, 1 reference)" if setup.analysis_type == "hom" else "CHSH tags"
+    if args.format == "ptu":
+        files = write_ptu_dir(args.out, runs, setup.channels, setup.setting_keys, device=args.device)
+        print(f"Wrote simulated {what} for {setup.name} as {len(files)} {args.device} PTU files in {args.out}")
+        print("  The files are marked as simulated (CreatorSW_Name DADL, DADL_Simulated) and read back as such.")
+        return 0
     out = write_tags(args.out, runs, setup.channels, setup.setting_keys)
     print(f"Wrote simulated {what} for {setup.name} to {out}")
     return 0
@@ -202,7 +178,7 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     unknown = [c for c in wanted if c not in number]
     if unknown:
         raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
-    backend = "sim" if setup.backend == "sim" else "hardware"
+    backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     for name in wanted:
         cal = calibrate_dark(tags[name], ChannelId(name, number[name]), backend=backend, seed=setup.seed)
@@ -234,7 +210,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     a, b = tags[args.herald], tags[args.signal]
     window = setup.window
     d_a, d_b = window.delays_ps.get(args.herald, 0), window.delays_ps.get(args.signal, 0)
-    backend = "sim" if setup.backend == "sim" else "hardware"
+    backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
     common = {"backend": backend, "seed": setup.seed}
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
     print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
@@ -311,14 +287,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim = sub.add_parser("simulate", help="write simulated tags from a setup in the tag-file format")
     sim.add_argument("setup", help="setup.yaml or a bundled example name")
-    sim.add_argument("--out", required=True, help="output file, .npz or .csv")
+    sim.add_argument("--out", required=True, help="output file (.npz or .csv), or a folder with --format ptu")
+    sim.add_argument(
+        "--format", choices=["tags", "ptu"], default="tags",
+        help="tags: one generic tag file (default); ptu: one PicoQuant T2 file per acquisition (hardware twin)",
+    )
+    from dadl.adapters.ptu_write import DEVICES
+
+    sim.add_argument("--device", choices=sorted(DEVICES), default="hydraharp", help="PTU device to mimic (default hydraharp)")
     sim.add_argument("--dark", action="store_true", help="simulate dark acquisitions (source off) for calibration")
     sim.add_argument("--duration-s", type=float, default=20.0, help="dark acquisition length per channel (default 20)")
     sim.set_defaults(func=cmd_simulate)
 
     an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
-    an.add_argument("--tags", required=True, help="tag file, .npz or .csv (columns setting, channel, timestamp_ps)")
+    an.add_argument("--tags", required=True, help="tag file (.npz or .csv: columns setting, channel, timestamp_ps) or a folder of PTU files setting0.ptu, ...")
     an.set_defaults(func=cmd_analyze)
 
     cal = sub.add_parser("calibrate", help="estimate detector parameters and write calibration artifacts")
@@ -330,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
         "from the gaps between dark counts. Writes one content-addressed artifact per channel.",
     )
     dark.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
-    dark.add_argument("--tags", required=True, help="tag file with the dark acquisition")
+    dark.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, with the dark acquisition")
     dark.add_argument("--setting", type=int, default=0, help="which setting index holds the dark data (default 0)")
     dark.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
     dark.add_argument("--out", required=True, help="directory for the artifacts")
@@ -345,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         "without polarisation analysers in the path. Writes three content-addressed artifacts.",
     )
     pairs.add_argument("setup", help="setup.yaml (channel map, window) or a bundled example name")
-    pairs.add_argument("--tags", required=True, help="tag file with the pair-source acquisition")
+    pairs.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, with the pair-source acquisition")
     pairs.add_argument("--setting", type=int, default=0, help="which setting index holds the data (default 0)")
     pairs.add_argument("--herald", required=True, help="herald channel name")
     pairs.add_argument("--signal", required=True, help="signal channel name")

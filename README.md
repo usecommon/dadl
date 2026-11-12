@@ -40,6 +40,10 @@ experiment, its guardrails and its roadmap.
   read by DADL's own adapter (phase 2, on `main`).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
+- **Hardware twin** (phase 2, on `main`): `dadl simulate SETUP --out DIR
+  --format ptu` writes the simulation as PicoQuant PTU files (marked
+  simulated), and `SimulatedTagger` emulates a live tagger with buffer
+  overflows, dropped batches and config changes. See `adapters/README.md`.
 - **Optional compiled core** (phase 2, on `main`): with `dadl-quantum-core`
   installed, dead time, coincidences and histograms run in Rust (about 50x
   faster); `dadl.backend()` says which is in use.
