@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -297,8 +299,21 @@ def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) 
         for n, r in units
         for lo in range(0, replicates, CHUNK)
     ]
-    with ProcessPoolExecutor(jobs) as ex:
-        parts = list(ex.map(_unit, tasks))
+    # Fresh ("spawn") workers with one BLAS thread each: forked workers inherit the parent's
+    # OpenBLAS thread pool on Linux, and several pools spinning on few cores slowed the CI gate
+    # from minutes to over an hour.
+    single = {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")}
+    saved = {k: os.environ.get(k) for k in single}
+    os.environ.update(single)
+    try:
+        with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as ex:
+            parts = list(ex.map(_unit, tasks))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     out: list[CoverageResult] = []
     for n, r in units:
         mine = [res for t, part in zip(tasks, parts) if (t[0], t[1]) == (n, r) for res in part]
