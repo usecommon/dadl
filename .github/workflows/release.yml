@@ -1,19 +1,20 @@
 name: Release
 
-# Publishes the Python package to PyPI with Trusted Publishing (OIDC): no PyPI
-# token is stored anywhere. Triggered by pushing a tag like v0.0.3 that points
-# at a commit on main.
+# Publishes the Python package to PyPI and the Rust crate to crates.io with
+# Trusted Publishing (OIDC): no registry token is stored anywhere. Triggered by
+# pushing a tag like v0.0.4 that points at a commit on main.
 #
-# The build job has no OIDC permission; only the publish job can mint a PyPI
-# token, and it runs nothing but the pinned publish action. Protect the
-# `pypi` environment with a required reviewer (see docs/reviews/2026-11-council.md).
+# The build job has no OIDC permission; only the two publish jobs can mint a
+# registry token. Both run in environments (`pypi`, `crates`) that should have
+# a required reviewer (see docs/reviews/2026-11-council.md).
 #
 # One-time setup on pypi.org (Account settings -> Publishing): project
 # "dadl-quantum", owner "usecommon", repository "dadl", workflow
 # "release.yml", environment "pypi".
 #
-# The Rust crate is still published by hand (`cargo publish -p dadl`); the
-# tag check below at least pins its version to the tag.
+# One-time setup on crates.io (crate "dadl" -> Settings -> Trusted Publishing):
+# owner "usecommon", repository "dadl", workflow "release.yml", environment
+# "crates".
 
 on:
   push:
@@ -90,3 +91,24 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           packages-dir: dist/
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: check
+    runs-on: ubuntu-latest
+    environment: crates
+    permissions:
+      id-token: write
+    steps:
+      # actions/checkout v4.2.2, pinned by commit SHA
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      # rust-lang/crates-io-auth-action v1.0.6, pinned by commit SHA
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9
+        id: auth
+      # The toolchain comes from rust-toolchain.toml.
+      - name: Publish
+        run: cargo publish -p dadl --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
