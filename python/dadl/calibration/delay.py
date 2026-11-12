@@ -14,6 +14,14 @@ nanoseconds away does not enter. Intervals and draws come from a Laplace
 posterior in (log beta, log A, d, log sigma); the background and peak area
 are nuisance parameters and are not stored.
 
+Tagger tick: delays come in whole ticks (1 ps for a HydraHarp, 5 ps for a
+MultiHarp, 25 ps for a TimeHarp 260 P). The tick is found from the data (the
+greatest common divisor of the tags), the bin width is rounded up to a whole
+number of ticks, and each bin [e, e + w) is modelled as the continuous delays
+from e - tick/2 to e + w - tick/2. The tick's quantization noise (variance
+tick^2 / 6 for two channels) is part of the fitted jitter, as it is part of
+the timing response.
+
 The predictive check is a Pearson chi-square on the fit window, with
 adjacent bins merged until each expects at least 5 counts.
 
@@ -40,7 +48,7 @@ from dadl.stats import Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "2"
+METHOD_VERSION = "3"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -52,12 +60,25 @@ UNITS = {"delay_ps": "ps", "jitter_sigma_ps": "ps"}
 _SQRT2PI = math.sqrt(2 * math.pi)
 
 
-def _edges(n_bins: int, bin_width_ps: int, range_ps: int) -> np.ndarray:
-    """Model bin edges. Delays are whole ps, so the bin [e, e + w) holds the integers e .. e + w - 1,
-    which a continuous delay fills from e - 1/2 to e + w - 1/2 (ignoring this biased v1 by +0.5 ps)."""
+def _edges(n_bins: int, bin_width_ps: int, range_ps: int, tick_ps: int = 1) -> np.ndarray:
+    """Model bin edges. Delays are whole ticks, so the bin [e, e + w) holds the delays e, e + tick, ...,
+    which a continuous delay fills from e - tick/2 to e + w - tick/2. (Ignoring this biased v1 by
+    +0.5 ps, and v2 by +2 ps on 5 ps MultiHarp ticks.)"""
     e = -range_ps + bin_width_ps * np.arange(n_bins + 1, dtype=float)
     e[-1] = min(e[-1], float(range_ps))
-    return e - 0.5
+    return e - tick_ps / 2
+
+
+def tag_tick(*streams: np.ndarray) -> int:
+    """The tagger tick in ps: the greatest common divisor of the tags' offsets from the first tag."""
+    nonempty = [s for s in streams if s.size]
+    if not nonempty:
+        return 1
+    origin = int(nonempty[0][0])
+    g = 0
+    for s in nonempty:
+        g = int(np.gcd.reduce(np.abs(s - origin), initial=g))
+    return max(g, 1)
 
 
 class _PeakModel:
@@ -139,8 +160,18 @@ def calibrate_delay(
         raise ValueError("channels must be (channel a, channel b)")
     a = _checks.timestamps(a, "a")
     b = _checks.timestamps(b, "b")
+    bin_width_ps = _checks.integer(bin_width_ps, "bin_width_ps", minimum=1)
+    range_ps = _checks.integer(range_ps, "range_ps", minimum=1)
+    tick = tag_tick(a, b)
+    notes: list[str] = []
+    if bin_width_ps % tick:
+        new = -(-bin_width_ps // tick) * tick
+        notes.append(f"bin width raised from {bin_width_ps} to {new} ps, a whole number of {tick} ps tagger ticks")
+        bin_width_ps = new
+    if range_ps % tick:
+        range_ps = -(-range_ps // tick) * tick
     hist = cross_correlation(a, b, bin_width_ps, range_ps)
-    edges = _edges(hist.size, bin_width_ps, range_ps)
+    edges = _edges(hist.size, bin_width_ps, range_ps, tick)
     counts = hist.astype(float)
     background = float(np.median(counts))
     excess = counts - background
@@ -167,7 +198,6 @@ def calibrate_delay(
 
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         res = optimize.minimize(model.nll, x0, jac=model.grad, method="BFGS", options={"gtol": 1e-6, "maxiter": 2000})
-    notes: list[str] = []
     theta = res.x
     hess = numerical_hessian(model.grad, theta)
     laplace = Laplace.from_hessian(theta, hess)
@@ -203,7 +233,7 @@ def calibrate_delay(
         ppc_pvalue=_grouped_pearson(model.n, model.mu(theta), 4),
         inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
         backend=backend,
-        conditions=conditions or {},
+        conditions={"tick_ps": float(tick), **(conditions or {})},
         notes=tuple(notes),
     )
 
