@@ -259,3 +259,14 @@ def test_dcr_calibration_coverage():
     result = dcr_coverage(1000)
     print(result)
     assert result.passed(), str(result)
+
+
+def test_delay_is_unbiased_for_narrow_peaks():
+    # Tags are whole ps: method v1 read bin [e, e + w) as continuous and was biased by +0.5 ps,
+    # visible when the jitter is a few bin widths (here sigma = 35 ps, bins of 20 ps).
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100, dead_time_ps=30_000, jitter_sigma_ps=25)
+    est = []
+    for seed in range(10):
+        a, b = simulate_pairs(1e5, det, det, 1.0, np.random.default_rng(seed))
+        est.append(calibrate_delay(a, b, CHS, n_draws=10).estimates["delay_ps"].value)
+    assert abs(np.mean(est)) < 0.2

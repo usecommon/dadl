@@ -63,6 +63,31 @@ from the packages.
   and 94.0%. The accidentals gate first read 91.7% because mirrored off-peak
   windows are correlated; the windows no longer mirror each other (94.0%).
 
+### Phase 2, milestone 3: PTU adapter and the hom-snspd example
+
+- `dadl.adapters`: the `Adapter` protocol (Python subset of the Rust trait),
+  `DeviceInfo`, `Capabilities` and typed `Event`s; `adapters/TEMPLATE.md`
+  for contributors.
+- `dadl.adapters.ptu` (`PtuFile`, `read_ptu`): DADL's own reader for
+  PicoQuant PTU files in T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp
+  260 N/P, MultiHarp). Exact integer ps conversion when the tick is whole
+  ps; rollovers handled (including multi-rollover records); markers,
+  rollovers and unknown records reported as events; every record accounted
+  for; truncated files, trailing data, out-of-order records and T3 files are
+  refused. Tests write fixtures with `python/tests/ptu_writer.py` and, when
+  `ptufile` is installed, check that both readers give the same times.
+- `analysis.type: hom` in `setup.yaml` (channels A and B; acquisitions "dip"
+  and "reference" at `analysis.reference_delay_ps`; `source.coherence_time_ps`),
+  `simulate_hom`, `dadl.analysis.hom.hom_from_tags` and the `hom-snspd`
+  example: `dadl quickstart hom-snspd`, `dadl simulate` and `dadl analyze`
+  work for HOM setups. The MVP tagger is now PicoQuant PTU instead of Swabian.
+- Tag files take named settings (`read_tags(..., settings=...)`): HOM uses
+  0 = dip, 1 = reference.
+- Fix: the delay/jitter fit (method `xcorr-gaussian-mle` v2) treats each
+  histogram bin as the whole-ps delays it holds. Version 1 was biased by
+  +0.5 ps, visible only when the jitter is a few bin widths.
+- `AdapterError` for malformed or unsupported vendor data.
+
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
 

@@ -15,3 +15,7 @@ class InsufficientCounts(DadlError):
 
 class ConfigError(DadlError):
     """A setup or policy file is missing, malformed or of an unsupported version."""
+
+
+class AdapterError(DadlError):
+    """A vendor file or device stream is malformed, truncated or of an unsupported format."""

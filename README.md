@@ -34,11 +34,14 @@ experiment, its guardrails and its roadmap.
 - Raw CHSH S from fixed-grid coincidences with a planned window, from
   simulated tags or **your own tags** (`dadl analyze`).
 - Bell fringe and HOM dip visibility, with accidental subtraction only where
-  the guardrail policy allows it.
+  the guardrail policy allows it. `dadl quickstart hom-snspd` simulates a HOM
+  dip on two SNSPDs and analyses it from the tags.
+- **PicoQuant PTU files** (T2: PicoHarp, HydraHarp, TimeHarp 260, MultiHarp)
+  read by DADL's own adapter (phase 2, on `main`).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 
-Not yet: a vendor tagger adapter, calibration uncertainty in results, corrected CHSH, signing,
+Not yet: calibration uncertainty in results, corrected CHSH, signing,
 the explain engine, MCP. Uncertainties today are statistical
 only (Gaussian, 1σ).
 
@@ -116,7 +119,9 @@ print(dadl.bell_visibility(1450, 550))            # raw fringe visibility
 print(dadl.hom_visibility(1000, 120, accidentals=40))  # dip visibility, corrected value labelled
 ```
 
-Vendor formats (PTU, Swabian, Photon-HDF5) come as adapters in phase 2.
+PicoQuant `.ptu` files (T2 mode) read directly: `dadl.adapters.read_ptu("run.ptu")` returns int64 ps
+per channel, with rollovers and markers reported as events (see `adapters/README.md`).
+Other formats: export to the generic tag file.
 
 ## Developing DADL
 

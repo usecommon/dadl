@@ -347,7 +347,7 @@ Artifacts are immutable, content-addressed and signed. Each holds the method, in
 
 ### Ingest adapters
 
-Swabian (binary dumps, live API, virtual tagger replay), PicoQuant PTU (via ptufile), qutools, IDQ, ETA-readable files, and SNSPD controller telemetry through QCoDeS drivers. All normalize to an internal event stream plus the Photon-HDF5 archive. Heavy lifting at 10⁷–10⁸ tags/s stays in vendor engines or the Rust core.
+Swabian (binary dumps, live API, virtual tagger replay), PicoQuant PTU (DADL's own T2 reader, cross-checked against ptufile), qutools, IDQ, ETA-readable files, and SNSPD controller telemetry through QCoDeS drivers. All normalize to an internal event stream plus the Photon-HDF5 archive. Heavy lifting at 10⁷–10⁸ tags/s stays in vendor engines or the Rust core.
 
 ## Detailed architecture
 
@@ -604,7 +604,7 @@ The team is small, so the MVP is cut to what it can sustain: the `chsh-spad` and
 
 | Area | In MVP | v0.2+ / seeking contributors |
 | --- | --- | --- |
-| Time taggers | One (Swabian), plus the generic `.npz`/`.csv` tag format and an adapter template | PicoQuant, qutools, IDQ ID1000 |
+| Time taggers | One (PicoQuant PTU, T2 mode), plus the generic `.npz`/`.csv` tag format and an adapter template | Swabian, qutools, IDQ ID1000; PTU T3 mode |
 | Detectors | Si SPAD modules; one SNSPD system | CMOS SPAD arrays, SiPMs (crosstalk maps) |
 | Calibrations | DCR(T), dead time, afterpulse, delay/jitter, heralding efficiency, off-peak accidentals | Full Klyshko protocol, crosstalk matrix, rate-dependent η |
 | Analyses | CHSH, HOM visibility | Tomography, CH/Eberhard with test martingales, g(2) |
@@ -616,7 +616,7 @@ Proposed sequence. Each phase gates the next, and each gate is a named CI job wi
 | Phase | Delivers | Gate (CI job) | Status |
 | --- | --- | --- | --- |
 | 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): afterpulse closed-form test and crosstalk simulation outstanding |
-| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated and replayed Swabian data; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration; each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 0.1% per calibration, on a seed fixed in advance (Bonferroni across its parameters: 92.6–97.1% for one parameter, 92.3–97.3% for four) | In progress: data types, intervals, artifacts, setup schema; dark/afterpulse/dead-time, delay/jitter, off-peak accidentals, heralding efficiency and DCR(T) calibrations done |
+| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated data and PTU files; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration; each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 0.1% per calibration, on a seed fixed in advance (Bonferroni across its parameters: 92.6–97.1% for one parameter, 92.3–97.3% for four) | In progress: data types, intervals, artifacts, setup schema; dark/afterpulse/dead-time, delay/jitter, off-peak accidentals, heralding efficiency and DCR(T) calibrations; PTU T2 adapter, adapter template and the hom-snspd example done; PyO3 bindings outstanding |
 | 3. Inference and plans | Forward model, joint Monte Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n) coincidences | `guardrails`: every regression case refuses, including window shopping under a signed plan | Not started |
 | 4. Explain (v0.2+) | Attribution with family-wise-adjusted 95% intervals and a misfit interval | `explain`: N named scenarios, correct top attribution in ≥ 90% | Seeking contributors |
 | 5. Hardware pilot | One SPDC lab, one network testbed | Hardware A/B results published, including disagreements | Conditional on a design partner |

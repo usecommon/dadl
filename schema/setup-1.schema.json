@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/usecommon/dadl/main/schema/setup-1.schema.json",
   "title": "DADL setup file, schema_version 1",
-  "description": "The structure of setup.yaml. dadl.config.load_setup enforces this and more (values must be finite, the channel map must cover A+, A-, B+, B- exactly once). Units are in key names: _ps picoseconds, _cps counts per second, _s seconds, _deg degrees.",
+  "description": "The structure of setup.yaml. dadl.config.load_setup enforces this and more (values must be finite; the channel map must cover each channel exactly once: A+, A-, B+, B- for chsh, A and B for hom; chsh takes settings_deg, hom takes reference_delay_ps). Units are in key names: _ps picoseconds, _cps counts per second, _s seconds, _deg degrees.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "name", "source", "detectors", "analysis"],
@@ -18,7 +18,8 @@
       "properties": {
         "type": {"type": "string"},
         "pair_rate_per_s": {"type": "number", "minimum": 0},
-        "visibility": {"type": "number", "minimum": 0, "maximum": 1}
+        "visibility": {"type": "number", "minimum": 0, "maximum": 1},
+        "coherence_time_ps": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "detectors": {
@@ -30,14 +31,15 @@
       "description": "Tag-file channel numbers mapped to channel names.",
       "type": "object",
       "propertyNames": {"pattern": "^[0-9]+$"},
-      "additionalProperties": {"enum": ["A+", "A-", "B+", "B-"]}
+      "additionalProperties": {"enum": ["A+", "A-", "B+", "B-", "A", "B"]}
     },
     "analysis": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "window"],
       "properties": {
-        "type": {"const": "chsh"},
+        "type": {"enum": ["chsh", "hom"]},
+        "reference_delay_ps": {"type": "number"},
         "settings_deg": {
           "type": "object",
           "required": ["a", "a'", "b", "b'"],

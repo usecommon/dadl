@@ -46,7 +46,8 @@ def test_setup_schema_accepts_the_examples():
     yaml = pytest.importorskip("yaml")
     schema = load(SETUP_SCHEMA)
     jsonschema.Draft202012Validator.check_schema(schema)
-    for path in (ROOT / "examples" / "chsh-spad" / "setup.yaml", ROOT / "python" / "dadl" / "examples" / "chsh-spad" / "setup.yaml"):
+    paths = [ROOT / d / name / "setup.yaml" for d in ("examples", "python/dadl/examples") for name in ("chsh-spad", "hom-snspd")]
+    for path in paths:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         data["channels"] = {str(k): v for k, v in data["channels"].items()}  # YAML int keys -> JSON strings
         jsonschema.validate(data, schema)
