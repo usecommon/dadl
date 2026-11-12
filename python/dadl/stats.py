@@ -125,7 +125,7 @@ class Laplace:
 def coverage_band(n_replicates: int, level: float = LEVEL, confidence: float = 0.99) -> tuple[float, float]:
     """Range of observed coverage consistent with true coverage `level` (binomial, two-sided `confidence`).
 
-    For 1,000 replicates at 95% and 99% confidence this is 93.1% to 96.7%;
+    For 1,000 replicates at 95% and 99.9% confidence this is 92.6% to 97.1%;
     `dadl.calibration.coverage.gate` splits the confidence across parameters.
     """
     a = 1 - confidence
