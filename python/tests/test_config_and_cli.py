@@ -88,7 +88,7 @@ def test_quickstart_runs(capsys):
     assert main(["quickstart"]) == 0
     out = capsys.readouterr().out
     assert "Raw S =" in out
-    assert "fair sampling assumed" in out
+    assert "fair sampling and fair coincidence assumed" in out and "loophole" in out and "Coincidences per singles" in out
     assert "usecommon.github.io/dadl" in out
 
 

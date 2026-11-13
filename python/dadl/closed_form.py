@@ -116,22 +116,39 @@ def arrhenius_dark_rate(dcr_ref_cps: float, activation_energy_ev: float, tempera
     return dcr_ref_cps * math.exp(-activation_energy_ev / K_B_EV * (1.0 / temperature_k - 1.0 / reference_k))
 
 
-def _recorded(rate_in: float, dead_time_s: float) -> tuple[float, float]:
-    """Recorded rate and dead fraction of a non-paralyzable detector fed a Poisson rate."""
+def _recorded(
+    rate_in: float, dead_time_s: float, afterpulse_prob: float = 0.0, afterpulse_tau_s: float = 0.0
+) -> tuple[float, float]:
+    """Recorded rate and dead fraction of a non-paralyzable detector fed a Poisson rate.
+
+    With afterpulsing the recorded rate follows `dark_afterpulse_rate` (the input need only be
+    Poisson), and the dead fraction is recorded rate x dead time: a photon arriving at a random
+    time finds the detector dead with that probability.
+    """
+    if afterpulse_prob > 0:
+        rate = dark_afterpulse_rate(rate_in, afterpulse_prob, afterpulse_tau_s, dead_time_s)
+        return rate, rate * dead_time_s
     x = rate_in * dead_time_s
     return rate_in / (1.0 + x), x / (1.0 + x)
 
 
 def accidentals_expected(
-    rate_a_in: float, rate_b_in: float, dead_time_a_s: float, dead_time_b_s: float, width_ps: float, duration_s: float
+    rate_a_in: float,
+    rate_b_in: float,
+    dead_time_a_s: float,
+    dead_time_b_s: float,
+    width_ps: float,
+    duration_s: float,
+    afterpulse_a: tuple[float, float] = (0.0, 0.0),
+    afterpulse_b: tuple[float, float] = (0.0, 0.0),
 ) -> float:
     """Expected fixed-grid accidental coincidences: R1 R2 width duration with the recorded rates.
 
     Exact for stationary streams with at most one tag per slot per channel
     (width below the dead time), counted far from the pair peak.
     """
-    ra, _ = _recorded(rate_a_in, dead_time_a_s)
-    rb, _ = _recorded(rate_b_in, dead_time_b_s)
+    ra, _ = _recorded(rate_a_in, dead_time_a_s, *afterpulse_a)
+    rb, _ = _recorded(rate_b_in, dead_time_b_s, *afterpulse_b)
     return ra * rb * width_ps * 1e-12 * duration_s
 
 
@@ -145,15 +162,19 @@ def heralding_ratio_expected(
     dead_time_b_s: float,
     jitter_combined_ps: float,
     width_ps: float,
+    afterpulse_a: tuple[float, float] = (0.0, 0.0),
+    afterpulse_b: tuple[float, float] = (0.0, 0.0),
 ) -> float:
-    """Expected (C - A) / S for herald a and signal b, a CW pair source and exact declared delays.
+    """True heralded detection probability per herald slot: the measurand of `calibrate_heralding`.
+
+    For herald a and signal b, a CW pair source and exact declared delays.
 
     Pair photons are recorded with probability eta (1 - dead fraction) on each
     arm; both land in one slot with grid_capture_probability. Correlations of
     the two arms' dead states enter at order (pair rate x dead time)^2.
     """
-    ra, fa = _recorded(efficiency_a * pair_rate_per_s + dark_a_cps, dead_time_a_s)
-    _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s)
+    ra, fa = _recorded(efficiency_a * pair_rate_per_s + dark_a_cps, dead_time_a_s, *afterpulse_a)
+    _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s, *afterpulse_b)
     capture = grid_capture_probability(jitter_combined_ps / math.sqrt(2.0), width_ps)
     return pair_rate_per_s * efficiency_a * (1 - fa) * efficiency_b * (1 - fb) * capture / ra
 

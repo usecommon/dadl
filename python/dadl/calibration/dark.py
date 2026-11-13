@@ -127,6 +127,25 @@ def _fit(s: np.ndarray, r0: float) -> optimize.OptimizeResult | None:
     return best
 
 
+def _stationarity_pvalue(tags: np.ndarray, r_per_ps: float, n_gaps: int, longest_gap: float) -> float:
+    """Two checks of one uninterrupted, stationary acquisition, combined (smaller p doubled):
+
+    - drift: the count in the first half of the span against the second (binomial, two-sided);
+    - an interruption: the longest gap against the largest of n exponential gaps at rate r
+      (a latch or overload shutdown leaves one gap far longer than the rest).
+
+    The detector physicist's review found a +-20% drift flagged in 20% of runs and a 6 s latch
+    written as a normal calibration.
+    """
+    mid = 0.5 * (float(tags[0]) + float(tags[-1]))
+    first = int(np.searchsorted(tags, mid))
+    n = int(tags.size)
+    p_drift = float(min(1.0, 2 * min(_st.binom.cdf(first, n, 0.5), _st.binom.sf(first - 1, n, 0.5))))
+    # P(max of n_gaps exponential gaps >= longest) = 1 - (1 - exp(-r g))^n
+    p_gap = float(-np.expm1(n_gaps * np.log1p(-math.exp(-r_per_ps * longest_gap)))) if longest_gap > 0 else 1.0
+    return min(1.0, 2.0 * min(p_drift, p_gap))
+
+
 def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
     """Chi-square test of the probability-integral transform on PPC_BINS equal bins.
 
@@ -475,10 +494,12 @@ def calibrate_dark(
         samples=np.column_stack(columns),
         sample_params=tuple(names),
         converged=converged,
-        ppc_pvalue=_ppc_pvalue(s, theta),
+        ppc_pvalue=min(1.0, 2.0 * min(
+            _ppc_pvalue(s, theta), _stationarity_pvalue(tags, float(np.exp(theta[0])), n, float(s.max()))
+        )),
         inputs=((tags_sha256(tags), "raw-tags"),),
         backend=backend,
-        conditions=conditions or {},
+        conditions={"gaps": float(n), **(conditions or {})},
         unidentified=unidentified,
         notes=tuple(notes),
     )

@@ -214,3 +214,19 @@ def test_profile_path_draws_agree_with_the_intervals():
         lo, hi = np.quantile(cal.samples[:, cal.sample_params.index(name)], [0.025, 0.975])
         width = iv.high - iv.low
         assert abs(lo - iv.low) < 0.25 * width and abs(hi - iv.high) < 0.25 * width, (name, lo, hi, iv)
+
+
+def test_a_latch_or_drift_marks_the_calibration_a_misfit():
+    # Detector physicist review: a 6 s latch in 60 s was written as a normal calibration, and a
+    # +-20% drift was flagged in only 20% of runs.
+    det = DetectorParams(dark_rate_cps=100.0, dead_time_ps=30_000, afterpulse_prob=0.0)
+    tags = dark(det, 60.0, seed=5)
+    cut = tags[0] + 20 * 10**12
+    latched = np.concatenate([tags[tags < cut], tags[tags >= cut + 6 * 10**12]])
+    assert calibrate_dark(latched, CH, seed=1, n_draws=10).status == "misfit"
+    rng = np.random.default_rng(7)
+    t = np.sort(rng.uniform(0, 60e12, 6000))
+    keep = rng.random(t.size) < 0.6 + 0.4 * (t / 60e12)  # rate rises by a factor 1.67 over the run
+    drifting = (t[keep] + 30_000 * np.arange(keep.sum())).astype(np.int64)
+    assert calibrate_dark(drifting, CH, seed=1, n_draws=10).status == "misfit"
+    assert calibrate_dark(tags, CH, seed=1, n_draws=10).status == "ok"

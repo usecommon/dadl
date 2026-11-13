@@ -139,6 +139,19 @@ def calibrate_heralding(
         "heralded detection probability as detected: detector x coupling x window capture x live fraction, "
         "at this calibration's rates, window and delays; not the detector-only efficiency",
     ]
+    if dead_time_ps is not None and width_ps > 0.2 * float(dead_time_ps):
+        notes.append(
+            f"the {width_ps} ps window is a large fraction of the {dead_time_ps:g} ps dead time: misses caused by dead "
+            "time then correlate with accidentals in the same slot, and the estimate reads high"
+        )
+    if dead_time_ps is not None and signal.size > 1:
+        span = (int(signal[-1]) - int(signal[0])) or 1
+        dead_fraction = signal.size * float(dead_time_ps) / span
+        if dead_fraction > 0.05:
+            notes.append(
+                f"the signal channel is dead {dead_fraction:.0%} of the time: misses caused by dead time then "
+                "correlate with accidentals in the same slot, and the estimate reads high"
+            )
     if p_hat > 0.01:
         notes.append(f"accidentals are {p_hat:.1%} per herald slot; the per-slot estimator accounts for them")
     if shared:

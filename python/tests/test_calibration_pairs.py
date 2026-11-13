@@ -301,13 +301,14 @@ def test_sparse_sharp_peak_still_gets_a_predictive_check_and_an_artifact(tmp_pat
 def test_every_regime_has_a_closed_form_truth_and_runs():
     from dadl.calibration.coverage import PAIR_REGIMES, UNITS, run
 
-    assert set(UNITS["pairs"]) == set(PAIR_REGIMES)
+    assert set(UNITS["pairs"]) == set(PAIR_REGIMES) | {"ideal-accidentals"}
     for regime in PAIR_REGIMES:
         t = pairs_truth(regime)
         assert 0 < t["heralding-efficiency"]["heralding_efficiency"] < 1
         assert t["accidentals"]["accidental_coincidences"] > 0
     results = run("all", replicates=3, jobs=1)
-    assert len(results) == 2 + 3 * len(PAIR_REGIMES) + 1
+    per_regime = sum(3 - len(r.skip) for r in PAIR_REGIMES.values())
+    assert len(results) == 2 + per_regime + 1 + 1  # dark, pairs, ideal heralding, DCR
     (sparse,) = [r for r in results if r.calibration == "accidentals [sparse-snspd]"]
     assert sparse.at_least and "at least" in str(sparse)
 

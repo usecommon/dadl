@@ -26,6 +26,14 @@ from dadl.coincidences import grid_coincidences
 from dadl.guardrails import Policy
 from dadl.result import LabelledValue
 
+#: The visibility comes from two acquisitions, not a fitted scan: an off-centre dip (0.3 ps gave
+#: 0.882 for 0.919) or a pump drift between them (+-5% gave +-3 sigma) moves it, unlabelled
+#: before (expert review).
+TWO_POINT = (
+    "two-point visibility at the declared delays: a lower bound if the dip is off-centre; "
+    "not normalised for rate drift between the acquisitions"
+)
+
 #: Channel names of a HOM setup: the two beamsplitter outputs.
 HOM_CHANNELS: tuple[str, ...] = ("A", "B")
 #: Acquisitions of a HOM setup, in tag-file setting order.
@@ -62,10 +70,18 @@ def hom_from_tags(
     side = shifted_coincidences(np.sort(runs["dip"]["A"]), np.sort(runs["dip"]["B"]), window.width_ps, da, db, offsets)
     acc = float(side.sum()) / side.size
     acc_err = math.sqrt(float(side.sum())) / side.size
-    counts = {"c_min": float(c_min), "c_max": float(c_max), "accidentals": acc, "accidentals_stderr": acc_err}
+    counts = {
+        "c_min": float(c_min),
+        "c_max": float(c_max),
+        "accidentals": acc,
+        "accidentals_stderr": acc_err,
+        "singles_dip": float(runs["dip"]["A"].size + runs["dip"]["B"].size),
+        "singles_reference": float(runs["reference"]["A"].size + runs["reference"]["B"].size),
+    }
     counts["subtracted"] = float(subtract_accidentals and acc <= c_min)
     if subtract_accidentals and acc <= c_min:
         result = hom_visibility(c_max, c_min, accidentals=acc, accidentals_stderr=acc_err, policy=policy)
     else:
         result = hom_visibility(c_max, c_min, policy=policy)
-    return dataclasses.replace(result, window=window.as_record()), counts
+    labels = result.labels + (TWO_POINT,)
+    return dataclasses.replace(result, window=window.as_record(), labels=labels, counts=counts), counts

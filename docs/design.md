@@ -188,7 +188,7 @@ Each channel has one generative model, stored as posterior samples with provenan
 | --- | --- | --- | --- |
 | Efficiency η | In-situ heralded system efficiency (detector × coupling, "as detected" per NIST IR 8486r1); optional Klyshko anchor; detector-only η needs an external reference | SPDC heralding ratio, Beta posterior | Change-point on heralding; connector event |
 | Dark count rate | DCR = f(T, V\_ex), Arrhenius generation plus field-dependent tunnelling (SPAD); bias/I\_sw curve plus stray light (SNSPD) | Shuttered or gated dark windows, fitted jointly with afterpulsing | Residual vs. fitted model, not a fixed threshold |
-| Dead time | Series model: a paralyzable stage τ\_p then a non-paralyzable stage τ\_np, m = m₁/(1 + m₁(τ\_np − τ\_p)) with m₁ = n·e^(−nτ\_p) for τ\_np > τ\_p; fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
+| Dead time | (Phase 2 implements a hard-edge non-paralyzable effective channel dead time only; the series model below is phase 3.) Series model: a paralyzable stage τ\_p then a non-paralyzable stage τ\_np, m = m₁/(1 + m₁(τ\_np − τ\_p)) with m₁ = n·e^(−nτ\_p) for τ\_np > τ\_p; fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
 | TDC dead time | Separate term from detector dead time | Tagger config + histogram | Firmware/config change |
 | Afterpulse kernel | Excess over exponential Poisson tail; "well-defined initial condition" method | Autocorrelation / inter-arrival histogram; double-window for gated InGaAs | Temperature or bias change |
 | Crosstalk matrix | Branching (geometric/Borel) or nearest-neighbour; Si SPAD breakdown-flash peaks at a fitted nonzero delay | Dark-only zero-delay correlations between pixels | Overvoltage change |
@@ -334,7 +334,7 @@ Photon-HDF5 is the interchange container. DADL writes its calibration data under
 
 ### Calibration artifacts
 
-Artifacts are immutable, content-addressed and signed. Each holds the method, input data hashes, posterior samples, software versions and the artifact it supersedes. Results reference artifact IDs, never copied parameter values, so any number can be traced back and recomputed.
+Artifacts are immutable and content-addressed; signing is planned (see "Signing" below). Each holds the method, input data hashes, posterior samples, software versions and the artifact it supersedes. Results reference artifact IDs, never copied parameter values, so any number can be traced back and recomputed.
 
 ### Minimum metadata for reproducibility
 
@@ -435,7 +435,7 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 - Calibration fits store a fixed number of posterior samples per artifact (target 2,000). Phase 2 uses maximum likelihood with SciPy: exact conjugate posteriors where they exist (Beta for heralding ratios, Gamma for Poisson rates) and Laplace posteriors in log or logit coordinates otherwise. MCMC (NUTS) arrives with the joint model in phase 3; the probabilistic-programming library (NumPyro, PyMC or Stan) is chosen then, after an install benchmark on Windows.
 - Between calibrations, drift is tracked by a state-space filter with explicit process noise per parameter, in logit or log coordinates, so uncertainty grows with time since the last calibration instead of shrinking.
 - Every filter state used in a correction is snapshotted as an artifact. Data is never corrected with parameters updated from that same data.
-- An artifact is accepted only after posterior predictive checks pass on held-out bins; otherwise the previous artifact stays current. A prior-sensitivity check in CI flags any parameter whose posterior is mostly prior.
+- An artifact is accepted only after posterior predictive checks pass on held-out bins; otherwise the previous artifact stays current. (Phase 2: the check runs on the fitted bins, a failure (p < 0.001) sets `checks.status: misfit`, and the CLI refuses to write a misfit unless `--accept-misfit` is given.) A prior-sensitivity check in CI flags any parameter whose posterior is mostly prior.
 
 ### Calibration artifact format
 

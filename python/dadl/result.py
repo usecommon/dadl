@@ -55,6 +55,9 @@ class LabelledValue:
     overrides: tuple[str, ...] = field(default_factory=tuple)
     #: Coincidence window used: width, delays and declared source.
     window: dict[str, object] | None = None
+    #: The counts behind the value (e.g. singles, coincidences and their ratio per setting), so a
+    #: reader can judge what post-selection kept.
+    counts: dict[str, object] | None = None
 
     def __float__(self) -> float:
         raise TypeError(
@@ -87,4 +90,5 @@ class LabelledValue:
             "window_width_ps": window.get("width_ps"),
             "window_delays_ps": window.get("delays_ps"),
             "window_source": window.get("source"),
+            "counts": None if self.counts is None else str(self.counts),
         }

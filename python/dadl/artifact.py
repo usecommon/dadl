@@ -167,6 +167,18 @@ def build_manifest(
             "status": cal.status,
             "prior_dominated_params": [],
         },
+        "uncertainty": {
+            "kind": "statistical (counting) only",
+            "level": 0.95,
+            "validation": "frequentist coverage checked on DADL's own simulator at the gated regimes",
+            "not_included": [
+                "tagger timebase and non-linearity",
+                "temperature and bias sensor uncertainty",
+                "connector reseat and coupling drift",
+                "declared delays and window placement",
+                "model misspecification beyond the predictive check",
+            ],
+        },
         "unidentified_params": list(cal.unidentified),
         "notes": list(cal.notes),
         "supersedes": supersedes,

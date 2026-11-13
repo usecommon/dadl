@@ -22,7 +22,8 @@ experiment, its guardrails and its roadmap.
   non-paralyzable dead time, jitter, delay and cascading afterpulsing.
 - **Calibration (phase 2, on `main`, unreleased):** dark rate, afterpulse
   probability and time constant, and dead time fitted from a dark acquisition,
-  with 95% intervals whose coverage is checked in CI, written as
+  with 95% intervals whose coverage is checked in CI at a few simulated
+  regimes (see "Known limits"), written as
   content-addressed artifacts:
   `dadl simulate chsh-spad --dark --out dark.npz`, then
   `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a
@@ -49,8 +50,45 @@ experiment, its guardrails and its roadmap.
   faster); `dadl.backend()` says which is in use.
 
 Not yet: calibration uncertainty in results, corrected CHSH, signing,
-the explain engine, MCP. Uncertainties today are statistical
-only (Gaussian, 1σ).
+the explain engine, MCP.
+
+Uncertainties today are statistical only. Analyses (S, visibility) report a
+Gaussian 1σ error, plus an exact 95% interval for visibility at low counts.
+Calibrations report 95% intervals that need not be symmetric, validated by
+simulation; each artifact's `uncertainty` block lists the components not
+included (tagger timebase, temperature sensor, connectors, declared delays).
+
+### Known limits
+
+The calibrations were reviewed by outside-expert reviewers (AI agents, not
+yet people; [register](docs/reviews/2026-11-expert-assumptions.md)). Their
+limits, stated plainly:
+
+- **CW sources only.** `source.type` must be `spdc-cw`. Pulsed sources and
+  multi-pair emission are not modelled; heralding efficiency reads low when
+  the mean pair number per slot is not small.
+- **Single-exponential afterpulsing.** Detectors with a multi-component
+  afterpulse kernel get the fast component's probability, not the total.
+- **Hard-edge, non-paralyzable dead time.** Valid for actively quenched SPAD
+  modules. The reported value is the effective channel dead time: the longer
+  of detector and tagger dead time, and afterpulses inside it are not seen.
+  Soft recovery (SNSPDs, passive quenching) is not modelled; the series
+  dead-time model is planned.
+- **Afterpulse time constant near the detection threshold** covers somewhat
+  under 95% conditional on detection.
+- **DCR(T)** is Arrhenius only, valid inside the calibrated temperature range
+  at one bias, for SPADs.
+- **Rate dependence.** Delay, jitter and efficiency are valid at the singles
+  rates recorded in the artifact only.
+- **Heralding efficiency** needs a heralding run with no analysers in the
+  path (`--no-analysers`); on Bell data it measures the analyser projection.
+- **Bell results** assume fair sampling and fair coincidence, with static
+  settings: they do not close detection, locality or freedom-of-choice
+  loopholes.
+- **Coverage gates** run 1,000 simulated replicates per calibration at a few
+  regimes and catch gross failures (coverage below about 93%), not small ones.
+- A failed predictive check marks the calibration `misfit`; the CLI refuses to
+  write it unless `--accept-misfit` is given.
 
 ## What DADL will not do
 

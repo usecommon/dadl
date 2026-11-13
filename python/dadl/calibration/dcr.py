@@ -64,6 +64,12 @@ def calibrate_dcr_temperature(
     if len(backends) != 1:
         raise ValueError("cannot mix simulated and hardware calibrations")
 
+    biases = {d.conditions.get("bias_V") for d in darks}
+    if len(biases) > 1:
+        raise ValueError(
+            f"the dark calibrations were taken at different bias_V {sorted(b for b in biases if b is not None)}: at "
+            "fixed temperature the dark rate depends on bias, so an Arrhenius fit across them is not meaningful"
+        )
     temps = np.array([float(d.conditions["temperature_K"]) for d in darks])
     if np.any(temps <= 0):
         raise ValueError("temperature_K must be positive (kelvin)")
@@ -88,6 +94,18 @@ def calibrate_dcr_temperature(
     chi2 = float(np.sum(w * resid**2))
     dof = len(darks) - 2
 
+    notes = [
+        f"{len(darks)} dark calibrations from {temps.min():g} K to {temps.max():g} K; chi-square {chi2:.3g} on {dof} dof",
+        f"valid from {temps.min():g} K to {temps.max():g} K only: outside the scan other mechanisms (trap-assisted "
+        "tunnelling) can dominate and an Arrhenius extrapolation can be several times off",
+        "an effective activation energy at constant bias, for SPADs; not meaningful for SNSPDs",
+    ]
+    few = [d.conditions.get("gaps") for d in darks if d.conditions.get("gaps") is not None and d.conditions["gaps"] < 100]
+    if few:
+        notes.append(
+            f"{len(few)} input(s) had fewer than 100 dark gaps: near the 20-gap minimum, runs that pass are biased "
+            "upward (and re-acquiring until one passes biases more); prefer longer cold acquisitions"
+        )
     rng = np.random.default_rng(seed)
     draws = laplace.draws(rng, n_draws)
     inputs = tuple(dict.fromkeys(i for d in darks for i in d.inputs))
@@ -107,8 +125,13 @@ def calibrate_dcr_temperature(
         ppc_pvalue=float(_st.chi2.sf(chi2, dof)),
         inputs=inputs,
         backend=next(iter(backends)),
-        conditions={"reference_K": t_ref},
-        notes=(f"{len(darks)} dark calibrations from {temps.min():g} K to {temps.max():g} K; chi-square {chi2:.3g} on {dof} dof",),
+        conditions={
+            "reference_K": t_ref,
+            "temperature_min_K": float(temps.min()),
+            "temperature_max_K": float(temps.max()),
+            **({"bias_V": float(next(iter(biases)))} if next(iter(biases)) is not None else {}),
+        },
+        notes=tuple(notes),
     )
 
 

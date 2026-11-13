@@ -75,6 +75,8 @@ class PairRegime:
     duration_s: float
     #: Gates that only require coverage of at least 95% (discrete counts too low for an exact 95%).
     at_least: frozenset[str] = field(default_factory=frozenset)
+    #: Calibrations not gated in this regime, with the reason recorded in the regime's comment.
+    skip: frozenset[str] = field(default_factory=frozenset)
 
 
 PAIR_REGIMES: dict[str, PairRegime] = {
@@ -89,6 +91,30 @@ PAIR_REGIMES: dict[str, PairRegime] = {
         200,
         2.0,
         frozenset({"accidentals"}),
+    ),
+    # Si SPADs with afterpulsing (3% at 50 ns): afterpulses after true pairs must not reach the
+    # off-peak windows (with the old 200 ns guard they biased the accidentals by +9%).
+    "afterpulsing-spad": PairRegime(
+        2e4,
+        DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=350.0, afterpulse_prob=0.03,
+                       afterpulse_tau_ps=50_000.0, delay_ps=0),
+        DetectorParams(efficiency=0.4, dark_rate_cps=2000.0, jitter_sigma_ps=200.0, afterpulse_prob=0.03,
+                       afterpulse_tau_ps=50_000.0, delay_ps=3_217),
+        2_000,
+        2.0,
+    ),
+    # Bright background on the signal arm (8 Mcps recorded, 18% dead): dead time makes the
+    # cross-correlation background step under the peak (a flat-background delay fit covered 52%)
+    # and the accidentals are large. Heralding is not gated here: at this dead fraction misses
+    # caused by dead time correlate with accidentals in the same slot, a limit the calibration
+    # notes; its per-slot algebra is gated in the ideal regime below.
+    "bright-background": PairRegime(
+        2e5,
+        DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=350.0, delay_ps=0),
+        DetectorParams(efficiency=0.4, dark_rate_cps=1e7, jitter_sigma_ps=200.0, delay_ps=3_217),
+        2_000,
+        0.5,
+        skip=frozenset({"heralding-efficiency"}),
     ),
     # Broad timing response (multimode fibre, slow detectors): sigma about 1.8 ns.
     "broad-irf": PairRegime(
@@ -190,6 +216,8 @@ def _covered(cal, truth: dict[str, float], covered: dict[str, int]) -> None:
 def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
     r = PAIR_REGIMES[regime]
     a, b = r.a, r.b
+    ap_a = (a.afterpulse_prob, a.afterpulse_tau_ps * 1e-12)
+    ap_b = (b.afterpulse_prob, b.afterpulse_tau_ps * 1e-12)
     rate_a = a.efficiency * r.rate + a.dark_rate_cps
     rate_b = b.efficiency * r.rate + b.dark_rate_cps
     jitter = math.hypot(a.jitter_sigma_ps, b.jitter_sigma_ps)
@@ -197,13 +225,13 @@ def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
         "delay-jitter": {"delay_ps": float(b.delay_ps - a.delay_ps), "jitter_sigma_ps": jitter},
         "accidentals": {
             "accidental_coincidences": accidentals_expected(
-                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, r.width_ps, r.duration_s
+                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, r.width_ps, r.duration_s, ap_a, ap_b
             )
         },
         "heralding-efficiency": {
             "heralding_efficiency": heralding_ratio_expected(
                 r.rate, a.efficiency, b.efficiency, a.dark_rate_cps, b.dark_rate_cps,
-                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, r.width_ps,
+                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, r.width_ps, ap_a, ap_b,
             )
         },
     }
@@ -215,7 +243,7 @@ def pairs_coverage(
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
     r = PAIR_REGIMES[regime]
     truth = pairs_truth(regime)
-    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items()}
+    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items() if kind not in r.skip}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
     for child in _children(seed, replicates, part):
@@ -223,16 +251,60 @@ def pairs_coverage(
         a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(sim_rng))
         s = int(fit_seed.generate_state(1)[0])
         delays = {"delay_a_ps": r.a.delay_ps, "delay_b_ps": r.b.delay_ps}
-        _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
-        _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), truth["accidentals"], covered["accidentals"])
-        her = calibrate_heralding(
-            a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **common
-        )
-        _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
+        if "delay-jitter" in covered:
+            _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
+        # The accidentals measurand is this acquisition's: it follows the realised singles, so the
+        # truth is n_a n_b W / T for the replicate (the long-run mean differs by the singles'
+        # Poisson scatter, which outweighs the interval at high rates).
+        acc_truth = {"accidental_coincidences": a.size * b.size * r.width_ps * 1e-12 / r.duration_s}
+        if "accidentals" in covered:
+            _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), acc_truth, covered["accidentals"])
+        if "heralding-efficiency" in covered:
+            her = calibrate_heralding(
+                a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **common
+            )
+            _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
     return [
         CoverageResult(f"{kind} [{regime}]", replicates, c, gate(replicates, len(c)), kind in r.at_least)
         for kind, c in covered.items()
     ]
+
+
+#: Ideal heralding regime: one herald per slot, its partner detected with probability ETA in the
+#: same slot, and an accidental with probability P_ACC in every slot, independently; no dead
+#: time. The exact truth is ETA, so this gates the per-slot algebra itself (method v2's
+#: (C - lambda)/S reads ETA (1 - P_ACC), about three interval half-widths low here).
+IDEAL_ETA = 0.5
+IDEAL_P_ACC = 0.05
+IDEAL_HERALDS = 20_000
+IDEAL_SPACING = 2_000
+
+
+def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
+    width = 1_000
+    covered = {"heralding_efficiency": 0}
+    chs = (ChannelId("sim", 0), ChannelId("sim", 1))
+    for child in _children(seed, replicates, part):
+        sim_rng, fit_seed = child.spawn(2)
+        rng = np.random.default_rng(sim_rng)
+        # Heralds are sparse (one slot in IDEAL_SPACING) so that the shifted windows, which also
+        # see other heralds' partners, read p within 1/(2 IDEAL_SPACING) of IDEAL_P_ACC; with one
+        # herald in 20 slots they read 0.074 against 0.05, which the herald's own slot never sees.
+        span = IDEAL_SPACING * IDEAL_HERALDS
+        margin = 2_000
+        slots = np.sort(rng.choice(span, IDEAL_HERALDS, replace=False)) + margin
+        herald = slots * width + width // 2
+        partner = herald[rng.random(slots.size) < IDEAL_ETA] + 10
+        # Background: a Bernoulli process with probability IDEAL_P_ACC per slot (geometric gaps).
+        n_slots = span + 2 * margin
+        gaps = rng.geometric(IDEAL_P_ACC, int(n_slots * IDEAL_P_ACC * 1.2) + 1000)
+        bg_slots = np.cumsum(gaps) - 1
+        background = bg_slots[bg_slots < n_slots] * width + 300
+        signal = np.sort(np.concatenate([partner, background]))
+        cal = calibrate_heralding(herald, signal, chs, width_ps=width, guard_ps=200_000, backend="sim",
+                                  seed=int(fit_seed.generate_state(1)[0]), n_draws=10)
+        _covered(cal, {"heralding_efficiency": IDEAL_ETA}, covered)
+    return CoverageResult("heralding-efficiency [ideal-accidentals]", replicates, covered, gate(replicates, 1))
 
 
 def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
@@ -258,7 +330,7 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
 
 UNITS: dict[str, tuple[str, ...]] = {
     "dark": tuple(DARK_REGIMES),
-    "pairs": tuple(PAIR_REGIMES),
+    "pairs": (*PAIR_REGIMES, "ideal-accidentals"),
     "dcr": ("five-temperatures",),
 }
 
@@ -271,6 +343,8 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
     name, regime, replicates, seed, part = args
     if name == "dark":
         return [dark_coverage(replicates, seed, regime, part)]
+    if name == "pairs" and regime == "ideal-accidentals":
+        return [heralding_ideal_coverage(replicates, seed, part)]
     if name == "pairs":
         return pairs_coverage(replicates, seed, regime, part)
     return [dcr_coverage(replicates, seed, part)]

@@ -86,7 +86,7 @@
       "pattern": "Z$"
     },
     "valid_for": {
-      "description": "Time range and conditions the artifact may be applied to. Datasets outside it are refused unless overridden.",
+      "description": "Intended time range and conditions for the artifact. Recorded only: DADL does not yet enforce it.",
       "type": "object",
       "properties": {
         "from": {
@@ -176,6 +176,16 @@
           },
           "minItems": 1
         }
+      }
+    },
+    "uncertainty": {
+      "description": "What the intervals include and leave out. DADL intervals are statistical (counting) only.",
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string"},
+        "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "validation": {"type": "string"},
+        "not_included": {"type": "array", "items": {"type": "string"}}
       }
     },
     "checks": {

@@ -49,6 +49,9 @@ _simulate = simulate_setup
 def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     print(f"  Labels: {'; '.join(result.labels) or 'none'}")
+    if result.analysis == "chsh" and result.counts:
+        ratios = ", ".join(f"{k} {v['coincidences_per_singles']:.3f}" for k, v in result.counts.items())
+        print(f"  Coincidences per singles (what post-selection kept): {ratios}")
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides else ' (default)'}")

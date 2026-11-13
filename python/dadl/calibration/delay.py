@@ -1,10 +1,13 @@
 """Relative delay and combined timing jitter of two channels from a pair source.
 
 Method `xcorr-gaussian-mle`: the histogram of delays b - a
-(`dadl.histogram.cross_correlation`) is fitted with a Gaussian peak on a flat
-background, with Poisson likelihood per bin:
+(`dadl.histogram.cross_correlation`) is fitted with a Gaussian peak on a
+background with one level on each side of the peak centre (dead time removes
+background on one side only), with Poisson likelihood per bin:
 
-    mu_k = beta * w_k + A * [Phi((e_{k+1} - d) / sigma) - Phi((e_k - d) / sigma)]
+    mu_k = beta_L * w_k^L + beta_R * w_k^R + A * [Phi((e_{k+1} - d) / sigma) - Phi((e_k - d) / sigma)]
+
+(w_k^L and w_k^R the parts of bin k left and right of d).
 
 where e_k are the bin edges, w_k the bin widths, d the relative delay and
 sigma the combined jitter (detector, TDC and cable on both channels; sigma^2
@@ -27,9 +30,11 @@ the timing response.
 The predictive check is a Pearson chi-square on the fit window, with
 adjacent bins merged until each expects at least 5 counts.
 
-Phase 2 limits: a Gaussian IRF only (no exponential tail, which shows as a
-failing predictive check); a flat background, which suits CW sources (for
-pulsed sources the side peaks must lie outside the range).
+Phase 2 limits: a Gaussian IRF only (an exponential tail biases the delay by
+tens of ps and shows as a failing predictive check, which marks the
+calibration a misfit); CW sources (for pulsed sources the side peaks must lie
+outside the range); a delay calibrated at one count rate may shift at another
+(record the rates; recalibrate after large rate changes).
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ from dadl.stats import Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "3"
+METHOD_VERSION = "4"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -73,7 +78,14 @@ def _edges(n_bins: int, bin_width_ps: int, range_ps: int, tick_ps: int = 1) -> n
 
 
 class _PeakModel:
-    """Poisson negative log-likelihood of the histogram under peak + flat background."""
+    """Poisson negative log-likelihood of the histogram: Gaussian peak on a two-level background.
+
+    The background takes one level left of the peak centre and another right of it. Dead time
+    makes this step: after a pair is detected the signal detector is dead for a dead time, which
+    removes background on one side of the peak only. With a bright background a flat model
+    shifted the delay by more than its interval (52% coverage at 8 Mcps; method v3).
+    theta = (log background left, log peak area, delay, log sigma, log background right).
+    """
 
     def __init__(self, counts: np.ndarray, edges: np.ndarray) -> None:
         self.n = counts.astype(float)
@@ -82,32 +94,38 @@ class _PeakModel:
         self.w = self.hi - self.lo
 
     def _parts(self, theta: np.ndarray):
-        log_b, log_a, d, log_s = (float(v) for v in theta)
-        log_b, log_a, log_s = min(log_b, 700.0), min(log_a, 700.0), min(max(log_s, -50.0), 700.0)
+        log_bl, log_a, d, log_s, log_br = (float(v) for v in theta)
+        log_bl, log_br, log_a = min(log_bl, 700.0), min(log_br, 700.0), min(log_a, 700.0)
+        log_s = min(max(log_s, -50.0), 700.0)
         s = math.exp(log_s)
         z_hi, z_lo = (self.hi - d) / s, (self.lo - d) / s
         g = special.ndtr(z_hi) - special.ndtr(z_lo)
-        bg = math.exp(log_b) * self.w
+        right = np.clip(self.hi - d, 0.0, self.w)
+        left = self.w - right
+        bl, br = math.exp(log_bl), math.exp(log_br)
+        bg_l, bg_r = bl * left, br * right
         peak = math.exp(log_a) * g
-        mu = np.maximum(bg + peak, 1e-300)
-        return s, z_hi, z_lo, bg, peak, mu
+        mu = np.maximum(bg_l + bg_r + peak, 1e-300)
+        straddle = (self.lo < d) & (d < self.hi)
+        return s, z_hi, z_lo, bg_l, bg_r, peak, mu, straddle, bl, br
 
     def mu(self, theta: np.ndarray) -> np.ndarray:
-        return self._parts(theta)[-1]
+        return self._parts(theta)[6]
 
     def nll(self, theta: np.ndarray) -> float:
         mu = self.mu(theta)
         return float(np.sum(mu - self.n * np.log(mu)))
 
     def grad(self, theta: np.ndarray) -> np.ndarray:
-        s, z_hi, z_lo, bg, peak, mu = self._parts(theta)
+        s, z_hi, z_lo, bg_l, bg_r, peak, mu, straddle, bl, br = self._parts(theta)
         r = 1.0 - self.n / mu
         a = math.exp(theta[1])
         phi_hi = np.exp(-0.5 * z_hi**2) / _SQRT2PI
         phi_lo = np.exp(-0.5 * z_lo**2) / _SQRT2PI
-        d_d = -a * (phi_hi - phi_lo) / s
+        # Moving d right moves bin width from the right level to the left one where d falls in a bin.
+        d_d = -a * (phi_hi - phi_lo) / s + np.where(straddle, bl - br, 0.0)
         d_logs = -a * (z_hi * phi_hi - z_lo * phi_lo)
-        return np.array([np.sum(r * bg), np.sum(r * peak), np.sum(r * d_d), np.sum(r * d_logs)])
+        return np.array([np.sum(r * bg_l), np.sum(r * peak), np.sum(r * d_d), np.sum(r * d_logs), np.sum(r * bg_r)])
 
 
 def _grouped_pearson(n: np.ndarray, mu: np.ndarray, n_params: int) -> float:
@@ -226,7 +244,7 @@ def calibrate_delay(
     widths = model.w
     b0 = max(background / bin_width_ps, 0.5 / float(widths.sum()))
     a0 = max(float(np.sum(counts[idx] - b0 * widths)), 1.0)
-    x0 = np.array([math.log(b0), math.log(a0), d0, math.log(s0)])
+    x0 = np.array([math.log(b0), math.log(a0), d0, math.log(s0), math.log(b0)])
 
     lo_e, hi_e = float(model.lo[0]), float(model.hi[-1])
     total = float(counts[idx].sum()) + 1.0
@@ -235,6 +253,7 @@ def calibrate_delay(
         (0.0, math.log(10 * total)),  # peak area
         (lo_e, hi_e),  # delay
         (math.log(max(tick / 4, 0.1)), math.log(hi_e - lo_e)),  # sigma
+        (math.log(1e-6 / float(widths.sum())), math.log(10 * total / bin_width_ps)),  # background right
     ]
     x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
@@ -247,10 +266,10 @@ def calibrate_delay(
     except ValueError:
         # No background to speak of: its rate runs to the lower bound and is not identified.
         # Condition on it (it barely affects the peak) and keep the peak parameters' posterior.
-        sub_h = hess[1:, 1:]
-        inner = Laplace.from_hessian(theta[1:], sub_h)
-        cov = np.zeros((4, 4))
-        cov[1:, 1:] = inner.cov
+        keep = [1, 2, 3]
+        inner = Laplace.from_hessian(theta[keep], hess[np.ix_(keep, keep)])
+        cov = np.zeros((5, 5))
+        cov[np.ix_(keep, keep)] = inner.cov
         laplace = Laplace(theta, cov)
         notes.append("the background is not identified (it fits to zero); the delay and jitter are conditional on it")
     n_peak = math.exp(theta[1])
@@ -282,7 +301,8 @@ def calibrate_delay(
         "jitter_sigma_ps": laplace.interval(3, math.exp),
     }
     notes.append(
-        f"peak {n_peak:.4g} coincidences on a background of {math.exp(theta[0]) * bin_width_ps:.3g} per "
+        f"peak {n_peak:.4g} coincidences on a background of {math.exp(theta[0]) * bin_width_ps:.3g} (left) and "
+        f"{math.exp(theta[4]) * bin_width_ps:.3g} (right) per "
         f"{bin_width_ps} ps bin; fit window {model.lo[0]:.0f} to {model.hi[-1]:.0f} ps"
     )
     return Calibration(
@@ -295,7 +315,7 @@ def calibrate_delay(
         samples=np.column_stack([draws[:, 2], np.exp(draws[:, 3])]),
         sample_params=("delay_ps", "jitter_sigma_ps"),
         converged=converged,
-        ppc_pvalue=_grouped_pearson(model.n, model.mu(theta), 4),
+        ppc_pvalue=_grouped_pearson(model.n, model.mu(theta), 5),
         inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
         backend=backend,
         conditions={"tick_ps": float(tick), **(conditions or {})},

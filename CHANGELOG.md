@@ -179,6 +179,56 @@ from the packages.
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
 
+### Outside-expert review of the assumptions ([docs/reviews/2026-11-expert-assumptions.md](docs/reviews/2026-11-expert-assumptions.md))
+
+Five reviewers (detector physicist, statistician, metrologist, time-tagging
+engineer, quantum optics experimentalist) rated 13 assumptions wrong and 14
+questionable. Changes:
+
+- **Heralding efficiency** (method `herald-ratio` v3): per-slot estimator
+  η = (q − p)/(1 − p) with the accidental probability p propagated exactly;
+  unbiased up to 20% accidentals (the old ratio read η(1 − p)).
+  `calibrate pairs` refuses CHSH and HOM setups unless `--no-analysers`
+  confirms a heralding run, and records delays, duration, singles rates and
+  analysers in `conditions`. `dadl simulate --heralding` writes such a run.
+- **Accidentals** (v2): the off-peak guard is at least 10 µs and ten afterpulse
+  time constants past the dead time (afterpulses after true pairs had biased
+  it +9% to +165%); a trend test joins the dispersion check.
+- **Misfit status**: a predictive check below p = 0.001 sets
+  `checks.status: misfit`; `dadl calibrate` refuses to write it unless
+  `--accept-misfit` is given.
+- **PTU data loss**: non-complete `TTResult_StopReason` codes become
+  `data-loss` events and `incomplete` metadata, refused by the CLI; the
+  duration comes from the data; PicoHarp inputs above 3 are refused; the
+  sync divider is reported.
+- **Channel identity**: artifacts record the tagger serial and input, with the
+  role and detector serial alongside; hardware setups need `hardware.tagger`.
+- `source.type` is validated (`spdc-cw` only).
+- **Exact visibility intervals** (Clopper–Pearson) with `NEAR_THRESHOLD_EXACT`
+  and `LOW_COUNTS` labels; the delta method covered 63–93% near V = 1.
+- **Dark calibration** (v5): "effective channel dead time"; robust to up to
+  three spurious short gaps; profile intervals keyed on the afterpulse count;
+  posterior draws reweighted to agree with the intervals; a stationarity check
+  (split-half rate, longest gap) flags drift and latches as misfit.
+- **DCR(T)**: refuses runs at different bias; records the temperature range;
+  notes the SPAD-only validity and few-gap runs.
+- **Delay** (v4): the tick comes from the adapter (the tag GCD is a
+  cross-check); a two-level background models the dead-time step (bright
+  background coverage 52% → 98%).
+- `check_accounting` compares tag times, not counts; twin presets enforce the
+  real input counts; a MultiHarp 150 N (80 ps) preset.
+- Bell results carry "fair sampling and fair coincidence assumed", static
+  settings and loophole labels, and coincidences per singles; HOM results are
+  labelled as a two-point visibility at the declared delay.
+- Artifacts gain an `uncertainty` block (statistical, 95%, components not
+  included).
+- Coverage gates: new regimes with afterpulsing SPADs, a bright background and
+  an ideal heralding check against the true η; accidentals are judged against
+  each replicate's own expectation.
+- Docs: README uncertainty wording and "Known limits"; design.md notes on the
+  dead-time model and misfit refusal; "signed" becomes "content-addressed,
+  signing planned".
+
 ## 0.0.3 (2026-11-11)
 
 Applies the third review ([docs/reviews/2026-11-council.md](docs/reviews/2026-11-council.md)).

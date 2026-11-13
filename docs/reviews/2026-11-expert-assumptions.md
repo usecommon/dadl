@@ -93,3 +93,35 @@ Accepted on condition the limit is stated publicly (several are not yet):
 - 50:50 beamsplitter.
 - Dark-count dilution of heralds.
 - The design's series dead-time model is not yet implemented (design.md:189 must say so).
+
+## Status after fixes (branch `review/expert-assumptions`)
+
+| # | Status | What changed |
+| --- | --- | --- |
+| W1 | Fixed | `calibrate pairs` refuses CHSH and HOM setups without `--no-analysers`; `simulate --heralding`; analysers and rates in `conditions`; quickstart text changed |
+| W2 | Fixed | Per-slot estimator with exact propagation of p; ideal-heralding gate against the true η (p = 5%) |
+| W3 | Fixed | Guard ≥ 10 µs and dead time + 10 τa; trend test; afterpulsing pair regime gated |
+| W4 | Fixed | `checks.status: misfit` below p = 0.001; CLI refusal without `--accept-misfit` |
+| W5 | Fixed | Data-loss events, `incomplete` metadata, CLI refusal; duration from the data |
+| W6 | Fixed | `source.type` validated, `spdc-cw` only |
+| W7 | Fixed | Tagger serial and input as the channel identity; role and detector serial recorded; required for hardware |
+| W8 | Fixed | Clopper–Pearson intervals, `NEAR_THRESHOLD_EXACT`, `LOW_COUNTS` |
+| W9 | Fixed | "Effective channel dead time", conditional p stated; up to three outlier gaps dropped |
+| W10 | Fixed | Importance-reweighted draws; tests that draw quantiles match the intervals |
+| W11 | Fixed | Accounting by times; adapter rule 7 restated for real devices |
+| W12 | Fixed | Input counts per preset; MultiHarp 150 N (80 ps) preset |
+| W13 | Fixed | README wording split for analyses and calibrations |
+| Q1 | Stated limit | README "Known limits" |
+| Q2 | Stated limit | README; design.md says the series model is phase 3 |
+| Q3 | Partly fixed | CW only enforced; pulsed sources and multi-pair stated as limits |
+| Q4 | Partly fixed | Fair-coincidence, static-settings and loophole labels; coincidences per singles printed. Refusing delays calibrated on the analysed tags is open |
+| Q5 | Labelled | Two-point label; singles recorded with the counts. Scan fit open |
+| Q6 | Fixed | Tick from the adapter; GCD as cross-check |
+| Q7 | Partly fixed | Profile switch keyed on afterpulse count; conditional coverage stated |
+| Q8 | Partly fixed | Bias mismatch refused; temperature range recorded; SPAD-only and few-gap notes. Extrapolation is not refused |
+| Q9 | Fixed | `uncertainty` block lists components not included |
+| Q10 | Partly fixed | Delays, duration, rates recorded; `valid_for` documented as recorded only; "signed" wording corrected |
+| Q11 | Partly fixed | README qualified; afterpulsing, bright-background and ideal-heralding regimes gated. Rotating seeds open |
+| Q12 | Fixed | Split-half rate and longest-gap check flag drift and latches as misfit |
+| Q13 | Stated limit | Singles rates recorded; README limit |
+| Q14 | Fixed | `CreatorSW_Name` also used; mixed folders refused; flag carried in npz |

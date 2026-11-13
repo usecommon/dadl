@@ -24,7 +24,11 @@ from dadl.errors import InsufficientCounts
 from dadl.guardrails import Policy, threshold_labels
 from dadl.result import Estimate, LabelledValue
 
-FAIR_SAMPLING = "fair sampling assumed (post-selected on coincidences)"
+FAIR_SAMPLING = "fair sampling and fair coincidence assumed (post-selected on coincidences)"
+#: A fixed grid closes the event-centred window loophole but not the fair-coincidence one: a
+#: local model that records every photon and shifts timing with the setting reached S = 2.8
+#: (expert review). Static settings leave locality and freedom of choice open.
+STATIC_SETTINGS = "static settings: locality, freedom-of-choice and memory loopholes open; not a loophole-free test"
 
 #: Below this many coincidences per setting the Gaussian error is not trusted.
 MIN_COUNTS_PER_SETTING = 100
@@ -79,6 +83,19 @@ def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, floa
     return e, (1.0 - e * e) / total, total
 
 
+def setting_counts(tags: dict[str, np.ndarray], window: Window) -> dict[str, float]:
+    """Singles, coincidences and the coincidence-to-singles ratio of one setting."""
+    _, _, total = correlator(tags, window)
+    singles_a = int(tags["A+"].size + tags["A-"].size)
+    singles_b = int(tags["B+"].size + tags["B-"].size)
+    return {
+        "coincidences": float(total),
+        "singles_a": float(singles_a),
+        "singles_b": float(singles_b),
+        "coincidences_per_singles": total / max(1.0, min(singles_a, singles_b)),
+    }
+
+
 def chsh(
     runs: dict[tuple[str, str], dict[str, np.ndarray]],
     window: Window,
@@ -100,11 +117,13 @@ def chsh(
         s += sign * e
         var += v
     raw = Estimate(s, math.sqrt(var))
-    labels = (FAIR_SAMPLING,) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
+    labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
+    counts = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
     return LabelledValue(
         analysis="chsh",
         raw=raw,
         labels=labels,
         window=window.as_record(),
+        counts=counts,
         **policy.provenance(),
     )

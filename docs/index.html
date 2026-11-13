@@ -320,7 +320,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
       </g>
     </svg>
   </div>
-  <figcaption><span class="lab">Figure 3.</span> Architecture. The detector registry (bold outline) holds, for each channel, posterior samples of efficiency, dark-count rate as a function of temperature and bias, dead time, afterpulse kernel, crosstalk, delay and timing response, each stored as an immutable, signed record. Because every downstream component reads the same records, no effect is corrected twice and every result can cite exactly the calibration it used.</figcaption>
+  <figcaption><span class="lab">Figure 3.</span> Architecture. The detector registry (bold outline) holds, for each channel, posterior samples of efficiency, dark-count rate as a function of temperature and bias, dead time, afterpulse kernel, crosstalk, delay and timing response, each stored as an immutable, content-addressed record (signing planned). Because every downstream component reads the same records, no effect is corrected twice and every result can cite exactly the calibration it used.</figcaption>
 </figure>
 
 <p>Three design commitments follow from Section 3. First, corrections are derived from one generative model of the detection process, fitted to the data, rather than from a sequence of independent subtractions that may count the same event twice. Second, raw values are never discarded: every result carries its raw value, its corrected value where one is permitted, and its labels. Third, explanations of a change in a result are computed numerically before any text is produced.</p>
@@ -358,7 +358,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
       <text x="130" y="140" class="tx-b" text-anchor="middle">(v) Explain</text>
       <text x="130" y="158" class="tx-s" text-anchor="middle">attribution of change</text>
       <text x="380" y="188" class="tx-b" text-anchor="middle">Detector registry</text>
-      <text x="380" y="207" class="tx-s" text-anchor="middle">versioned, signed records</text>
+      <text x="380" y="207" class="tx-s" text-anchor="middle">versioned, content-addressed records</text>
       <g class="f-line">
         <path d="M465 72L560 114" marker-end="url(#a4)"/>
         <path d="M625 172L605 268" marker-end="url(#a4)"/>
