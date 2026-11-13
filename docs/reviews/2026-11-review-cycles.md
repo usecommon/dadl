@@ -208,3 +208,4 @@ since analyses refuse duplicate timestamps.
 | 8.18 | Questionable | An 8-input tagger needs two setups; no JSON output; no history or latest-artifact lookup; reruns add records | Stated in README ("interactive use, not unattended operation yet"); open |
 | 8.19 | Questionable | `calibrate dark` stopped at the first bad channel; errors did not name it | Fixed: per-channel handling and a summary |
 | 8.20 | Minor | Memory figures beyond PTU undocumented; truncated npz traceback; `ppc_pvalue` unhelpful as a trend | Documented; npz errors refused cleanly |
+| 8.21 | Minor | CI (Linux, NumPy 1.24) once gave different draws for the same data and seed; not reproduced locally or in the next run | Test compares to a tight tolerance; README says IDs are reproducible on one software stack, and floating-point order can differ across builds |

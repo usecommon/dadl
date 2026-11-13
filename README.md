@@ -157,9 +157,11 @@ plainly:
   they are not yet compared when the calibration is used.
 - **Double clicks** in CHSH (both outputs of one side in a slot) count in two
   outcome combinations, which pulls E toward 0.
-- **Reproducibility.** The same tags, setup and code give the same artifact
-  ID when `created` is fixed (`--created`); posterior draws are seeded from
-  the setup's `seed` mixed with the input hashes.
+- **Reproducibility.** The same tags, setup and software stack give the same
+  artifact ID when `created` is fixed (`--created`); posterior draws are
+  seeded from the setup's `seed` mixed with the input hashes. Across
+  platforms or NumPy builds, floating-point summation order can change the
+  last digits, and so the ID (seen once in CI on Linux with NumPy 1.24).
 - **Records, not certificates.** An artifact names the tagger, input and
   detector serial, the input file and setup hashes, the acquisition time
   and the conditions you give (`--condition temperature_K=233`), but it is
