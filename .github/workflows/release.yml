@@ -163,7 +163,8 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build, core-wheels, core-sdist]
+    # After the core: dadl-quantum's [core] extra pins dadl-quantum-core, which must exist first.
+    needs: [build, core-wheels, core-sdist, publish-core]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

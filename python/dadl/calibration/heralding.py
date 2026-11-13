@@ -66,7 +66,7 @@ from dadl.stats import LEVEL, Interval
 
 KIND = "heralding-efficiency"
 METHOD = "herald-ratio"
-METHOD_VERSION = "5"
+METHOD_VERSION = "6"
 MIN_HERALDS = 100
 
 UNITS = {"heralding_efficiency": "1"}
@@ -104,7 +104,20 @@ def _peak_placement_pvalue(
     # 0.466 for 0.729.
     background = float(np.median(near))
     excess = near[best] - background
-    if excess > 10 and excess > 0.5 * max(c - background, 0.0) and excess > 5.0 * np.sqrt(near[best] + 1.0):
+    significant = excess > 10 and excess > 5.0 * np.sqrt(near[best] + 1.0)
+    signal = max(c - background, 0.0)
+    if significant and abs(int(shifts[best])) == width_ps and excess <= signal:
+        # Next to the declared slot and smaller than it: a misplaced peak leans one way, a window
+        # narrow against the jitter spills into both neighbours alike (final statistician review,
+        # cycle 10: W < 1.35 sigma was flagged although correctly placed).
+        other = float(near[int(np.flatnonzero(shifts == -shifts[best])[0])]) - background
+        if other >= 0.6 * excess:
+            notes.append(
+                "the peak spills into both neighbouring slots: the window is narrow against the timing jitter, "
+                "so the heralding figure includes a small window capture"
+            )
+            return 1.0
+    if significant and excess > 0.5 * signal:
         notes.append(
             f"the pair peak is {int(shifts[best])} ps from the declared slot ({int(near[best])} coincidences there "
             f"against {c}): the declared delays are stale; recalibrate the delay and declare it"

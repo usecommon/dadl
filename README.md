@@ -53,7 +53,7 @@ Not yet: calibration uncertainty in results, corrected CHSH, signing,
 the explain engine, MCP.
 
 Uncertainties today are statistical only. Analyses (S, visibility) report a
-Gaussian 1σ error, plus an exact 95% interval for visibility at low counts.
+Gaussian 1σ error; visibilities also always carry an exact 95% interval.
 Calibrations report 95% intervals that need not be symmetric, validated by
 simulation; each artifact's `uncertainty` block lists the components not
 included (tagger timebase, temperature sensor, connectors, declared delays).
@@ -102,12 +102,17 @@ plainly:
 - **Bell results** assume fair sampling and fair coincidence, with static
   settings: they do not close detection, locality or freedom-of-choice
   loopholes (nor the memory loophole, where a local model uses earlier
-  trials). "Coincidences per singles" is the fraction of one arm's clicks
-  that post-selection kept, about the other arm's efficiency times the window
-  capture; closing the detection loophole needs about 0.83 (CHSH) or 2/3
-  (Eberhard). CHSH needs both outputs of each analyser (A+, A−, B+, B−); the
+  trials). "Coincidences per singles" is printed for each arm: the fraction
+  of that arm's clicks that post-selection kept, about the other arm's
+  efficiency times the window capture. Compare the smaller of the two with
+  the detection-loophole thresholds, about 0.83 (CHSH) or 2/3 (Eberhard). CHSH needs both outputs of each analyser (A+, A−, B+, B−); the
   two-detector, 16-measurement scheme with rotating polarisers is not
   supported.
+- **Unequal output efficiencies can raise S.** Raw counts carry each
+  side's output imbalance m = (η₊ − η₋)/(η₊ + η₋) into E, shifting S by up to
+  2·m_a·m_b, upward when both sides lean the same way: 0.6/0.4 on both sides
+  read S = 2.03 from a source at 1.98. Results where the singles show this
+  carry an "output imbalance" label; swap outputs or normalise per detector.
 - **Dead time can raise S.** A recorded click makes the partner arm's dead
   state depend on the outcome, so |E| grows with η²Rτ: a V = 0.7 source
   (S = 1.98) read S = 2.14 with a 1 µs dead time at 3·10⁶ pairs/s and
@@ -131,7 +136,12 @@ plainly:
   dropouts (microseconds each, as from a self-resetting latch) are not caught
   by this single-gap test: 14% of a signal lost in 5–20 µs pieces read
   heralding 0.627 for 0.729, status ok. A source
-  modulated by ±50% or more can trip the same test. Dark-rate drift within
+  modulated by ±50% or more can trip the same test, as can free-running
+  InGaAs detectors whose afterpulse time constant is comparable to the
+  median gap (about 5x the nominal false-alarm rate at 1 µs dead time and
+  τa = 10 µs). The predictive-check p-values are approximate (the delay
+  check's runs high with sparse peaks); use them for trends, not as exact
+  probabilities. Dark-rate drift within
   ±2% between the halves of a run is tolerated and recorded.
 - **Heralding efficiency is grid-specific.** It counts pairs in the same fixed
   slot, so it includes the window capture (about 1 − E|Δt|/W) and the signal

@@ -4,19 +4,19 @@
     "version": "3"
   },
   "dark": {
-    "sha256": "eb3772230e626029509e9823908b17a032af39a3a1894c5490ee2574dc2b5cad",
-    "version": "6"
+    "sha256": "09136e255ff80ac85a3edc1b91e85a46433c329a18d981e51ba3e0852df549de",
+    "version": "7"
   },
   "dcr": {
     "sha256": "cc7bbf9ba0ee8d995db4aee722ad1e29e9cccd25602c1b7075bb0fb67f53208f",
     "version": "2"
   },
   "delay": {
-    "sha256": "7824e5a7c326b983c5fb6646ff721309d58838fe379142d8edc341f0fd73ada5",
-    "version": "6"
+    "sha256": "0505711c77f108fae30ceb7c0233fd011d1b341d84cea6f4046496a8d847ded6",
+    "version": "8"
   },
   "heralding": {
-    "sha256": "f21881f62784ac0ae44ce4479b5c6bd114a2f127ed9c2ebf48f60effd9849431",
-    "version": "5"
+    "sha256": "861ebb9f5cfb4cb9c3ec2f834c50f0c393885139981435a0217a2042e3279b81",
+    "version": "6"
   }
 }

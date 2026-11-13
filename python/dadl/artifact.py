@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import math
+import numbers
 import os
 import re
 import tempfile
@@ -191,7 +192,11 @@ def build_manifest(
         raise ArtifactError(f"supersedes must be an artifact ID (64 hex digits), got {supersedes!r}")
     if cal.samples.ndim != 2 or cal.samples.shape[0] < 1:
         raise ArtifactError("an artifact needs at least one posterior draw")
-    bad = sorted(k for k, v in cal.conditions.items() if isinstance(v, bool) or not isinstance(v, (int, float)))
+    # Any real number (NumPy float32, int64 and the like included; release audit, cycle 10).
+    bad = sorted(
+        k for k, v in cal.conditions.items()
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, (numbers.Real, np.integer, np.floating))
+    )
     if bad:
         raise ArtifactError(f"conditions must be numbers (schema calibration/1); not numeric: {bad}")
     if valid_until is not None and valid_until < created:

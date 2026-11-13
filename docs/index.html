@@ -405,7 +405,8 @@ analysis:
   Raw S = 2.6941 ± 0.0105   (statistical only (Gaussian, 1 sigma))
   Labels: fair sampling and fair coincidence assumed (post-selected on coincidences);
     static settings: locality, freedom-of-choice and memory loopholes open; not a loophole-free test
-  Coincidences per singles (what post-selection kept): a,b 0.396, a,b' 0.392, a',b 0.387, a',b' 0.392
+  Coincidences per singles, arm A/arm B (what post-selection kept; compare the smaller with a
+    detection-loophole threshold): a,b 0.396/0.393, a,b' 0.392/0.392, a',b 0.387/0.387, a',b' 0.390/0.392
   Window: 2000 ps, delays none, source 'plan' (declared, not verified)
   Closed-form expectation (ignores dead time, which can raise S, and afterpulsing): S = 2.6863</pre>
 </div>
@@ -528,7 +529,7 @@ analysis:
 
 <!-- ========== 10 ========== -->
 <h2 id="status"><span class="num">10</span>Status and roadmap</h2>
-<p>DADL is pre-alpha, and the first phase is partly released (version 0.0.3). Its tests, including the published guardrail cases, closed-form checks and test cases shared by the Rust and Python implementations, run in <a href="https://github.com/usecommon/dadl/actions/workflows/ci.yml">continuous integration</a> on Windows, Linux and macOS. Table 2 copies the canonical phase plan in the <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md#mvp-scope-and-milestones">design document</a>; the project is maintained by a small team, so later phases are scoped to what it can sustain. All review to date has been by software agents, recorded in the <a href="https://github.com/usecommon/dadl/blob/main/docs/reviews/2026-11-council.md">review record</a>.</p>
+<p>DADL is pre-alpha, and the first phase is partly released (version 0.0.3). Its tests, including the published guardrail cases, closed-form checks and test cases shared by the Rust and Python implementations, run in <a href="https://github.com/usecommon/dadl/actions/workflows/ci.yml">continuous integration</a> on Windows, Linux and macOS. Table 2 copies the canonical phase plan in the <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md#mvp-scope-and-milestones">design document</a>; the project is maintained by a small team, so later phases are scoped to what it can sustain. All review to date has been AI-agent role-play review, with no independent human review yet, recorded in the <a href="https://github.com/usecommon/dadl/tree/main/docs/reviews">review records</a>.</p>
 
 <div class="tcap"><span class="lab">Table 2.</span> Development phases.</div>
 <div class="table">

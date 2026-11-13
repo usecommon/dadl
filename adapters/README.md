@@ -30,6 +30,8 @@ With no instrument at hand, DADL can stand in for one:
 
 ```bash
 dadl simulate chsh-spad --out run/ --format ptu --device hydraharp   # setting0.ptu ... setting3.ptu
+# devices: hydraharp, multiharp (5 ps), multiharp150n (80 ps), picoharp and timeharp260p
+# (two inputs: the HOM example only)
 dadl analyze chsh-spad --tags run/                                    # read through the PTU adapter
 ```
 

@@ -207,8 +207,10 @@ questionable. Changes:
 - `source.type` is validated (`spdc-cw` only).
 - **Exact visibility intervals** (Clopper–Pearson) with `NEAR_THRESHOLD_EXACT`
   and `LOW_COUNTS` labels; the delta method covered 63–93% near V = 1.
-- **Dark calibration** (v5): "effective channel dead time"; robust to up to
-  three spurious short gaps; profile intervals keyed on the afterpulse count;
+- **Dark calibration** (v5): "effective channel dead time"; up to three
+  short gaps far below all others are dropped as double triggers (a single
+  spurious gap near the dead time cannot be told apart and is noted, not
+  dropped); profile intervals keyed on the afterpulse count;
   posterior draws reweighted to agree with the intervals; a stationarity check
   (split-half rate, longest gap) flags drift and latches as misfit.
 - **DCR(T)**: refuses runs at different bias; records the temperature range;
@@ -229,6 +231,57 @@ questionable. Changes:
 - Docs: README uncertainty wording and "Known limits"; design.md notes on the
   dead-time model and misfit refusal; "signed" becomes "content-addressed,
   signing planned".
+
+### Ten review cycles ([docs/reviews/2026-11-review-cycles.md](docs/reviews/2026-11-review-cycles.md))
+
+Ten further cycles of AI-agent role-play review (three reviewers each, 30 in
+all) found 47 problems rated wrong, all fixed or stated as limits; the
+register lists every finding and its status. Method versions in this release:
+dark `interarrival-mle` 7, delay `xcorr-gaussian-mle` 8, heralding
+`herald-ratio` 6, accidentals `offpeak-grid` 3, DCR(T) `arrhenius-wls` 2; a
+test now fails if a method's code changes without a new version.
+
+**Breaking changes**
+
+- `Window(width_ps, source, ...)`: `source` is required (no default "plan");
+  `delays_ps` is read-only, and delays for unknown channels are refused.
+- `write_tags(..., simulated=...)` is required.
+- `write_artifact` refuses misfit calibrations unless `accept_misfit=True`.
+- CHSH and HOM refuse duplicate timestamps and need one channel at delay 0;
+  `bell_visibility` and `hom_visibility` need whole counts.
+- `hom_from_tags` compares rates across acquisitions of different length;
+  `hom_visibility(..., exposure_ratio=)`.
+- Tag files must be in time order per channel (a clock reset is refused, not
+  sorted).
+- Corrected visibility above 1 is left out and labelled instead of raising.
+- Artifact manifests: `summary` entries may have `value: null` with `bound`,
+  plus `definition`; `posterior.stand_in`; named `inputs`; `acquired` and
+  `instrument`; software versions; UCUM units. Non-converged fits are misfits.
+- `as_record()` writes JSON cells and adds `dadl_version` and `simulated`.
+- `dadl simulate` refuses to overwrite without `--force`; `--device` needs
+  `--format ptu`; `--duration-s` applies to `--dark` and `--heralding` only.
+- SciPy 1.13 or later.
+
+**New**
+
+- Labels: interrupted (latch, gaps at the start, middle or end of a run),
+  dead-time selection, output imbalance, simulated input, accidentals
+  subtracted, correction not computed, window not given, single basis.
+- `calibrate pairs`: per-artifact refusal, window capture, coincidences to
+  accidentals and pair rate (secondary), peak-placement check, declared dead
+  time and afterpulse time constant passed; `calibrate dark`: per-channel
+  handling, refusal of source-on and unit-error data.
+- Record options: `--condition`, `--acquired`, `--created`, `--valid-until`,
+  `--supersedes`; `load_calibration`; `dadl-quantum[core]` extra.
+- Delay fit: exact tick model, two-level background, multi-start and Newton
+  polishing, jitter upper limit below the tick; dark fit: time constants up to
+  1 ms (free-running InGaAs); heralding: closed form with the conditional live
+  fraction.
+- Coverage gates: 10 regimes and 42 checks plus a misfit-share limit, split
+  across CI jobs; `--regimes`.
+- Input safety: YAML alias expansion and npz decompression limits, PTU header
+  checks, histogram size limit in both backends, GIL declared for
+  free-threaded Python.
 
 ## 0.0.3 (2026-11-11)
 

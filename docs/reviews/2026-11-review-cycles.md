@@ -234,3 +234,52 @@ since analyses refuse duplicate timestamps.
 | 9.18 | Minor | The live twin did not enforce device input counts; faults outside the acquisition were silent | Fixed: refused |
 | 9.19 | Questionable | The live twin's read after losses looked complete | Fixed: `incomplete` and `data_loss` metadata |
 | 9.20 | Minor | Stale `--acquired` help; event ordering; device-only flags; twin input 0 is the sync input; window not a whole number of ticks | Help fixed; README notes the twin's input numbering; the rest open |
+
+## Cycle 10: senior physicist, senior statistician, release-readiness auditor
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 10.1 | Wrong | "Coincidences per singles" used the arm with more singles: 0.85 printed for an arm at 0.28, next to the 0.83 detection-loophole threshold | Fixed: both arms reported; the smaller is the one to compare (README, output) |
+| 10.2 | Wrong | Unequal output efficiencies within a side raised raw S (0.6/0.4 on both sides: 2.033 from 1.98) with no specific label | Fixed: "output imbalance" label from the singles (no false labels in 20 balanced runs); README limit |
+| 10.3 | Questionable | The printed pair rate omitted the window capture (27% high) | Fixed |
+| 10.4 | Minor | `dark_rate_cps` is per live second, not what a counter shows (+5% for hot InGaAs) | Definition says so; the recorded rate is in the notes |
+| 10.5 | Minor | Combined jitter printed without saying so; HOM's correction label printed on the raw line | Fixed |
+| 10.6 | Wrong | 4% of clean broad-IRF delay fits were misfits (L-BFGS-B stopped short; non-convergence became a misfit in 9.15); the gates never looked at status | Fixed: Newton polishing and a Newton-decrement test (0 of 200); every gate regime now limits the misfit share of clean runs to 1% |
+| 10.7 | Questionable | The interruption test runs about 5x its nominal rate for free-running InGaAs with τa near the median gap | Stated |
+| 10.8 | Questionable | The heralding peak check flagged correct placement when the window is under about 1.35σ of the jitter | Fixed: a peak spilling into both neighbours alike is a narrow window, not misplacement (heralding v6) |
+| 10.9 | Minor | Delay check p-values are approximate with sparse peaks; README overstated when the exact visibility interval is given | Stated; wording fixed |
+| 10.10 | Wrong (release) | CHANGELOG omitted review cycles 1–9 and the breaking API changes, and named superseded method versions | Fixed in the CHANGELOG |
+| 10.11 | Wrong (docs) | design.md "What works today" described 0.0.3 | Rewritten |
+| 10.12 | Questionable | PyPI could publish dadl-quantum before dadl-quantum-core, leaving its `[core]` extra pointing nowhere | Fixed: publish waits for publish-core |
+| 10.13 | Minor | A reviewer's scratch `s.yaml` was committed | Removed |
+| 10.14 | Minor | NumPy float32 and int conditions refused; `--duration-s` silently ignored for CHSH/HOM runs; adapters README omitted multiharp150n; review link | Fixed |
+
+The auditor re-tested 45 "Fixed" items from cycles 1–9 with new parameters; all held except 8.7
+(NumPy scalars other than float64), fixed here.
+
+## Summary of the ten cycles
+
+Counts are of register rows by their severity; 47 findings rated wrong in all.
+
+| Cycle | Lenses | Wrong | Questionable | Minor |
+| --- | --- | --- | --- | --- |
+| 1 | SNSPD specialist, statistician, first-time user | 5 | 8 | 8 |
+| 2 | Bell experimentalist, tagger engineer, research software engineer | 2 | 9 | 10 |
+| 3 | Bayesian computation, calibration lab, HOM experimentalist | 7 | 8 | 5 |
+| 4 | QKD security, numerical analyst, teaching lab | 5 | 3 | 7 |
+| 5 | Red team, release engineer, point-process statistician | 4 | 7 | 6 |
+| 6 | Rust and bindings, detector applications, claims auditor | 4 | 5 | 9 |
+| 7 | Source physicist, API designer, gate statistician | 5 | 6 | 7 |
+| 8 | Journal referee, data archivist, testbed operator | 4 | 10 | 7 |
+| 9 | Security, second red team, hardware twin | 6 | 6 | 8 |
+| 10 | Senior physicist, senior statistician, release auditor | 5 | 4 | 5 |
+
+The number of findings rated wrong did not fall to zero: each fix that added a guard gave the next
+panel something new to attack, and several "Fixed" items were reopened by later cycles (4.1 after
+1.1, 6.12 after 1.16/4.11/5.1, 8.17 after 2.12, 9.9 after 5.1/6.13, 10.6 after 9.15). The last
+cycle's wrong findings were in output wording, one guard's false-alarm rate and release
+documentation, not in the estimators, which the final statistician found to hold their nominal
+coverage and false-alarm rates in every regime tested. Open items are listed in each cycle's table
+as "Open" or "Stated"; the largest are a human domain review, a timing-tail delay model, a
+labelled simulation truth for the heralding gate, and operator features (more than four inputs,
+JSON output, history).

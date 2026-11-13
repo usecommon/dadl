@@ -62,7 +62,7 @@ from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hess
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "6"
+METHOD_VERSION = "7"
 MIN_GAPS = 20
 #: Below this many expected afterpulses (n p) the profile intervals are used even with many gaps
 #: (statistician review: tau_a covered 87% at 20,000 gaps with about 10 afterpulses).
@@ -89,7 +89,8 @@ DETECTION_LR = 13.82
 
 UNITS = {"dark_rate_cps": "s-1", "afterpulse_prob": "1", "afterpulse_tau_ps": "ps", "dead_time_ps": "ps"}
 DEFINITIONS = {
-    "dark_rate_cps": "rate of avalanches past the effective dead time, with the source off (undetected afterpulses included)",
+    "dark_rate_cps": "rate of avalanches per live second past the effective dead time, with the source off "
+    "(undetected afterpulses included); a counter shows the lower recorded rate, given in the notes",
     "afterpulse_prob": "afterpulse probability per avalanche past the effective dead time (single-exponential effective value)",
     "afterpulse_tau_ps": "afterpulse time constant (single exponential)",
     "dead_time_ps": "effective channel dead time: the longer of the detector's and the tagger's",
@@ -576,6 +577,10 @@ def calibrate_dark(
                 "model loses afterpulses that outlive the next dark count, and afterpulse_prob reads high with "
                 "intervals that cover less than 95%"
             )
+    # Senior-physicist review, cycle 10: the fitted rate is per live second; at R x dead time of a
+    # few percent it differs from what a counter shows (10,024 against 9,542 cps for hot InGaAs).
+    recorded = (tags.size - 1) / max(float(tags[-1] - tags[0]), 1.0) * PS_PER_S
+    notes.append(f"recorded (wall-clock) rate {recorded:.6g} cps; dark_rate_cps is per live second")
     # The three parts of the check are recorded, and a failure is named (point-process review, cycle 5).
     st = _stationarity(tags, float(np.exp(theta[0])), n, float(s.max()))
     p_shape = _ppc_pvalue(s, theta)

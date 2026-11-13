@@ -64,7 +64,7 @@ from dadl.stats import Interval, Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "6"
+METHOD_VERSION = "8"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -296,6 +296,10 @@ def calibrate_delay(
     steps = np.full(5, 1e-4)
     steps[2] = 1e-3 * max(math.exp(theta[3]), 0.01)
     hess = numerical_hessian(model.grad, theta, steps=steps)
+    if not res.success:
+        # L-BFGS-B can stop "ABNORMAL" a few ps short on broad peaks; finish with Newton steps
+        # (final statistician review, cycle 10: 4% of good broad-IRF fits were refused).
+        theta, hess = _newton_polish(model, theta, hess, bounds, steps)
     sigma_held = False
     try:
         laplace = Laplace.from_hessian(theta, hess)
@@ -324,7 +328,12 @@ def calibrate_delay(
     # A log-jitter spread above 1 (a factor e) is a flat direction, not a measurement.
     sigma_held = sigma_held or at_floor or float(laplace.cov[3, 3]) > 1.0
     n_peak = math.exp(theta[1])
-    converged = bool(res.success) or float(np.max(np.abs(model.grad(theta)))) < 1e-3 * math.sqrt(n_peak)
+    # Converged when the optimizer says so, or when a Newton step would gain almost nothing: the
+    # Newton decrement g' H^-1 g does not depend on units. (Final statistician review, cycle 10: a
+    # raw-gradient test refused 4% of good broad-IRF fits after non-convergence became a misfit.)
+    grad = model.grad(theta)
+    newton_decrement = float(grad @ laplace.cov @ grad)
+    converged = bool(res.success) or newton_decrement < 1e-2
     sigma = math.exp(theta[3])
     if not (edges[0] + 5 * sigma < theta[2] < edges[-1] - 5 * sigma):
         notes.append("the peak lies within 5 sigma of the edge of the histogram; widen range_ps")
@@ -373,6 +382,9 @@ def calibrate_delay(
             "jitter_sigma_ps": laplace.interval(3, math.exp),
         }
     notes.append(
+        "jitter_sigma_ps is combined over both channels: each channel's is about value / sqrt(2) if they are alike"
+    )
+    notes.append(
         f"peak {n_peak:.4g} coincidences on a background of {math.exp(theta[0]) * bin_width_ps:.3g} (left) and "
         f"{math.exp(theta[4]) * bin_width_ps:.3g} (right) per "
         f"{bin_width_ps} ps bin; fit window {model.lo[0]:.0f} to {model.hi[-1]:.0f} ps"
@@ -396,6 +408,30 @@ def calibrate_delay(
         stand_in=unidentified,
         notes=tuple(notes),
     )
+
+
+def _newton_polish(
+    model: _PeakModel, theta: np.ndarray, hess: np.ndarray, bounds: list, steps: np.ndarray, iterations: int = 5
+) -> tuple[np.ndarray, np.ndarray]:
+    """A few damped Newton steps within the bounds, kept only while they lower the NLL."""
+    lo = np.array([b[0] for b in bounds])
+    hi = np.array([b[1] for b in bounds])
+    best = model.nll(theta)
+    for _ in range(iterations):
+        try:
+            step = np.linalg.solve(hess, model.grad(theta))
+        except np.linalg.LinAlgError:
+            break
+        for scale in (1.0, 0.5, 0.25):
+            trial = np.clip(theta - scale * step, lo, hi)
+            value = model.nll(trial)
+            if np.isfinite(value) and value < best:
+                theta, best = trial, value
+                hess = numerical_hessian(model.grad, theta, steps=steps)
+                break
+        else:
+            break
+    return theta, hess
 
 
 def _sigma_upper_limit(model: _PeakModel, theta: np.ndarray, bounds: list) -> float:

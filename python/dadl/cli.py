@@ -26,7 +26,7 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.guardrails import POLICY_MODIFIED, SIMULATED_INPUT
+from dadl.guardrails import ACCIDENTALS_SUBTRACTED, POLICY_MODIFIED, SIMULATED_INPUT
 from dadl.closed_form import chsh_expected_grid, chsh_ideal, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
@@ -54,14 +54,20 @@ _simulate = simulate_setup
 
 def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
-    print(f"  Labels: {'; '.join(result.labels) or 'none'}")
+    # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
+    # review, cycle 10).
+    raw_labels = [lab for lab in result.labels if lab != ACCIDENTALS_SUBTRACTED]
+    print(f"  Labels: {'; '.join(raw_labels) or 'none'}")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
-            f"{k} {v['coincidences_per_singles']:.3f}"
+            f"{k} {v['coincidences_per_singles_a']:.3f}/{v['coincidences_per_singles_b']:.3f}"
             for k, v in result.counts.items()
-            if isinstance(v, dict) and "coincidences_per_singles" in v
+            if isinstance(v, dict) and "coincidences_per_singles_a" in v
         )
-        print(f"  Coincidences per singles (what post-selection kept): {ratios}")
+        print(
+            f"  Coincidences per singles, arm A/arm B (what post-selection kept; compare the smaller with a "
+            f"detection-loophole threshold): {ratios}"
+        )
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
@@ -201,6 +207,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
+    if args.duration_s is not None and not (args.dark or args.heralding):
+        raise DadlError("--duration-s applies to --dark and --heralding; a CHSH or HOM run takes its duration from the setup")
+    args.duration_s = 20.0 if args.duration_s is None else args.duration_s
     if not args.duration_s > 0:
         raise DadlError("--duration-s must be positive")
     if args.dark and args.heralding:
@@ -626,10 +635,15 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     acc = cals[1].estimates["accidental_coincidences"].value
     if n_c > 0 and span_s > 0:
         car = f"{n_c / acc:.4g}" if acc > 0 else "no accidentals seen"
+        rate = a.size * b.size / n_c / span_s
+        if cals[0].status != "misfit" and capture > 0.01:
+            # Senior-physicist review, cycle 10: without the window capture this read 27% high.
+            rate_text = f"{rate * capture:.4g} per s (singles x singles x capture / coincidences"
+        else:
+            rate_text = f"{rate:.4g} per s (singles x singles / coincidences, high by 1/capture"
         print(
-            f"  Source figures (secondary, not recorded): coincidences-to-accidentals {car}; pair rate from "
-            f"singles x singles / coincidences {a.size * b.size / n_c / span_s:.4g} per s (diluted and dead-time "
-            "limited like the heralding figure)."
+            f"  Source figures (secondary, not recorded): coincidences-to-accidentals {car}; pair rate {rate_text}; "
+            "dark counts in the singles also raise it)."
         )
     if refused:
         raise DadlError(f"{len(refused)} of {len(cals)} artifacts not written (misfit): {', '.join(refused)}")
@@ -715,7 +729,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--heralding", action="store_true",
         help="simulate a heralding run: the pair source straight onto one detector per arm (for calibrate pairs)",
     )
-    sim.add_argument("--duration-s", type=float, default=20.0, help="dark acquisition length per channel (default 20)")
+    sim.add_argument(
+        "--duration-s", type=float, default=None,
+        help="acquisition length for --dark (per channel) or --heralding (default 20); a CHSH or HOM run uses the setup",
+    )
     sim.set_defaults(func=cmd_simulate)
 
     an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")

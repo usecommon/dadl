@@ -23,7 +23,7 @@ import numpy as np
 from dadl import _checks
 from dadl.coincidences import grid_coincidences
 from dadl.errors import InsufficientCounts
-from dadl.guardrails import DEAD_TIME_SELECTION, INTERRUPTED, Policy, threshold_labels
+from dadl.guardrails import DEAD_TIME_SELECTION, EFFICIENCY_IMBALANCE, INTERRUPTED, Policy, threshold_labels
 from dadl.stationarity import interrupted
 from dadl.result import Estimate, LabelledValue
 
@@ -195,15 +195,26 @@ def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, floa
 
 
 def setting_counts(tags: dict[str, np.ndarray], window: Window) -> dict[str, float]:
-    """Singles, coincidences and the coincidence-to-singles ratio of one setting."""
+    """Singles, coincidences, coincidences per singles on each arm, and each side's output imbalance.
+
+    The detection-loophole thresholds need the condition on both arms, so the smaller ratio is the
+    one to compare (senior-physicist review, cycle 10: the larger one was reported, 0.85 for an arm
+    at 0.28).
+    """
     _, _, total = correlator(tags, window)
     singles_a = int(tags["A+"].size + tags["A-"].size)
     singles_b = int(tags["B+"].size + tags["B-"].size)
+    per_a = total / max(1.0, singles_a)
+    per_b = total / max(1.0, singles_b)
     return {
         "coincidences": float(total),
         "singles_a": float(singles_a),
         "singles_b": float(singles_b),
-        "coincidences_per_singles": total / max(1.0, min(singles_a, singles_b)),
+        "coincidences_per_singles_a": per_a,
+        "coincidences_per_singles_b": per_b,
+        "coincidences_per_singles": min(per_a, per_b),
+        "imbalance_a": (tags["A+"].size - tags["A-"].size) / max(1.0, singles_a),
+        "imbalance_b": (tags["B+"].size - tags["B-"].size) / max(1.0, singles_b),
     }
 
 
@@ -246,6 +257,13 @@ def chsh(
     counts["signs"] = {f"{k[0]},{k[1]}": s for k, s in SIGNS.items()}
     if dead_time_selection(runs, {k: counts[f"{k[0]},{k[1]}"]["coincidences"] for k in SIGNS}) > 0.01:
         labels += (DEAD_TIME_SELECTION,)
+    # Unequal output efficiencies within a side shift raw E by about m_a m_b (1 - E^2) and S by up
+    # to 2 m_a m_b, upward when the two sides' imbalances share a sign (0.6/0.4 on both sides: S =
+    # 2.033 from a source at 1.98). m is read from the singles, uniform for a maximally entangled state.
+    m_a = float(np.mean([counts[f"{k[0]},{k[1]}"]["imbalance_a"] for k in SIGNS]))
+    m_b = float(np.mean([counts[f"{k[0]},{k[1]}"]["imbalance_b"] for k in SIGNS]))
+    if 2.0 * abs(m_a * m_b) > 0.5 * raw.stderr:
+        labels += (EFFICIENCY_IMBALANCE,)
     if settings_deg is not None:
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     return LabelledValue(

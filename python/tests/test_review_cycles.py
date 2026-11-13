@@ -851,3 +851,27 @@ def test_non_converged_fits_are_misfits_and_artifacts_check_dtype(tmp_path):
     np.save(post, np.load(post).astype(np.complex128))
     with pytest.raises(ArtifactError, match="float64"):
         read_artifact(path)
+
+
+# --- Cycle 10 ----------------------------------------------------------------------------------
+
+
+def test_unequal_output_efficiencies_are_labelled_and_both_arms_reported():
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import EFFICIENCY_IMBALANCE
+    from dadl.sim import PairSource, simulate_chsh
+
+    def det(e):
+        return DetectorParams(efficiency=e, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0)
+
+    w = Window(width_ps=2000, source="plan")
+    src = PairSource(pair_rate_per_s=1e5, visibility=0.7)
+    lean = chsh(simulate_chsh(src, {"A+": det(0.6), "A-": det(0.4), "B+": det(0.6), "B-": det(0.4)}, 1.0,
+                              np.random.default_rng(1)), w)
+    assert EFFICIENCY_IMBALANCE in lean.labels
+    even = chsh(simulate_chsh(src, {k: det(0.5) for k in ("A+", "A-", "B+", "B-")}, 1.0, np.random.default_rng(1)), w)
+    assert EFFICIENCY_IMBALANCE not in even.labels
+    asym = chsh(simulate_chsh(src, {"A+": det(0.92), "A-": det(0.92), "B+": det(0.3), "B-": det(0.3)}, 1.0,
+                              np.random.default_rng(2)), w)
+    c = asym.counts["a,b"]
+    assert c["coincidences_per_singles"] == min(c["coincidences_per_singles_a"], c["coincidences_per_singles_b"]) < 0.3

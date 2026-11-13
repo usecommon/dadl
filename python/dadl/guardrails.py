@@ -48,6 +48,10 @@ DEAD_TIME_SELECTION = (
     "1%; a recorded click makes the partner arm's dead state depend on the outcome, which can raise |E| and S"
 )
 SIMULATED_INPUT = "simulated data: the input tags were written by DADL's simulator, not recorded"
+EFFICIENCY_IMBALANCE = (
+    "output imbalance: unequal singles on the two outputs of each side (unequal detector efficiencies) shift raw "
+    "S by up to 2 m_a m_b, upward when both sides lean the same way; swap outputs or normalise per detector"
+)
 CORRECTION_NOT_COMPUTED = (
     "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
     "exact interval"

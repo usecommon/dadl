@@ -176,6 +176,12 @@ DCR_DURATION_S = 10.0
 FALSE_FAIL = 0.001
 
 
+#: Key under which a result counts the replicates marked misfit, and the share allowed (the
+#: checks' nominal false-alarm rate is about 0.1-0.2%).
+MISFITS = "misfit status"
+MAX_MISFIT_SHARE = 0.01
+
+
 @dataclass(frozen=True)
 class CoverageResult:
     calibration: str
@@ -188,18 +194,22 @@ class CoverageResult:
     def fraction(self, name: str) -> float:
         return self.covered[name] / self.replicates
 
-    def passed(self) -> bool:
+    def _ok(self, name: str) -> bool:
+        if name == MISFITS:
+            return self.fraction(name) <= MAX_MISFIT_SHARE
         lo, hi = self.gate
-        return all(lo <= self.fraction(k) <= (1.0 if self.at_least else hi) for k in self.covered)
+        return lo <= self.fraction(name) <= (1.0 if self.at_least else hi)
+
+    def passed(self) -> bool:
+        return all(self._ok(k) for k in self.covered)
 
     def __str__(self) -> str:
         lo, hi = self.gate
         band = f"at least {lo:.1%}" if self.at_least else f"gate {lo:.1%}-{hi:.1%}"
         lines = [f"{self.calibration}: {self.replicates} replicates, {band}"]
         for k in self.covered:
-            f = self.fraction(k)
-            ok = lo <= f <= (1.0 if self.at_least else hi)
-            lines.append(f"  {k:<20} {f:.1%}  {'ok' if ok else 'FAIL'}")
+            note = f" (at most {MAX_MISFIT_SHARE:.0%})" if k == MISFITS else ""
+            lines.append(f"  {k:<20} {self.fraction(k):.1%}{note}  {'ok' if self._ok(k) else 'FAIL'}")
         return "\n".join(lines)
 
 
@@ -247,6 +257,9 @@ def _covered(cal, truth: dict[str, float], covered: dict[str, int]) -> None:
         iv = cal.estimates.get(k)
         if iv is not None and iv.contains(v):
             covered[k] += 1
+    # Clean data must rarely be refused: the share marked misfit is gated too (final statistician
+    # review, cycle 10: 4% of good broad-IRF delay fits were misfits and the gates did not look).
+    covered[MISFITS] = covered.get(MISFITS, 0) + (cal.status == "misfit")
 
 
 def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
@@ -403,7 +416,8 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
 
 def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
     first = parts[0]
-    covered = {k: sum(p.covered[k] for p in parts) for k in first.covered}
+    keys = dict.fromkeys(k for p in parts for k in p.covered)
+    covered = {k: sum(p.covered.get(k, 0) for p in parts) for k in keys}
     return CoverageResult(first.calibration, replicates, covered, first.gate, first.at_least)
 
 
