@@ -176,8 +176,18 @@ jobs:
           /tmp/v/bin/dadl quickstart
 
   coverage:
-    name: Calibration coverage gate (1,000 replicates)
+    # Split across runners: run whole, the gate took about 45 minutes on a 4-core runner.
+    name: Calibration coverage gate (1,000 replicates, ${{ matrix.part.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - {name: dark, args: "dark"}
+          - {name: dcr, args: "dcr"}
+          - {name: pairs 1, args: "pairs --regimes cw-spad sparse-snspd afterpulsing-spad high-rate-snspd"}
+          - {name: pairs 2, args: "pairs --regimes bright-background"}
+          - {name: pairs 3, args: "pairs --regimes broad-irf ideal-accidentals"}
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -194,5 +204,5 @@ jobs:
           # One BLAS thread per worker (see dadl.calibration.coverage.run).
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
-        timeout-minutes: 50
-        run: python -m dadl.calibration.coverage all --replicates 1000 --jobs 4
+        timeout-minutes: 40
+        run: python -m dadl.calibration.coverage ${{ matrix.part.args }} --replicates 1000 --jobs 4

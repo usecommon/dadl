@@ -623,3 +623,19 @@ def test_library_refuses_duplicate_timestamps():
     runs[("a", "b")]["A+"] = np.sort(np.append(t, t[5]))
     with pytest.raises(ValueError, match="duplicate"):
         chsh(runs, Window(width_ps=2000, source="plan"))
+
+
+def test_ci_coverage_matrix_runs_every_regime():
+    import re
+    from pathlib import Path
+
+    from dadl.calibration.coverage import UNITS
+
+    ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    if not ci.exists():
+        pytest.skip("repository CI file not present")
+    args = re.findall(r'args: "([^"]+)"', ci.read_text(encoding="utf-8"))
+    whole = {a.split()[0] for a in args if "--regimes" not in a}
+    listed = {r for a in args if "--regimes" in a for r in a.split("--regimes")[1].split()}
+    for family, regimes in UNITS.items():
+        assert family in whole or set(regimes) <= listed, family

@@ -382,8 +382,11 @@ def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
     return CoverageResult(first.calibration, replicates, covered, first.gate, first.at_least)
 
 
-def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) -> list[CoverageResult]:
-    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all").
+def run(
+    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None
+) -> list[CoverageResult]:
+    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
+    the named `regimes` (CI splits the gate across runners this way).
 
     With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
     always uses child i of `seed`, so the result does not depend on `jobs`.
@@ -391,7 +394,10 @@ def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) 
     names = list(UNITS) if name == "all" else [name]
     if any(n not in UNITS for n in names):
         raise ValueError(f"unknown calibration {name!r}")
-    units = [(n, r) for n in names for r in UNITS[n]]
+    units = [(n, r) for n in names for r in UNITS[n] if regimes is None or r in regimes]
+    unknown = sorted(set(regimes or ()) - {r for _, r in units})
+    if unknown:
+        raise ValueError(f"unknown regime(s) {unknown} for {name!r}")
     if jobs <= 1:
         return [res for n, r in units for res in _unit((n, r, replicates, seed, None))]
     tasks = [
@@ -428,8 +434,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
     parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
+    parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the family)")
     args = parser.parse_args(argv)
-    results = run(args.calibration, args.replicates, args.seed, args.jobs)
+    results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes)
     for r in results:
         print(r)
     return 0 if all(r.passed() for r in results) else 1
