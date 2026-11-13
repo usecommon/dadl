@@ -76,17 +76,28 @@ def gamma_posterior(
         raise ValueError("exposure must be positive")
     dist = _st.gamma(count + 0.5, scale=1.0 / exposure)
     a = 1 - level
+    # At zero counts the lower limit is 0: the Jeffreys quantile is positive and excludes small means.
+    low = 0.0 if count == 0 else float(dist.ppf(a / 2))
     return (
-        Interval(count / exposure, float(dist.ppf(a / 2)), float(dist.ppf(1 - a / 2)), level),
+        Interval(count / exposure, low, float(dist.ppf(1 - a / 2)), level),
         dist.rvs(n_draws, random_state=rng),
     )
 
 
-def numerical_hessian(grad: Callable[[np.ndarray], np.ndarray], x: np.ndarray, rel_step: float = 1e-4) -> np.ndarray:
-    """Symmetrized central-difference Hessian from an analytic gradient."""
+def numerical_hessian(
+    grad: Callable[[np.ndarray], np.ndarray],
+    x: np.ndarray,
+    rel_step: float = 1e-4,
+    steps: np.ndarray | None = None,
+) -> np.ndarray:
+    """Symmetrized central-difference Hessian from an analytic gradient.
+
+    `steps` gives absolute steps per coordinate where a relative step would be wrong (a delay of
+    microseconds has a peak picoseconds wide; numerical review, cycle 4).
+    """
     x = np.asarray(x, dtype=float)
     k = x.size
-    h = rel_step * np.maximum(1.0, np.abs(x))
+    h = rel_step * np.maximum(1.0, np.abs(x)) if steps is None else np.asarray(steps, dtype=float)
     hess = np.empty((k, k))
     for i in range(k):
         e = np.zeros(k)
@@ -119,7 +130,19 @@ class Laplace:
         return Interval(transform(m), transform(m - z * sd), transform(m + z * sd), level)
 
     def draws(self, rng: np.random.Generator, n_draws: int) -> np.ndarray:
-        return rng.multivariate_normal(self.mean, self.cov, size=n_draws, method="cholesky")
+        try:
+            np.linalg.cholesky(self.cov)
+            method = "cholesky"
+        except np.linalg.LinAlgError:
+            # A conditional posterior (a parameter held fixed) has zero rows: semi-definite.
+            method = "eigh"
+        # macOS Accelerate with NumPy 2.2 warns spuriously inside the matmul (release review,
+        # cycle 5); the draws are checked instead.
+        with np.errstate(all="ignore"):
+            out = rng.multivariate_normal(self.mean, self.cov, size=n_draws, method=method)
+        if not np.all(np.isfinite(out)):
+            raise FloatingPointError("Laplace draws are not finite")
+        return out
 
 
 def coverage_band(n_replicates: int, level: float = LEVEL, confidence: float = 0.99) -> tuple[float, float]:

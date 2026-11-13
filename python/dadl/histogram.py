@@ -7,6 +7,15 @@ import numpy as np
 from dadl import _backend, _checks
 
 
+#: Largest histogram either backend allocates (core/src/histogram.rs MAX_BINS).
+MAX_BINS = 1 << 28
+
+
+def _check_bins(n_bins: int) -> None:
+    if n_bins > MAX_BINS:
+        raise ValueError(f"a histogram of {n_bins} bins exceeds the limit of {MAX_BINS} bins")
+
+
 def interarrival(times: np.ndarray, bin_width_ps: int, n_bins: int) -> np.ndarray:
     """Histogram of gaps between consecutive events on one channel.
 
@@ -25,6 +34,7 @@ def interarrival(times: np.ndarray, bin_width_ps: int, n_bins: int) -> np.ndarra
     times = _checks.timestamps(times)
     _checks.check_sorted(times)
     _checks.check_span(times)
+    _check_bins(n_bins)
     hist = np.zeros(n_bins, dtype=np.uint64)
     if times.size < 2 or n_bins == 0:
         return hist
@@ -66,9 +76,10 @@ def cross_correlation(a: np.ndarray, b: np.ndarray, bin_width_ps: int, range_ps:
     span = 2 * range_ps
     if span > _checks.INT64_MAX:
         raise OverflowError("2 * range_ps exceeds the int64 range")
+    n_bins = (span - 1) // bin_width_ps + 1
+    _check_bins(n_bins)
     if b.size and (int(b.min()) - range_ps < _checks.INT64_MIN or int(b.max()) + range_ps > _checks.INT64_MAX):
         raise OverflowError("a tag plus or minus range_ps leaves the int64 range")
-    n_bins = (span - 1) // bin_width_ps + 1
     hist = np.zeros(n_bins, dtype=np.uint64)
     if a.size == 0 or b.size == 0:
         return hist

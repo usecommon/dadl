@@ -88,7 +88,7 @@ def test_quickstart_runs(capsys):
     assert main(["quickstart"]) == 0
     out = capsys.readouterr().out
     assert "Raw S =" in out
-    assert "fair sampling assumed" in out
+    assert "fair sampling and fair coincidence assumed" in out and "loophole" in out and "Coincidences per singles" in out
     assert "usecommon.github.io/dadl" in out
 
 
@@ -135,7 +135,7 @@ def test_tag_file_round_trip_and_channel_map(tmp_path):
     runs = {k: {ch: np.array([1, 5, 9], dtype=np.int64) * (i + 1) for i, ch in enumerate(("A+", "A-", "B+", "B-"))}
             for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
     cmap = {7: "A+", 3: "A-", 1: "B+", 0: "B-"}
-    path = write_tags(tmp_path / "t.csv", runs, cmap)
+    path = write_tags(tmp_path / "t.csv", runs, cmap, simulated=False)
     back = read_tags(path, cmap)
     for k in runs:
         for ch in runs[k]:
@@ -168,7 +168,8 @@ def test_simulate_dark_then_calibrate(tmp_path, capsys):
     assert "dark_rate_cps" in out and "artifact:" in out
     (path,) = (tmp_path / "art").glob("*.json")
     manifest, samples = read_artifact(path)
-    assert manifest["channels"] == [{"device": "B+", "input": 2}]
+    # Expert review W7: the record names the device and input; the role label travels alongside.
+    assert manifest["channels"] == [{"device": "sim", "input": 2, "role": "B+"}]
     assert manifest["backend"] == "sim"
     assert manifest["summary"]["dark_rate_cps"]["low"] < 500 < manifest["summary"]["dark_rate_cps"]["high"]
 
@@ -180,17 +181,57 @@ def test_calibrate_rejects_unknown_channel(tmp_path, capsys):
     assert "unknown channel" in capsys.readouterr().err
 
 
-def test_calibrate_pairs_writes_three_artifacts(tmp_path, capsys):
+def test_calibrate_pairs_refuses_bell_data_and_accepts_a_heralding_run(tmp_path, capsys):
+    # Expert review W1: on Bell (CHSH) tags the heralding ratio carries the analyser projection
+    # (0.06-0.33 for an efficiency of 0.5), so the command refuses CHSH and HOM setups unless the
+    # user confirms a heralding run with nothing in the path.
     from dadl.artifact import read_artifact
 
     tags = tmp_path / "tags.npz"
     assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
     out_dir = tmp_path / "art"
-    argv = ["calibrate", "pairs", "chsh-spad", "--tags", str(tags), "--herald", "A+", "--signal", "B+", "--out", str(out_dir)]
-    assert main(argv) == 0
+    argv = ["calibrate", "pairs", "chsh-spad", "--herald", "A+", "--signal", "B+", "--out", str(out_dir)]
+    assert main(argv + ["--tags", str(tags)]) == 1
+    assert "analysers" in capsys.readouterr().err and not out_dir.exists()
+
+    her = tmp_path / "her.npz"
+    assert main(["simulate", "chsh-spad", "--heralding", "--duration-s", "1", "--out", str(her)]) == 0
+    assert main(argv + ["--tags", str(her), "--no-analysers"]) == 0
     out = capsys.readouterr().out
     assert "delay_ps" in out and "accidental_coincidences" in out and "heralding_efficiency" in out
-    kinds = sorted(read_artifact(p)[0]["kind"] for p in out_dir.glob("*.json"))
-    assert kinds == ["accidentals", "delay-jitter", "heralding-efficiency"]
-    assert main(argv[:7] + ["--signal", "A+", "--out", str(out_dir)]) == 1
+    manifests = [read_artifact(p)[0] for p in out_dir.glob("*[0-9a-f].json")]
+    assert sorted(m["kind"] for m in manifests) == ["accidentals", "delay-jitter", "heralding-efficiency"]
+    for m in manifests:
+        assert m["conditions"]["analysers_in_path"] == 0.0 and m["conditions"]["rate_herald_cps"] > 0
+        assert m["checks"]["status"] == "ok"
+    (her_m,) = [m for m in manifests if m["kind"] == "heralding-efficiency"]
+    assert 0.38 < her_m["summary"]["heralding_efficiency"]["value"] < 0.41  # 0.5 x window capture x live fraction
+    assert main(argv[:3] + ["--tags", str(her), "--no-analysers", "--herald", "A+", "--signal", "A+", "--out", str(out_dir)]) == 1
     assert "different channels" in capsys.readouterr().err
+
+
+
+def test_hardware_setups_need_the_tagger_serial(tmp_path, capsys):
+    tags = tmp_path / "dark.npz"
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(tags)]) == 0
+    hw = write(tmp_path, GOOD.replace("seed: 5\n", "seed: 5\nbackend: file\n"))
+    assert main(["calibrate", "dark", str(hw), "--tags", str(tags), "--channel", "A+", "--out", str(tmp_path / "a")]) == 1
+    assert "hardware.tagger" in capsys.readouterr().err
+    hw2 = tmp_path / "hw2.yaml"
+    hw2.write_text(hw.read_text() + "hardware:\n  tagger: HydraHarp-1234567\n  detectors: {A+: SPCM-AQRH-0042}\n", encoding="utf-8")
+    out = tmp_path / "b"
+    assert main(["calibrate", "dark", str(hw2), "--tags", str(tags), "--channel", "A+", "--out", str(out)]) == 0
+    from dadl.artifact import read_artifact
+
+    (path,) = out.glob("*[0-9a-f].json")
+    manifest = read_artifact(path)[0]
+    assert manifest["channels"] == [{"device": "HydraHarp-1234567", "input": 0, "role": "A+", "detector": "SPCM-AQRH-0042"}]
+    assert manifest["backend"] == "sim"  # the npz says it was simulated, whatever the setup claims
+
+
+def test_unsupported_source_types_are_refused(tmp_path):
+    from dadl.config import load_setup
+
+    bad = write(tmp_path, GOOD.replace("source: {", "source: {type: spdc-pulsed-80MHz, "))
+    with pytest.raises(ConfigError, match="not supported"):
+        load_setup(bad)

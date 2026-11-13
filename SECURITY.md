@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-DADL is pre-alpha. Only the latest 0.0.x release receives fixes.
+DADL is pre-alpha. Only the latest 0.x release receives fixes.
 
 ## Reporting
 
@@ -23,14 +23,22 @@ In scope for the code that exists today:
   value without the refusal or labels the policy requires, other than
   deliberately constructing or editing a result in your own process (which
   the docs state cannot be prevented).
-- Parsing of setup files and tag files (crashes, resource exhaustion, unsafe
-  YAML loading).
+- Parsing of setup files, tag files (npz, csv, PTU) and calibration artifacts
+  (crashes, resource exhaustion, unsafe YAML loading, decompression bombs).
+- Artifact verification: a file that `read_artifact` accepts although its
+  bytes, hashes or self-consistency checks should fail. (Artifacts are not
+  signed: anyone who can write a file can mint a self-consistent one.)
+- Output paths: the CLI writing outside `--out`, through symlinks, or over
+  existing files without `--force`.
 - The release supply chain: workflows, published packages and their
   provenance.
 
 Approval tokens, artifact signing, the audit log, plugin loading and the MCP
 server are designed but not built; they will join this scope when they ship.
 
-QKD monitoring records are evidence of what the monitor observed. They are not
-proof of security, and reports that they cannot detect an unknown attack are
+DADL has no QKD monitor today: no blinding, after-gate, time-shift, dead-time
+attack or efficiency-mismatch detection, and no QKD monitoring record. Nothing
+it produces belongs in a QKD security argument. When monitoring records
+arrive, they will be evidence of what the monitor observed, not proof of
+security, and reports that they cannot detect an unknown attack will be
 expected behaviour, not vulnerabilities.

@@ -87,7 +87,9 @@ fn cross_correlation<'py>(
     Ok(out.into_pyarray(py))
 }
 
-#[pymodule]
+// The functions read NumPy buffers borrowed as slices while the GIL is held; on a free-threaded
+// interpreter that protection exists only if the module says it needs the GIL (Rust review, cycle 6).
+#[pymodule(gil_used = true)]
 fn dadl_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(apply_nonparalyzable, m)?)?;

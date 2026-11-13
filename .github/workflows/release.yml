@@ -49,6 +49,12 @@ jobs:
           test "v${py}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != python ${py}"; exit 1; }
           test "v${rs}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != rust ${rs}"; exit 1; }
           test "v${core}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != bindings ${core}"; exit 1; }
+          extra=$(sed -n 's/^core = \["dadl-quantum-core==\(.*\)"\]/\1/p' python/pyproject.toml)
+          test "v${extra}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != core extra ${extra}"; exit 1; }
+      - name: Lock files must match the manifests (every later build uses --locked)
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo metadata --locked --format-version 1 --manifest-path bindings/python/Cargo.toml > /dev/null
       - name: Tagged commit must be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Test
@@ -138,7 +144,7 @@ jobs:
 
   publish-core:
     name: Publish dadl-quantum-core to PyPI
-    needs: [core-wheels, core-sdist]
+    needs: [build, core-wheels, core-sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -157,7 +163,8 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: build
+    # After the core: dadl-quantum's [core] extra pins dadl-quantum-core, which must exist first.
+    needs: [build, core-wheels, core-sdist, publish-core]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -175,7 +182,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: check
+    needs: [build, core-wheels, core-sdist]
     runs-on: ubuntu-latest
     environment: crates
     permissions:

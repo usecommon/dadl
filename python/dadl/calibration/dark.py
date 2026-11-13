@@ -54,7 +54,7 @@ from scipy import optimize
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import MISFIT_ALPHA, N_DRAWS, Calibration, draws_rng
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.models import DarkAfterpulseModel
@@ -62,38 +62,57 @@ from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hess
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "4"
+METHOD_VERSION = "7"
 MIN_GAPS = 20
+#: Below this many expected afterpulses (n p) the profile intervals are used even with many gaps
+#: (statistician review: tau_a covered 87% at 20,000 gaps with about 10 afterpulses).
+PROFILE_BELOW_AFTERPULSES = 500
+#: Laplace draws importance-reweighted by the exact likelihood when the profile path is used,
+#: so stored draws agree with the reported intervals (Laplace draws alone covered as little as 73%).
+IMPORTANCE_DRAWS = 4000
+#: A shortest gap this many typical edge spacings below the next is an outlier (a double trigger
+#: or reflection), not the dead time; one such tag collapsed the estimate to 2 ns.
+OUTLIER_SPACINGS = 30
 #: Posterior samples of f(0) averaged over in the dead-time interval.
 F0_SAMPLES = 4000
 PPC_BINS = 20
 PS_PER_S = 1e12
 #: Afterpulse time constants the fit considers, in ps. Shorter afterpulses
-#: cannot be told apart from dead time; the upper end is also capped at a
-#: tenth of the mean gap, where afterpulses blur into the dark counts.
-TAU_SEARCH_PS = (1e3, 1e7)
+#: cannot be told apart from dead time; the upper end is a tenth of the mean gap,
+#: where afterpulses blur into the dark counts, and at most 1 ms. (A 10 us cap made
+#: free-running InGaAs/InP detectors, with time constants of tens of us, read "no
+#: afterpulsing detected" at a likelihood ratio of 2,400: applications review, cycle 6.)
+TAU_SEARCH_PS = (1e3, 1e9)
 #: Likelihood-ratio threshold for claiming afterpulsing: chi-square(2) at 99.9%.
 #: A stringent level, because the time constant is searched over a range.
 DETECTION_LR = 13.82
 
-UNITS = {
-    "dark_rate_cps": "1/s",
-    "afterpulse_prob": "probability per avalanche",
-    "afterpulse_tau_ps": "ps",
-    "dead_time_ps": "ps",
+UNITS = {"dark_rate_cps": "s-1", "afterpulse_prob": "1", "afterpulse_tau_ps": "ps", "dead_time_ps": "ps"}
+DEFINITIONS = {
+    "dark_rate_cps": "rate of avalanches per live second past the effective dead time, with the source off "
+    "(undetected afterpulses included); a counter shows the lower recorded rate, given in the notes",
+    "afterpulse_prob": "afterpulse probability per avalanche past the effective dead time (single-exponential effective value)",
+    "afterpulse_tau_ps": "afterpulse time constant (single exponential)",
+    "dead_time_ps": "effective channel dead time: the longer of the detector's and the tagger's",
 }
 
 _MODEL = DarkAfterpulseModel()
 
 
-def _tau_bounds(s: np.ndarray) -> tuple[float, float]:
+#: Upper end of the time constants an upper limit on undetected afterpulsing covers (ps). Much
+#: slower afterpulses look like dark counts, and including them would weaken the limit for every
+#: detector; the note states the range.
+LIMIT_TAU_MAX_PS = 1e7
+
+
+def _tau_bounds(s: np.ndarray, cap: float = TAU_SEARCH_PS[1]) -> tuple[float, float]:
     """Afterpulse time constants the data can identify, in ps: from 1 ns to a tenth of the mean gap."""
-    return TAU_SEARCH_PS[0], min(TAU_SEARCH_PS[1], float(s.mean()) / 10)
+    return TAU_SEARCH_PS[0], min(cap, float(s.mean()) / 10)
 
 
-def _fit(s: np.ndarray, r0: float) -> optimize.OptimizeResult | None:
+def _fit(s: np.ndarray, r0: float, cap: float = TAU_SEARCH_PS[1]) -> optimize.OptimizeResult | None:
     """Multi-start bounded fit of the negative log-likelihood; None if no start is usable."""
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, cap)
     if hi_tau <= lo_tau:
         return None
 
@@ -116,6 +135,47 @@ def _fit(s: np.ndarray, r0: float) -> optimize.OptimizeResult | None:
     if best is not None:
         best.at_bound = bool(min(best.x[2] - bounds[2][0], bounds[2][1] - best.x[2]) < 1e-3)
     return best
+
+
+#: Rate change between the two halves of a dark run below which drift is tolerated: a percent of
+#: drift over a long run is normal and the fitted rate is still useful (point-process review,
+#: cycle 5: an exact test with no tolerance marked 94% of 1e6-count runs with 1% drift misfit).
+DRIFT_TOLERANCE = 0.02
+
+
+def _stationarity(tags: np.ndarray, r_per_ps: float, n_gaps: int, longest_gap: float) -> dict[str, float]:
+    """Drift and interruption checks of one dark acquisition.
+
+    - drift: the second half's rate over the first's, tested against the band 1 +- DRIFT_TOLERANCE
+      (binomial on the first half's share, at the nearer edge of the band);
+    - an interruption: the longest gap against the largest of n exponential gaps at rate r (a latch
+      or overload shutdown leaves one gap far longer than the rest).
+    """
+    mid = 0.5 * (float(tags[0]) + float(tags[-1]))
+    first = int(np.searchsorted(tags, mid))
+    n = int(tags.size)
+    second = n - first
+    ratio = second / first if first else float(second)
+    lo_share, hi_share = 1.0 / (2.0 + DRIFT_TOLERANCE), 1.0 / (2.0 - DRIFT_TOLERANCE)
+    share = first / n
+    if lo_share <= share <= hi_share:
+        p_drift = 1.0
+    elif share < lo_share:
+        p_drift = float(min(1.0, 2 * _st.binom.cdf(first, n, lo_share)))
+    else:
+        p_drift = float(min(1.0, 2 * _st.binom.sf(first - 1, n, hi_share)))
+    # P(max of n_gaps exponential gaps >= longest) = 1 - (1 - exp(-r g))^n
+    p_gap = float(-np.expm1(n_gaps * np.log1p(-math.exp(-r_per_ps * longest_gap)))) if longest_gap > 0 else 1.0
+    return {"drift_ratio": ratio, "p_drift": p_drift, "p_gap": p_gap}
+
+
+def _merge_conditions(diagnostics: dict[str, float], given: dict[str, float] | None) -> dict[str, float]:
+    """The caller's conditions beside the fit's diagnostics; a clash is refused, not overwritten
+    (archivist review, cycle 8: a user `gaps` replaced the fitted value)."""
+    clash = sorted(set(diagnostics) & set(given or {}))
+    if clash:
+        raise ValueError(f"conditions {clash} are names the fit records itself; rename them")
+    return {**diagnostics, **(given or {})}
 
 
 def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
@@ -141,9 +201,11 @@ PROFILE_TARGET = 3.841
 LOGIT_P_RANGE = (-15.0, 6.0)
 
 
-def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarray | None) -> float:
+def _profile(
+    s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarray | None, cap: float = TAU_SEARCH_PS[1]
+) -> float:
     """Smallest negative log-likelihood with coordinate `index` of theta fixed at `value`."""
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, cap)
     bounds = [(math.log(r0) - 5, math.log(r0) + 5), LOGIT_P_RANGE, (math.log(lo_tau), math.log(hi_tau))]
     free = [j for j in range(3) if j != index]
 
@@ -182,17 +244,45 @@ def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarra
 def _profile_interval(
     s: np.ndarray, r0: float, index: int, centre: float, nll_min: float, limits: tuple[float, float],
     warm: np.ndarray | None,
+    cap: float = TAU_SEARCH_PS[1],
 ) -> tuple[float, float]:
     """{v : 2 (profile(v) - nll_min) <= PROFILE_TARGET}, clipped to `limits` (in fit coordinates)."""
 
     def excess(v: float) -> float:
-        return 2.0 * (_profile(s, r0, index, v, warm) - nll_min) - PROFILE_TARGET
+        return 2.0 * (_profile(s, r0, index, v, warm, cap) - nll_min) - PROFILE_TARGET
 
     lo_lim, hi_lim = limits
     centre = min(max(centre, lo_lim), hi_lim)
     hi = hi_lim if excess(hi_lim) < 0 else optimize.brentq(excess, centre, hi_lim, xtol=1e-2)
     lo = lo_lim if centre <= lo_lim or excess(lo_lim) < 0 else optimize.brentq(excess, lo_lim, centre, xtol=1e-2)
     return lo, hi
+
+
+def _reweighted_draws(
+    s: np.ndarray, laplace: Laplace, rng: np.random.Generator, n_draws: int
+) -> tuple[np.ndarray, float]:
+    """Posterior draws (flat prior in the fit coordinates): Laplace proposals reweighted by the exact
+    likelihood. Returns the draws and the effective sample size of the weights (Kish)."""
+    prop = laplace.draws(rng, IMPORTANCE_DRAWS)
+    prop = np.clip(prop, (-80.0, -40.0, -20.0), (0.0, 40.0, 45.0))
+    r, p, ta = np.exp(prop[:, 0]), expit(prop[:, 1]), np.exp(prop[:, 2])
+    # In blocks of proposals: a 4000 x n array took 2.6 GB at 40,000 gaps (numerical review, cycle 4).
+    loglik = np.empty(prop.shape[0])
+    block = max(1, min(prop.shape[0], int(2e7 // max(s.size, 1))))
+    for i in range(0, prop.shape[0], block):
+        j = slice(i, i + block)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            dens = r[j, None] * (1 - p[j, None]) + p[j, None] * (r[j, None] + 1 / ta[j, None]) * np.exp(
+                -s[None, :] / ta[j, None]
+            )
+            loglik[j] = np.sum(np.log(dens), axis=1) - r[j] * s.sum()
+    diff = prop - laplace.mean
+    logq = -0.5 * np.einsum("ij,jk,ik->i", diff, np.linalg.inv(laplace.cov), diff)
+    logw = np.where(np.isfinite(loglik), loglik - logq, -np.inf)
+    w = np.exp(logw - np.max(logw))
+    w /= w.sum()
+    ess = float(1.0 / np.sum(w * w))
+    return prop[rng.choice(prop.shape[0], size=n_draws, p=w)], ess
 
 
 def _dead_time(
@@ -260,7 +350,7 @@ def _p_upper_limit(s: np.ndarray, nll_null: float, log_r0: float) -> tuple[float
     constants in [tau_min, tau_max] ps.
     """
     target = PROFILE_TARGET
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, LIMIT_TAU_MAX_PS)
     if hi_tau <= lo_tau:
         return 1.0, lo_tau, lo_tau
 
@@ -302,9 +392,34 @@ def calibrate_dark(
     gaps = np.diff(tags)
     if gaps.size < MIN_GAPS:
         raise InsufficientCounts(f"need at least {MIN_GAPS} gaps between dark counts, got {gaps.size}")
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, tags)
 
+    notes: list[str] = []
+    order = np.argsort(gaps, kind="stable")
+    dropped = 0
+    # A lone gap far shorter than the next few is a double trigger or reflection, not the dead time.
+    while dropped < 3 and order.size - dropped > 5:
+        g = gaps[order[dropped : dropped + 5]].astype(float)
+        typical = (g[4] - g[1]) / 3.0
+        if g[1] - g[0] > OUTLIER_SPACINGS * max(typical, 1.0):
+            dropped += 1
+        else:
+            break
+    if dropped:
+        notes.append(
+            f"{dropped} gap(s) far shorter than all others (double triggers or reflections?) were left out of "
+            "the dead-time estimate and the fit"
+        )
+    gaps = np.delete(gaps, order[:dropped])
     m = int(gaps.min())
+    if int(np.sum(gaps < 1.5 * m)) < 5:
+        # Red-team review, cycle 5: at low dark rates one spurious double trigger a few ns under the
+        # dead time sets the estimate (14 ns for 22 ns, interval excluding the truth); from dark
+        # data alone it cannot be told from a shorter dead time.
+        notes.append(
+            f"the dead time rests on few gaps near the shortest ({m} ps): a single spurious double trigger shorter "
+            "than the true dead time would set it; compare with the detector's specified dead time"
+        )
     # The shortest gap defines m; it sits at s = 0 by construction, so it is left
     # out of the shape fit (otherwise it reads as a spurious, very fast afterpulse).
     s = np.delete(gaps, int(np.argmin(gaps))).astype(float) - m
@@ -316,13 +431,20 @@ def calibrate_dark(
     nll_null = -(n * math.log(r0) - r0 * exposure)
 
     res = _fit(s, r0)
-    notes: list[str] = []
     unidentified: tuple[str, ...] = ()
+    stand_in: tuple[str, ...] = ()
+    ess_condition: dict[str, float] = {}
+    edge_detected = False
     lr = 0.0 if res is None else 2.0 * (nll_null - float(res.fun))
     detected = res is not None and lr > DETECTION_LR
     if detected and res.at_bound:
-        notes.append("the afterpulse time constant fitted to the edge of its search range; treated as not identified")
+        notes.append(
+            f"afterpulsing is detected (likelihood ratio {lr:.0f}) but its time constant fitted to the edge of the "
+            "search range (a tenth of the mean gap): the single-exponential model cannot describe it here, and "
+            "the probability below is not a valid limit"
+        )
         detected = False
+        edge_detected = True
 
     laplace = None
     if detected:
@@ -336,11 +458,19 @@ def calibrate_dark(
     # The afterpulse probability gets one profile-likelihood interval whether or not afterpulsing
     # is detected, so the choice between an interval and a limit never depends on the data
     # (switching on detection undercovered: 82-90% when afterpulsing went undetected).
-    use_profile = n < PROFILE_BELOW
-    nll_min = min(nll_null, float(res.fun)) if res is not None else nll_null
-    p_centre = float(res.x[1]) if res is not None and res.fun <= nll_null else LOGIT_P_RANGE[0]
+    use_profile = n < PROFILE_BELOW or (
+        res is not None and n * float(expit(res.x[1])) < PROFILE_BELOW_AFTERPULSES
+    )
+    # Undetected afterpulsing is limited over time constants up to LIMIT_TAU_MAX_PS only: refit
+    # within that range so the profile has its own minimum.
+    ref = res if detected else _fit(s, r0, LIMIT_TAU_MAX_PS)
+    nll_min = min(nll_null, float(ref.fun)) if ref is not None else nll_null
+    p_centre = float(ref.x[1]) if ref is not None and ref.fun <= nll_null else LOGIT_P_RANGE[0]
     if use_profile or not detected:
-        p_lo, p_hi = _profile_interval(s, r0, 1, p_centre, nll_min, LOGIT_P_RANGE, res.x if res is not None else None)
+        p_lo, p_hi = _profile_interval(
+            s, r0, 1, p_centre, nll_min, LOGIT_P_RANGE, ref.x if ref is not None else None,
+            TAU_SEARCH_PS[1] if detected else LIMIT_TAU_MAX_PS,
+        )
         p_low = 0.0 if p_lo <= LOGIT_P_RANGE[0] else float(expit(p_lo))
 
     if detected and laplace is not None:
@@ -358,7 +488,17 @@ def calibrate_dark(
         else:
             est_p = laplace.interval(1, lambda y: float(expit(y)))
             est_ta = laplace.interval(2, math.exp)
-        d = laplace.draws(rng, n_draws)
+        if use_profile:
+            d, ess = _reweighted_draws(s, laplace, rng, n_draws)
+            # Bayesian review, cycle 3: record the importance-sampling diagnostic; warn when low.
+            ess_condition["importance_ess"] = ess
+            if ess < 0.2 * IMPORTANCE_DRAWS:
+                notes.append(
+                    f"the importance reweighting is poor (effective sample size {ess:.0f} of {IMPORTANCE_DRAWS}): "
+                    "the stored draws may not match the intervals"
+                )
+        else:
+            d = laplace.draws(rng, n_draws)
         r_draws = np.exp(d[:, 0]) * PS_PER_S
         p_draws = expit(d[:, 1])
         ta_draws = np.exp(d[:, 2])
@@ -371,17 +511,21 @@ def calibrate_dark(
         r_draws = r_draws * PS_PER_S
         ul, t_lo, t_hi = _p_upper_limit(s, nll_null, math.log(r0))
         est_p = Interval(0.0, 0.0, max(ul, float(expit(p_hi))))
+        p_draws = rng.uniform(0.0, est_p.high, n_draws)
         est_ta = None
         unidentified = ("afterpulse_tau_ps",)
-        notes.append(
-            f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
-            f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
-            f"from {t_lo:.3g} to {t_hi:.3g} ps"
-        )
+        stand_in = ("afterpulse_prob",)
+        if not edge_detected:
+            notes.append(
+                f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
+                f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
+                f"from {t_lo:.3g} to {t_hi:.3g} ps"
+            )
         notes.append(
             "the dark rate counts every avalanche past the dead time, so undetected afterpulses (at most the "
             "upper limit on afterpulse_prob, as a fraction) are included in it"
         )
+        notes.append("afterpulse_prob draws are uniform on [0, upper limit]: a conservative stand-in, not a posterior")
         converged = True
 
     f0 = _MODEL.density_at_zero(theta)
@@ -399,22 +543,56 @@ def calibrate_dark(
         m, n, f0, f0_samples, rng, n_draws, tag_tick(tags), afterpulsing_ruled_out=bool(detected)
     )
     if est_tau.low == 0.0:
+        # SNSPD specialist review: the stored value (the shortest dark gap) read 23x an SNSPD's
+        # 30 ns recovery, unmarked; it is an upper limit, not an estimate.
+        unidentified = (*unidentified, "dead_time_ps")
+        stand_in = (*stand_in, "dead_time_ps")
         notes.append(
-            f"the dead time is only bounded above (<= {est_tau.high:.6g} ps): too few gaps fall near it to "
-            "bound it below; measure it with light on the detector"
+            f"the dead time is not identified by these dark data, only bounded above (<= {est_tau.high:.6g} ps): "
+            "too few gaps fall near it. Do not use the stored value as a dead time; it needs an acquisition "
+            "with light on the detector (for an SNSPD's recovery, a bright-light inter-arrival histogram)"
         )
 
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}
     columns = [r_draws]
     names = ["dark_rate_cps"]
+    columns.append(p_draws)
+    names.append("afterpulse_prob")
     if est_ta is not None:
         estimates["afterpulse_tau_ps"] = est_ta
-        columns += [p_draws, ta_draws]
-        names += ["afterpulse_prob", "afterpulse_tau_ps"]
+        columns.append(ta_draws)
+        names.append("afterpulse_tau_ps")
     estimates["dead_time_ps"] = est_tau
     columns.append(tau_draws)
     names.append("dead_time_ps")
 
+    if est_ta is not None:
+        crowding = est_r.value * est_ta.value * 1e-12
+        if crowding > 0.01:
+            # Gate review, cycle 7: the fit treats gaps as independent, so a later dark count ends
+            # a pending afterpulse; in the detector (and simulator) it does not. At dark rate x
+            # tau_a = 0.04 the afterpulse probability covered 72-75%, biased +2%.
+            notes.append(
+                f"dark rate x afterpulse time constant = {crowding:.3g}: above about 0.01 the fit's independent-gap "
+                "model loses afterpulses that outlive the next dark count, and afterpulse_prob reads high with "
+                "intervals that cover less than 95%"
+            )
+    # Senior-physicist review, cycle 10: the fitted rate is per live second; at R x dead time of a
+    # few percent it differs from what a counter shows (10,024 against 9,542 cps for hot InGaAs).
+    recorded = (tags.size - 1) / max(float(tags[-1] - tags[0]), 1.0) * PS_PER_S
+    notes.append(f"recorded (wall-clock) rate {recorded:.6g} cps; dark_rate_cps is per live second")
+    # The three parts of the check are recorded, and a failure is named (point-process review, cycle 5).
+    st = _stationarity(tags, float(np.exp(theta[0])), n, float(s.max()))
+    p_shape = _ppc_pvalue(s, theta)
+    ppc = min(1.0, 3.0 * min(p_shape, st["p_drift"], st["p_gap"]))
+    if ppc < MISFIT_ALPHA:
+        failing = [name for name, p in (("the shape of the gap distribution", p_shape),
+                                        (f"drift (second half / first half = {st['drift_ratio']:.4f})", st["p_drift"]),
+                                        ("an interruption (one gap far longer than the rate allows)", st["p_gap"]))
+                   if 3.0 * p < MISFIT_ALPHA]
+        notes.append("the check fails on " + "; ".join(failing))
+    check_conditions = {"drift_ratio": st["drift_ratio"], "p_shape": p_shape, "p_drift": st["p_drift"],
+                        "p_gap": st["p_gap"]}
     return Calibration(
         kind=KIND,
         method=METHOD,
@@ -422,13 +600,15 @@ def calibrate_dark(
         channels=(channel,),
         estimates=estimates,
         units={k: UNITS[k] for k in estimates},
+        definitions={k: DEFINITIONS[k] for k in estimates},
+        stand_in=stand_in,
         samples=np.column_stack(columns),
         sample_params=tuple(names),
         converged=converged,
-        ppc_pvalue=_ppc_pvalue(s, theta),
-        inputs=((tags_sha256(tags), "raw-tags"),),
+        ppc_pvalue=ppc,
+        inputs=((tags_sha256(tags), "raw-tags", str(channel)),),
         backend=backend,
-        conditions=conditions or {},
+        conditions=_merge_conditions({"gaps": float(n), **ess_condition, **check_conditions}, conditions),
         unidentified=unidentified,
         notes=tuple(notes),
     )

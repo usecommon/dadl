@@ -116,6 +116,10 @@ def detect(
     kept = kept + det.delay_ps
     darks = poisson_times(det.dark_rate_cps, duration_s, rng)
     arrivals = np.sort(np.rint(np.concatenate([kept, darks]))).astype(np.int64)
+    if det.dead_time_ps <= 0:
+        # Even an ideal detector records one tag per picosecond: two arrivals rounded to the same
+        # ps are one click (analyses refuse duplicate timestamps).
+        arrivals = np.unique(arrivals)
     if det.afterpulse_prob == 0:
         return apply_nonparalyzable(arrivals, det.dead_time_ps)
     return _self_exciting(arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng)

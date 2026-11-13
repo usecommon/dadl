@@ -33,6 +33,8 @@
     {"name": "xcorr zero width", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 0, "range": 8, "expect": {"error": "NonPositiveWidth"}},
     {"name": "xcorr zero range", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 4, "range": 0, "expect": {"error": "NonPositiveWidth"}},
     {"name": "xcorr range overflow", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 4, "range": 9223372036854775807, "expect": {"error": "Overflow"}},
-    {"name": "xcorr tag overflow", "op": "cross_correlation", "a": [0], "b": [9223372036854775804], "bin_width": 4, "range": 8, "expect": {"error": "Overflow"}}
+    {"name": "xcorr tag overflow", "op": "cross_correlation", "a": [0], "b": [9223372036854775804], "bin_width": 4, "range": 8, "expect": {"error": "Overflow"}},
+    {"name": "xcorr too many bins", "op": "cross_correlation", "a": [0], "b": [0], "bin_width": 1, "range": 2305843009213693952, "expect": {"error": "TooManyBins"}},
+    {"name": "interarrival too many bins", "op": "interarrival", "times": [0, 5], "bin_width": 10, "n_bins": 268435457, "expect": {"error": "TooManyBins"}}
   ]
 }

@@ -1,0 +1,22 @@
+{
+  "accidentals": {
+    "sha256": "4a40c3e63a46791b918fbb7d30c5e58f58b93a232e4d8c73bb5bd13b976697fe",
+    "version": "3"
+  },
+  "dark": {
+    "sha256": "09136e255ff80ac85a3edc1b91e85a46433c329a18d981e51ba3e0852df549de",
+    "version": "7"
+  },
+  "dcr": {
+    "sha256": "cc7bbf9ba0ee8d995db4aee722ad1e29e9cccd25602c1b7075bb0fb67f53208f",
+    "version": "2"
+  },
+  "delay": {
+    "sha256": "0505711c77f108fae30ceb7c0233fd011d1b341d84cea6f4046496a8d847ded6",
+    "version": "8"
+  },
+  "heralding": {
+    "sha256": "861ebb9f5cfb4cb9c3ec2f834c50f0c393885139981435a0217a2042e3279b81",
+    "version": "6"
+  }
+}

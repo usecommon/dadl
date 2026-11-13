@@ -1,17 +1,19 @@
 """DADL: Detector-Aware Data Layer for quantum optics experiments.
 
 Calibrations live in `dadl.calibration` and artifacts in `dadl.artifact`;
-they are not imported here, so `import dadl` does not load SciPy.
+they are not imported here. (SciPy is loaded for the exact visibility
+intervals.)
 
 `dadl.backend()` says which implementation runs the per-tag functions:
 "rust" when the optional compiled core (`pip install dadl-quantum-core`) is
 installed, else "python". Set DADL_BACKEND=python or =rust to choose.
 """
 
-__version__ = "0.0.3"
+__version__ = "0.1.0"
 
 from dadl._backend import name as backend  # noqa: E402
 from dadl.analysis.chsh import Window, chsh  # noqa: E402
+from dadl.analysis.hom import hom_from_tags  # noqa: E402
 from dadl.analysis.visibility import bell_visibility, hom_visibility  # noqa: E402
 from dadl.config import Setup, load_setup  # noqa: E402
 from dadl.data import ChannelId, Dataset, TagSet  # noqa: E402
@@ -37,6 +39,7 @@ __all__ = [
     "backend",
     "bell_visibility",
     "chsh",
+    "hom_from_tags",
     "hom_visibility",
     "load_setup",
     "read_tags",

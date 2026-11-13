@@ -50,13 +50,13 @@ def test_hom_from_tags_reports_raw_first_and_subtracts_off_peak_accidentals():
     noisy = DetectorParams(efficiency=0.8, dark_rate_cps=2e5, dead_time_ps=30_000, jitter_sigma_ps=10)
     rng = np.random.default_rng(3)
     runs = {"dip": simulate_hom(SRC, noisy, noisy, 0.0, 1.0, rng), "reference": simulate_hom(SRC, noisy, noisy, 40.0, 1.0, rng)}
-    result, counts = hom_from_tags(runs, Window(width_ps=1000))
+    result, counts = hom_from_tags(runs, Window(width_ps=1000, source="plan"))
     assert counts["accidentals"] > 0
     assert result.corrected.value > result.raw.value
     assert result.corrected.value == pytest.approx(0.9, abs=4 * result.corrected.stderr)
     assert result.window["width_ps"] == 1000
     with pytest.raises(ValueError, match="reference"):
-        hom_from_tags({"dip": runs["dip"]}, Window(width_ps=1000))
+        hom_from_tags({"dip": runs["dip"]}, Window(width_ps=1000, source="plan"))
 
 
 def test_example_loads():
@@ -101,9 +101,13 @@ def test_quickstart_simulate_analyze(tmp_path, capsys):
 
 
 def test_accidentals_above_c_min_are_not_subtracted_and_it_is_said(capsys):
-    runs = {
-        "dip": {"A": np.arange(0, 10**9, 1000), "B": np.arange(500, 10**9, 1000)},
-        "reference": {"A": np.arange(0, 10**9, 997), "B": np.arange(0, 10**9, 997)},
-    }
-    result, counts = hom_from_tags(runs, Window(width_ps=200))
+    # Independent dense streams with every on-peak coincidence removed: C_min = 0 while the
+    # off-peak windows still see accidentals, so subtraction would give V > 1 and is skipped.
+    rng = np.random.default_rng(0)
+    a = np.sort(rng.choice(10**10, 200_000, replace=False))
+    b = np.sort(rng.choice(10**10, 200_000, replace=False))
+    b = b[~np.isin(b // 200, a // 200)]
+    runs = {"dip": {"A": a, "B": b}, "reference": {"A": a, "B": np.sort(np.concatenate([b, a + 50]))}}
+    result, counts = hom_from_tags(runs, Window(width_ps=200, source="plan"))
+    assert counts["c_min"] == 0 and counts["accidentals"] > 0
     assert result.corrected is None and counts["subtracted"] == 0.0

@@ -1,10 +1,16 @@
 # Changelog
 
-All notable changes. DADL is pre-alpha: in 0.0.x anything may change between
-releases. The `calibration/1` schema is a draft and is versioned separately
-from the packages.
+All notable changes. DADL is pre-alpha: in 0.x anything may change between
+releases. The `calibration/1` artifact schema is frozen from 0.1.0 (new
+optional fields may be added; changes to existing ones need `calibration/2`)
+and is versioned separately from the packages.
 
-## Unreleased
+## 0.1.0 (2026-11-13)
+
+Phase 2: calibrations with simulation-checked 95% intervals, content-addressed
+artifacts, PicoQuant PTU input, a hardware twin and the optional compiled core,
+after an outside-expert review of the assumptions and ten further review
+cycles. Pre-alpha: read the README's "Known limits".
 
 ### Phase 2, milestone 1: data model and the dark calibration
 
@@ -28,7 +34,7 @@ from the packages.
   `closed_form.dark_afterpulse_rate`. Simulated tags for a given seed differ
   from 0.0.3; the quickstart prints S = 2.6941 instead of 2.6890.
 - CI: a coverage job runs the 1,000-replicate gate on every pull request.
-- New dependency: SciPy (>= 1.10).
+- New dependency: SciPy (>= 1.13).
 
 ### Phase 2, milestone 2: delay, jitter, accidentals, heralding, DCR(T)
 
@@ -142,7 +148,8 @@ from the packages.
   source, a sparse low-rate SNSPD source and a broad (about 1.8 ns) IRF:
   12 gates, run in parallel (`--jobs`) in the existing CI check. In the sparse
   regime about 0.2 off-peak counts are expected in all, so the accidentals
-  gate there requires coverage of at least 95% (declared before the first run).
+  gate there requires coverage of at least the band's lower edge, 92.6% (declared
+  before the first run).
 - Fix found by the broad-IRF regime: the delay fit crashed on broad peaks
   (overflow, or a singular Hessian) because its starting width came from a
   fixed +-50 bins. The start now widens until it holds +-4 sigma, the fit is
@@ -178,6 +185,109 @@ from the packages.
 
 - Release: the crate is now published to crates.io by the release workflow with
   Trusted Publishing, in a `crates` environment, instead of by hand with a token.
+
+### Outside-expert review of the assumptions ([docs/reviews/2026-11-expert-assumptions.md](docs/reviews/2026-11-expert-assumptions.md))
+
+Five reviewers (detector physicist, statistician, metrologist, time-tagging
+engineer, quantum optics experimentalist) rated 13 assumptions wrong and 14
+questionable. Changes:
+
+- **Heralding efficiency** (method `herald-ratio` v3): per-slot estimator
+  η = (q − p)/(1 − p) with the accidental probability p propagated exactly;
+  unbiased up to 20% accidentals (the old ratio read η(1 − p)).
+  `calibrate pairs` refuses CHSH and HOM setups unless `--no-analysers`
+  confirms a heralding run, and records delays, duration, singles rates and
+  analysers in `conditions`. `dadl simulate --heralding` writes such a run.
+- **Accidentals** (v2): the off-peak guard is at least 10 µs and ten afterpulse
+  time constants past the dead time (afterpulses after true pairs had biased
+  it +9% to +165%); a trend test joins the dispersion check.
+- **Misfit status**: a predictive check below p = 0.001 sets
+  `checks.status: misfit`; `dadl calibrate` refuses to write it unless
+  `--accept-misfit` is given.
+- **PTU data loss**: non-complete `TTResult_StopReason` codes become
+  `data-loss` events and `incomplete` metadata, refused by the CLI; the
+  duration comes from the data; PicoHarp channel values above 4 (sync 0, router inputs 1-4) are refused; the
+  sync divider is reported.
+- **Channel identity**: artifacts record the tagger serial and input, with the
+  role and detector serial alongside; hardware setups need `hardware.tagger`.
+- `source.type` is validated (`spdc-cw` only).
+- **Exact visibility intervals** (Clopper–Pearson) with `NEAR_THRESHOLD_EXACT`
+  and `LOW_COUNTS` labels; the delta method covered 63–93% near V = 1.
+- **Dark calibration** (v5): "effective channel dead time"; up to three
+  short gaps far below all others are dropped as double triggers (a single
+  spurious gap near the dead time cannot be told apart and is noted, not
+  dropped); profile intervals keyed on the afterpulse count;
+  posterior draws reweighted to agree with the intervals; a stationarity check
+  (split-half rate, longest gap) flags drift and latches as misfit.
+- **DCR(T)**: refuses runs at different bias; records the temperature range;
+  notes the SPAD-only validity and few-gap runs.
+- **Delay** (v4): the tick comes from the adapter (the tag GCD is a
+  cross-check); a two-level background models the dead-time step (bright
+  background coverage 52% → 98%).
+- `check_accounting` compares tag times, not counts; twin presets enforce the
+  real input counts; a MultiHarp 150 N (80 ps) preset.
+- Bell results carry "fair sampling and fair coincidence assumed", static
+  settings and loophole labels, and coincidences per singles; HOM results are
+  labelled as a two-point visibility at the declared delay.
+- Artifacts gain an `uncertainty` block (statistical, 95%, components not
+  included).
+- Coverage gates: new regimes with afterpulsing SPADs, a bright background and
+  an ideal heralding check against the true η; accidentals are judged against
+  each replicate's own expectation.
+- Docs: README uncertainty wording and "Known limits"; design.md notes on the
+  dead-time model and misfit refusal; "signed" becomes "content-addressed,
+  signing planned".
+
+### Ten review cycles ([docs/reviews/2026-11-review-cycles.md](docs/reviews/2026-11-review-cycles.md))
+
+Ten further cycles of AI-agent role-play review (three reviewers each, 30 in
+all) found 47 problems rated wrong, all fixed or stated as limits; the
+register lists every finding and its status. Method versions in this release:
+dark `interarrival-mle` 7, delay `xcorr-gaussian-mle` 8, heralding
+`herald-ratio` 6, accidentals `offpeak-grid` 3, DCR(T) `arrhenius-wls` 2; a
+test now fails if a method's code changes without a new version.
+
+**Breaking changes**
+
+- `Window(width_ps, source, ...)`: `source` is required (no default "plan");
+  `delays_ps` is read-only, and delays for unknown channels are refused.
+- `write_tags(..., simulated=...)` is required.
+- `write_artifact` refuses misfit calibrations unless `accept_misfit=True`.
+- CHSH and HOM refuse duplicate timestamps and need one channel at delay 0;
+  `bell_visibility` and `hom_visibility` need whole counts.
+- `hom_from_tags` compares rates across acquisitions of different length;
+  `hom_visibility(..., exposure_ratio=)`.
+- Tag files must be in time order per channel (a clock reset is refused, not
+  sorted).
+- Corrected visibility above 1 is left out and labelled instead of raising.
+- Artifact manifests: `summary` entries may have `value: null` with `bound`,
+  plus `definition`; `posterior.stand_in`; named `inputs`; `acquired` and
+  `instrument`; software versions; UCUM units. Non-converged fits are misfits.
+- `as_record()` writes JSON cells and adds `dadl_version` and `simulated`.
+- `dadl simulate` refuses to overwrite without `--force`; `--device` needs
+  `--format ptu`; `--duration-s` applies to `--dark` and `--heralding` only.
+- SciPy 1.13 or later.
+
+**New**
+
+- Labels: interrupted (latch, gaps at the start, middle or end of a run),
+  dead-time selection, output imbalance, simulated input, accidentals
+  subtracted, correction not computed, window not given, single basis.
+- `calibrate pairs`: per-artifact refusal, window capture, coincidences to
+  accidentals and pair rate (secondary), peak-placement check, declared dead
+  time and afterpulse time constant passed; `calibrate dark`: per-channel
+  handling, refusal of source-on and unit-error data.
+- Record options: `--condition`, `--acquired`, `--created`, `--valid-until`,
+  `--supersedes`; `load_calibration`; `dadl-quantum[core]` extra.
+- Delay fit: exact tick model, two-level background, multi-start and Newton
+  polishing, jitter upper limit below the tick; dark fit: time constants up to
+  1 ms (free-running InGaAs); heralding: closed form with the conditional live
+  fraction.
+- Coverage gates: 10 regimes and 42 checks plus a misfit-share limit, split
+  across CI jobs; `--regimes`.
+- Input safety: YAML alias expansion and npz decompression limits, PTU header
+  checks, histogram size limit in both backends, GIL declared for
+  free-threaded Python.
 
 ## 0.0.3 (2026-11-11)
 

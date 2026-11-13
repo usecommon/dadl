@@ -27,7 +27,7 @@ import numpy as np
 
 from dadl import __version__
 from dadl.adapters import Capabilities, DeviceInfo, Event
-from dadl.adapters.ptu_write import DEVICES
+from dadl.adapters.ptu_write import DEVICES, MAX_INPUT
 from dadl.config import Setup
 from dadl.data import ChannelId, TagSet
 from dadl.simsetup import simulate_setup
@@ -81,6 +81,19 @@ class SimulatedTagger:
             self._truth = {k: a - first for k, a in self._truth.items()}
         self._duration_ps = int(round(setup.duration_s_per_setting * PS_PER_S))
         self._batch_ps = int(round(batch_s * PS_PER_S))
+        # Twin review, cycle 9: the PTU writer enforced each device's inputs, the live twin did not;
+        # faults outside the acquisition removed tags without an event, or were ignored.
+        too_high = sorted(k for k in self._truth if k > MAX_INPUT[device])
+        if too_high:
+            raise ValueError(f"{hw_type} has inputs 0-{MAX_INPUT[device]}; the setup maps inputs {too_high}")
+        duration_s = self._duration_ps / PS_PER_S
+        if any(s0 < 0 or s0 + d0 > duration_s for s0, d0 in spans):
+            raise ValueError(f"buffer_overflows must lie within the {duration_s:g} s acquisition")
+        n_batches = max(1, -(-self._duration_ps // self._batch_ps))
+        if any(not 0 <= b < n_batches for b in faults.dropped_batches):
+            raise ValueError(f"dropped_batches must be batch indices 0-{n_batches - 1}")
+        if any(not 0 <= t < duration_s for t, _, _ in faults.config_changes):
+            raise ValueError(f"config_changes must fall within the {duration_s:g} s acquisition")
         self._faults = faults
         self._realtime = realtime
         self._setup_name = setup.name
@@ -124,7 +137,12 @@ class SimulatedTagger:
         tags = {
             self._channel(k): (np.concatenate(v) if v else np.empty(0, dtype=np.int64)) for k, v in parts.items()
         }
-        return TagSet(tags, duration_ps=self._duration_ps, clock=self._clock(), metadata=self._metadata())
+        lost = [e for e in self._events if e.kind in ("buffer-overflow", "dropped-batch")]
+        metadata = self._metadata()
+        if lost:
+            # As a PTU file stopped by data loss is (twin review, cycle 9).
+            metadata.update({"incomplete": True, "data_loss": ", ".join(sorted({e.kind for e in lost}))})
+        return TagSet(tags, duration_ps=self._duration_ps, clock=self._clock(), metadata=metadata)
 
     # --- live streaming ----------------------------------------------------------------------
 
@@ -200,11 +218,42 @@ class SimulatedTagger:
 
 
 def check_accounting(delivered: TagSet, events: tuple[Event, ...], generated: Mapping[int, np.ndarray]) -> dict[int, int]:
-    """For each input: generated - delivered - reported lost. All zeros means nothing was lost silently."""
-    lost: dict[int, int] = {k: 0 for k in generated}
-    for e in events:
-        if e.kind in ("buffer-overflow", "dropped-batch"):
-            for k, n in e.detail.get("per_input", {}).items():
-                lost[k] = lost.get(k, 0) + int(n)
-    got = {ch.input: delivered[ch].size for ch in delivered.channels}
-    return {k: int(generated[k].size) - got.get(k, 0) - lost.get(k, 0) for k in generated}
+    """For each input, the number of tags not accounted for; all zeros means nothing was lost silently.
+
+    Compares times, not just counts: every delivered tag must be a generated tag (no duplicates,
+    shifts or extra inputs), and every generated tag that was not delivered must fall inside a
+    reported loss (a buffer overflow window or a dropped batch). Needs the generated truth, so it
+    applies to the simulated tagger; for a real device the adapter's rule is record accounting
+    plus the vendor's own loss flags (adapters/TEMPLATE.md).
+    """
+    devices = {ch.device for ch in delivered.channels}
+    if len(devices) > 1:
+        raise ValueError(f"delivered tags come from several devices {sorted(devices)}; check each device separately")
+    windows = [
+        (int(e.time_ps), int(e.detail["until_ps"]))
+        for e in events
+        if e.kind in ("buffer-overflow", "dropped-batch") and e.time_ps is not None and "until_ps" in e.detail
+    ]
+    got = {ch.input: np.asarray(delivered[ch]) for ch in delivered.channels}
+    out: dict[int, int] = {}
+    for k in sorted(set(generated) | set(got)):
+        truth = np.sort(np.asarray(generated.get(k, np.empty(0, dtype=np.int64))))
+        seen = np.sort(got.get(k, np.empty(0, dtype=np.int64)))
+        values, t_count = np.unique(truth, return_counts=True)
+        s_values, s_count = np.unique(seen, return_counts=True)
+        idx = np.searchsorted(values, s_values)
+        idx_ok = idx < values.size
+        match = np.zeros(s_values.size, dtype=bool)
+        match[idx_ok] = values[idx[idx_ok]] == s_values[idx_ok]
+        # Delivered tags that were never generated, or delivered more often than generated.
+        extra = int(s_count[~match].sum())
+        over = np.zeros(values.size, dtype=np.int64)
+        over[idx[match]] = s_count[match]
+        extra += int(np.clip(over - t_count, 0, None).sum())
+        missing_counts = np.clip(t_count - over, 0, None)
+        missing = np.repeat(values, missing_counts)
+        covered = np.zeros(missing.size, dtype=bool)
+        for lo, hi in windows:
+            covered |= (missing >= lo) & (missing < hi)
+        out[k] = extra + int((~covered).sum())
+    return out

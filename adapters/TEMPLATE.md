@@ -30,9 +30,12 @@ class MyTagger:
 5. **Provenance.** `config()` returns the device settings the file or device
    reports, unmodified.
 6. **Declared capabilities.** Do not claim what the device cannot do.
-7. **Tests without hardware.** Run the accounting check
-   (`dadl.adapters.check_accounting`) against the adapter's output, as the
-   simulated tagger's tests do. Write fixtures with a small writer in the test
+7. **Tests without hardware.** A real device has no ground truth, so the rule
+   there is record accounting (tags + events = records read, rule 3) plus the
+   vendor's own loss flags (FIFO overrun, stop reasons, lost clocks) mapped to
+   typed `data-loss` events and `metadata["incomplete"]`. Against simulated
+   input, also run `dadl.adapters.check_accounting`, which compares tag times
+   with the simulator's truth. Write fixtures with a small writer in the test
    suite (see `python/tests/ptu_writer.py`) or record replay files, which are
    downloaded from release assets with hash checks rather than stored in git.
    Cross-check against an independent reader where one exists.

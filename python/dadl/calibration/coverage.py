@@ -13,8 +13,13 @@ point but 89% with fast afterpulsing (fixed in method v2).
 
 `pairs` covers three calibrations from one simulated pair acquisition per
 replicate (delay and jitter, accidentals, heralding efficiency), each with
-its own gate. Truths for accidentals and heralding come from the closed forms
-in `dadl.closed_form`.
+its own gate. The accidentals truth is each replicate's own expectation from
+its occupied slots; the heralding truth comes from the closed form in
+`dadl.closed_form` (checked against a pair-labelled simulation in the gated
+regimes; with slow afterpulsing or very high rates it is only approximate);
+delay, jitter, dark and DCR(T) truths are the injected parameters. The
+calibrations get the declared dead time and afterpulse time constant, as the
+CLI passes them.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import math
 import multiprocessing
 import os
 import sys
+import zlib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
@@ -36,6 +42,7 @@ from dadl.calibration.delay import calibrate_delay
 from dadl.calibration.heralding import calibrate_heralding
 from dadl.closed_form import accidentals_expected, arrhenius_dark_rate, heralding_ratio_expected
 from dadl.data import ChannelId
+from dadl.coincidences import occupied_slots
 from dadl.sim import DetectorParams, simulate_dark, simulate_pairs
 from dadl.stats import coverage_band
 
@@ -52,6 +59,19 @@ DARK_REGIMES: dict[str, tuple[DetectorParams, float]] = {
     # CMOS SPAD: strong, fast afterpulsing and a short dead time.
     "cmos-spad": (
         DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000, afterpulse_prob=0.2, afterpulse_tau_ps=20_000.0),
+        20.0,
+    ),
+    # The bundled chsh-spad detector over 60 s: weak afterpulsing (0.5%, about 150 afterpulses per
+    # run), the regime the quickstart points users to (referee review, cycle 8: 92% in 250 runs).
+    "example-spad": (
+        DetectorParams(dark_rate_cps=500.0, dead_time_ps=22_000, afterpulse_prob=0.005, afterpulse_tau_ps=50_000.0),
+        60.0,
+    ),
+    # Free-running InGaAs/InP: 10 us hold-off, 5% afterpulsing at 20 us (a 10 us cap on the time
+    # constant made these read "not detected"; applications review, cycle 6).
+    "ingaas-free-running": (
+        DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000_000, afterpulse_prob=0.05,
+                       afterpulse_tau_ps=20_000_000.0),
         20.0,
     ),
 }
@@ -75,6 +95,8 @@ class PairRegime:
     duration_s: float
     #: Gates that only require coverage of at least 95% (discrete counts too low for an exact 95%).
     at_least: frozenset[str] = field(default_factory=frozenset)
+    #: Calibrations not gated in this regime, with the reason recorded in the regime's comment.
+    skip: frozenset[str] = field(default_factory=frozenset)
 
 
 PAIR_REGIMES: dict[str, PairRegime] = {
@@ -89,6 +111,41 @@ PAIR_REGIMES: dict[str, PairRegime] = {
         200,
         2.0,
         frozenset({"accidentals"}),
+    ),
+    # Si SPADs with afterpulsing (3% at 50 ns): afterpulses after true pairs must not reach the
+    # off-peak windows (with the old 200 ns guard they biased the accidentals by +9%).
+    "afterpulsing-spad": PairRegime(
+        2e4,
+        DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=350.0, afterpulse_prob=0.03,
+                       afterpulse_tau_ps=50_000.0, delay_ps=0),
+        DetectorParams(efficiency=0.4, dark_rate_cps=2000.0, jitter_sigma_ps=200.0, afterpulse_prob=0.03,
+                       afterpulse_tau_ps=50_000.0, delay_ps=3_217),
+        2_000,
+        2.0,
+    ),
+    # Bright background on the signal arm (8 Mcps recorded, 18% dead; 0.2 s keeps the gate's run
+    # time in CI's budget): dead time makes the
+    # cross-correlation background step under the peak (a flat-background delay fit covered 52%)
+    # and the accidentals are large. Heralding is not gated here: at this dead fraction misses
+    # caused by dead time correlate with accidentals in the same slot, a limit the calibration
+    # notes; its per-slot algebra is gated in the ideal regime below.
+    "bright-background": PairRegime(
+        2e5,
+        DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=350.0, delay_ps=0),
+        DetectorParams(efficiency=0.4, dark_rate_cps=1e7, jitter_sigma_ps=200.0, delay_ps=3_217),
+        2_000,
+        0.2,
+        skip=frozenset({"heralding-efficiency"}),
+    ),
+    # High-rate SNSPD heralding (1 Mpairs/s, 20 ns dead time, eta 0.8): the signal arm's live
+    # fraction given a recorded herald exceeds its average by eta_a eta_b R tau = 1.3%, which the
+    # unconditional closed form missed (0/30 inside; statistician review, cycle 1).
+    "high-rate-snspd": PairRegime(
+        1e6,
+        DetectorParams(efficiency=0.8, dark_rate_cps=200.0, dead_time_ps=20_000, jitter_sigma_ps=30.0, delay_ps=0),
+        DetectorParams(efficiency=0.8, dark_rate_cps=200.0, dead_time_ps=20_000, jitter_sigma_ps=20.0, delay_ps=1_000),
+        500,
+        0.1,
     ),
     # Broad timing response (multimode fibre, slow detectors): sigma about 1.8 ns.
     "broad-irf": PairRegime(
@@ -119,6 +176,12 @@ DCR_DURATION_S = 10.0
 FALSE_FAIL = 0.001
 
 
+#: Key under which a result counts the replicates marked misfit, and the share allowed (the
+#: checks' nominal false-alarm rate is about 0.1-0.2%).
+MISFITS = "misfit status"
+MAX_MISFIT_SHARE = 0.01
+
+
 @dataclass(frozen=True)
 class CoverageResult:
     calibration: str
@@ -131,25 +194,34 @@ class CoverageResult:
     def fraction(self, name: str) -> float:
         return self.covered[name] / self.replicates
 
-    def passed(self) -> bool:
+    def _ok(self, name: str) -> bool:
+        if name == MISFITS:
+            return self.fraction(name) <= MAX_MISFIT_SHARE
         lo, hi = self.gate
-        return all(lo <= self.fraction(k) <= (1.0 if self.at_least else hi) for k in self.covered)
+        return lo <= self.fraction(name) <= (1.0 if self.at_least else hi)
+
+    def passed(self) -> bool:
+        return all(self._ok(k) for k in self.covered)
 
     def __str__(self) -> str:
         lo, hi = self.gate
         band = f"at least {lo:.1%}" if self.at_least else f"gate {lo:.1%}-{hi:.1%}"
         lines = [f"{self.calibration}: {self.replicates} replicates, {band}"]
         for k in self.covered:
-            f = self.fraction(k)
-            ok = lo <= f <= (1.0 if self.at_least else hi)
-            lines.append(f"  {k:<20} {f:.1%}  {'ok' if ok else 'FAIL'}")
+            note = f" (at most {MAX_MISFIT_SHARE:.0%})" if k == MISFITS else ""
+            lines.append(f"  {k:<20} {self.fraction(k):.1%}{note}  {'ok' if self._ok(k) else 'FAIL'}")
         return "\n".join(lines)
 
 
-def _children(seed: int, replicates: int, part: range | None):
-    """The SeedSequence of each replicate, child i of `seed`; `part` selects a subset of indices."""
+def _children(seed: int, replicates: int, part: range | None, regime: str = ""):
+    """The SeedSequence of each replicate, child (regime, i) of `seed`; `part` selects indices.
+
+    The regime enters the key so regimes draw independent streams (gate review, cycle 7: shared
+    streams correlated the results within a run).
+    """
+    key = zlib.crc32(regime.encode())
     for i in range(replicates) if part is None else part:
-        yield np.random.SeedSequence(seed, spawn_key=(i,))
+        yield np.random.SeedSequence(seed, spawn_key=(key, i))
 
 
 def gate(replicates: int, n_params: int) -> tuple[float, float]:
@@ -169,7 +241,7 @@ def dark_coverage(
     }
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in _children(seed, replicates, part):
+    for child in _children(seed, replicates, part, regime):
         sim_rng, fit_seed = child.spawn(2)
         tags = simulate_dark(det, duration_s, np.random.default_rng(sim_rng))
         cal = calibrate_dark(tags, channel, backend="sim", seed=fit_seed.generate_state(1)[0], n_draws=10)
@@ -185,11 +257,16 @@ def _covered(cal, truth: dict[str, float], covered: dict[str, int]) -> None:
         iv = cal.estimates.get(k)
         if iv is not None and iv.contains(v):
             covered[k] += 1
+    # Clean data must rarely be refused: the share marked misfit is gated too (final statistician
+    # review, cycle 10: 4% of good broad-IRF delay fits were misfits and the gates did not look).
+    covered[MISFITS] = covered.get(MISFITS, 0) + (cal.status == "misfit")
 
 
 def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
     r = PAIR_REGIMES[regime]
     a, b = r.a, r.b
+    ap_a = (a.afterpulse_prob, a.afterpulse_tau_ps * 1e-12)
+    ap_b = (b.afterpulse_prob, b.afterpulse_tau_ps * 1e-12)
     rate_a = a.efficiency * r.rate + a.dark_rate_cps
     rate_b = b.efficiency * r.rate + b.dark_rate_cps
     jitter = math.hypot(a.jitter_sigma_ps, b.jitter_sigma_ps)
@@ -197,13 +274,13 @@ def pairs_truth(regime: str = "cw-spad") -> dict[str, dict[str, float]]:
         "delay-jitter": {"delay_ps": float(b.delay_ps - a.delay_ps), "jitter_sigma_ps": jitter},
         "accidentals": {
             "accidental_coincidences": accidentals_expected(
-                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, r.width_ps, r.duration_s
+                rate_a, rate_b, a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, r.width_ps, r.duration_s, ap_a, ap_b
             )
         },
         "heralding-efficiency": {
             "heralding_efficiency": heralding_ratio_expected(
                 r.rate, a.efficiency, b.efficiency, a.dark_rate_cps, b.dark_rate_cps,
-                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, r.width_ps,
+                a.dead_time_ps * 1e-12, b.dead_time_ps * 1e-12, jitter, r.width_ps, ap_a, ap_b,
             )
         },
     }
@@ -215,24 +292,79 @@ def pairs_coverage(
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
     r = PAIR_REGIMES[regime]
     truth = pairs_truth(regime)
-    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items()}
+    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items() if kind not in r.skip}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
-    for child in _children(seed, replicates, part):
+    declared = {
+        "dead_time_ps": float(max(r.a.dead_time_ps, r.b.dead_time_ps)) or None,
+        "afterpulse_tau_ps": max(
+            (d.afterpulse_tau_ps for d in (r.a, r.b) if d.afterpulse_prob > 0), default=0.0
+        ) or None,
+    }
+    for child in _children(seed, replicates, part, regime):
         sim_rng, fit_seed = child.spawn(2)
         a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(sim_rng))
         s = int(fit_seed.generate_state(1)[0])
         delays = {"delay_a_ps": r.a.delay_ps, "delay_b_ps": r.b.delay_ps}
-        _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
-        _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), truth["accidentals"], covered["accidentals"])
-        her = calibrate_heralding(
-            a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **common
-        )
-        _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
+        if "delay-jitter" in covered:
+            _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
+        # The accidentals measurand is this acquisition's: it follows the realised singles, so the
+        # truth is n_a n_b W / T for the replicate (the long-run mean differs by the singles'
+        # Poisson scatter, which outweighs the interval at high rates). Counted in occupied slots,
+        # the unit the estimator counts in (tags differ from slots when dead time < W).
+        occ_a = occupied_slots(a, r.width_ps, r.a.delay_ps).size
+        occ_b = occupied_slots(b, r.width_ps, r.b.delay_ps).size
+        acc_truth = {"accidental_coincidences": occ_a * occ_b * r.width_ps * 1e-12 / r.duration_s}
+        if "accidentals" in covered:
+            _covered(
+                calibrate_accidentals(a, b, chs, seed=s, **delays, **declared, **common), acc_truth, covered["accidentals"]
+            )
+        if "heralding-efficiency" in covered:
+            her = calibrate_heralding(
+                a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **declared, **common
+            )
+            _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
     return [
         CoverageResult(f"{kind} [{regime}]", replicates, c, gate(replicates, len(c)), kind in r.at_least)
         for kind, c in covered.items()
     ]
+
+
+#: Ideal heralding regime: one herald per slot, its partner detected with probability ETA in the
+#: same slot, and an accidental with probability P_ACC in every slot, independently; no dead
+#: time. The exact truth is ETA, so this gates the per-slot algebra itself (method v2's
+#: (C - lambda)/S reads ETA (1 - P_ACC), about three interval half-widths low here).
+IDEAL_ETA = 0.5
+IDEAL_P_ACC = 0.05
+IDEAL_HERALDS = 20_000
+IDEAL_SPACING = 2_000
+
+
+def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
+    width = 1_000
+    covered = {"heralding_efficiency": 0}
+    chs = (ChannelId("sim", 0), ChannelId("sim", 1))
+    for child in _children(seed, replicates, part, "ideal-accidentals"):
+        sim_rng, fit_seed = child.spawn(2)
+        rng = np.random.default_rng(sim_rng)
+        # Heralds are sparse (one slot in IDEAL_SPACING) so that the shifted windows, which also
+        # see other heralds' partners, read p within 1/(2 IDEAL_SPACING) of IDEAL_P_ACC; with one
+        # herald in 20 slots they read 0.074 against 0.05, which the herald's own slot never sees.
+        span = IDEAL_SPACING * IDEAL_HERALDS
+        margin = 2_000
+        slots = np.sort(rng.choice(span, IDEAL_HERALDS, replace=False)) + margin
+        herald = slots * width + width // 2
+        partner = herald[rng.random(slots.size) < IDEAL_ETA] + 10
+        # Background: a Bernoulli process with probability IDEAL_P_ACC per slot (geometric gaps).
+        n_slots = span + 2 * margin
+        gaps = rng.geometric(IDEAL_P_ACC, int(n_slots * IDEAL_P_ACC * 1.2) + 1000)
+        bg_slots = np.cumsum(gaps) - 1
+        background = bg_slots[bg_slots < n_slots] * width + 300
+        signal = np.sort(np.concatenate([partner, background]))
+        cal = calibrate_heralding(herald, signal, chs, width_ps=width, guard_ps=200_000, backend="sim",
+                                  seed=int(fit_seed.generate_state(1)[0]), n_draws=10)
+        _covered(cal, {"heralding_efficiency": IDEAL_ETA}, covered)
+    return CoverageResult("heralding-efficiency [ideal-accidentals]", replicates, covered, gate(replicates, 1))
 
 
 def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
@@ -240,7 +372,7 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
     truth = {"dcr_ref_cps": DCR_REF_CPS, "activation_energy_ev": DCR_EA_EV}
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in _children(seed, replicates, part):
+    for child in _children(seed, replicates, part, "five-temperatures"):
         streams = child.spawn(len(DCR_TEMPS_K) + 1)
         darks = []
         for t_k, stream in zip(DCR_TEMPS_K, streams):
@@ -251,14 +383,18 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
                 calibrate_dark(tags, channel, backend="sim", seed=int(fit_seed.generate_state(1)[0]), n_draws=10,
                                conditions={"temperature_K": t_k})
             )
-        cal = calibrate_dcr_temperature(darks, reference_k=DCR_REF_K, seed=int(streams[-1].generate_state(1)[0]), n_draws=10)
+        # Every replicate counts, chance misfits among the inputs included (about 0.1% each).
+        cal = calibrate_dcr_temperature(
+            darks, reference_k=DCR_REF_K, seed=int(streams[-1].generate_state(1)[0]), n_draws=10,
+            accept_misfit_inputs=True,
+        )
         _covered(cal, truth, covered)
     return CoverageResult("dcr-temperature [five-temperatures]", replicates, covered, gate(replicates, len(truth)))
 
 
 UNITS: dict[str, tuple[str, ...]] = {
     "dark": tuple(DARK_REGIMES),
-    "pairs": tuple(PAIR_REGIMES),
+    "pairs": (*PAIR_REGIMES, "ideal-accidentals"),
     "dcr": ("five-temperatures",),
 }
 
@@ -271,6 +407,8 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
     name, regime, replicates, seed, part = args
     if name == "dark":
         return [dark_coverage(replicates, seed, regime, part)]
+    if name == "pairs" and regime == "ideal-accidentals":
+        return [heralding_ideal_coverage(replicates, seed, part)]
     if name == "pairs":
         return pairs_coverage(replicates, seed, regime, part)
     return [dcr_coverage(replicates, seed, part)]
@@ -278,12 +416,16 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
 
 def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
     first = parts[0]
-    covered = {k: sum(p.covered[k] for p in parts) for k in first.covered}
+    keys = dict.fromkeys(k for p in parts for k in p.covered)
+    covered = {k: sum(p.covered.get(k, 0) for p in parts) for k in keys}
     return CoverageResult(first.calibration, replicates, covered, first.gate, first.at_least)
 
 
-def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) -> list[CoverageResult]:
-    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all").
+def run(
+    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None
+) -> list[CoverageResult]:
+    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
+    the named `regimes` (CI splits the gate across runners this way).
 
     With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
     always uses child i of `seed`, so the result does not depend on `jobs`.
@@ -291,7 +433,10 @@ def run(name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1) 
     names = list(UNITS) if name == "all" else [name]
     if any(n not in UNITS for n in names):
         raise ValueError(f"unknown calibration {name!r}")
-    units = [(n, r) for n in names for r in UNITS[n]]
+    units = [(n, r) for n in names for r in UNITS[n] if regimes is None or r in regimes]
+    unknown = sorted(set(regimes or ()) - {r for _, r in units})
+    if unknown:
+        raise ValueError(f"unknown regime(s) {unknown} for {name!r}")
     if jobs <= 1:
         return [res for n, r in units for res in _unit((n, r, replicates, seed, None))]
     tasks = [
@@ -328,8 +473,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
     parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
+    parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the family)")
     args = parser.parse_args(argv)
-    results = run(args.calibration, args.replicates, args.seed, args.jobs)
+    results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes)
     for r in results:
         print(r)
     return 0 if all(r.passed() for r in results) else 1

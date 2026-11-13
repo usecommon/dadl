@@ -21,14 +21,15 @@ source:
   visibility: 0.92          # two-photon indistinguishability (dip depth)
   coherence_time_ps: 1.5    # dip shape exp(-(delay / coherence_time)^2)
 
-# Ground truth for the simulator. On hardware these become calibration targets.
+# Ground truth for the simulator. `family` is a label only: SNSPD recovery, timing tails
+# and latching are not modelled, and dark data cannot calibrate an SNSPD's dead time.
 detectors:
   A: &snspd
     family: snspd
     efficiency: 0.85
     dark_rate_cps: 100
     dead_time_ps: 30000
-    jitter_sigma_ps: 25
+    jitter_sigma_ps: 25   # Gaussian sigma (a datasheet FWHM is 2.355 sigma)
     afterpulse_prob: 0.0
     afterpulse_tau_ps: 50000
     delay_ps: 0

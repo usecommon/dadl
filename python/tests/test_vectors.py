@@ -20,6 +20,7 @@ ERRORS = {
     "NegativeDeadTime": (ValueError, None),
     "NonPositiveWidth": (ValueError, None),
     "Overflow": (OverflowError, None),
+    "TooManyBins": (ValueError, "bins"),
 }
 
 

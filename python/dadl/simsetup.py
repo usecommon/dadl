@@ -49,3 +49,23 @@ def simulate_setup_dark(setup: Setup, duration_s: float) -> dict:
     }
     empty = {name: np.empty(0, dtype=np.int64) for name in dark}
     return {key: (dark if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}
+
+
+def simulate_setup_heralding(setup: Setup, duration_s: float) -> dict:
+    """A heralding run: the pair source straight onto one detector per arm, no analysers or beamsplitter.
+
+    CHSH setups use A+ (herald) and B+ (signal); HOM setups use A and B. The
+    run is the first setting; the others are empty.
+    """
+    from dadl.sim import simulate_pairs
+
+    _require_sim(setup)
+    if not duration_s > 0:
+        raise DadlError("duration_s must be positive")
+    herald, signal = ("A", "B") if setup.analysis_type == "hom" else ("A+", "B+")
+    rng = np.random.default_rng(setup.seed)
+    a, b = simulate_pairs(setup.source.pair_rate_per_s, setup.detectors[herald], setup.detectors[signal], duration_s, rng)
+    run = {name: np.empty(0, dtype=np.int64) for name in setup.channels.values()}
+    run[herald], run[signal] = a, b
+    empty = {name: np.empty(0, dtype=np.int64) for name in run}
+    return {key: (run if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}

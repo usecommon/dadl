@@ -22,6 +22,11 @@ pub enum DadlError {
     NonPositiveWidth,
     /// Arithmetic on timestamps would leave the `i64` range.
     Overflow,
+    /// A histogram would need more than [`crate::histogram::MAX_BINS`] bins.
+    TooManyBins {
+        /// The number of bins requested.
+        n_bins: u64,
+    },
 }
 
 impl fmt::Display for DadlError {
@@ -33,6 +38,11 @@ impl fmt::Display for DadlError {
             DadlError::NegativeDeadTime => write!(f, "dead time must be non-negative"),
             DadlError::NonPositiveWidth => write!(f, "width must be positive"),
             DadlError::Overflow => write!(f, "timestamp arithmetic would leave the i64 range"),
+            DadlError::TooManyBins { n_bins } => write!(
+                f,
+                "a histogram of {n_bins} bins exceeds the limit of {} bins",
+                crate::histogram::MAX_BINS
+            ),
         }
     }
 }

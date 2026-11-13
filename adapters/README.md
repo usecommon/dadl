@@ -6,9 +6,9 @@ reported as a typed event.
 
 | Adapter | Status | Module |
 | --- | --- | --- |
-| PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available on `main` (phase 2) | `dadl.adapters.ptu` |
+| PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available (0.1.0) | `dadl.adapters.ptu` |
 | PicoQuant T3 mode | Planned | |
-| Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available on `main` (phase 2) | `dadl.adapters.simdevice` |
+| Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available (0.1.0) | `dadl.adapters.simdevice` |
 | Swabian Instruments, qutools, IDQ | Seeking contributors | |
 
 ```python
@@ -30,6 +30,8 @@ With no instrument at hand, DADL can stand in for one:
 
 ```bash
 dadl simulate chsh-spad --out run/ --format ptu --device hydraharp   # setting0.ptu ... setting3.ptu
+# devices: hydraharp, multiharp (5 ps), multiharp150n (80 ps), picoharp and timeharp260p
+# (two inputs: the HOM example only)
 dadl analyze chsh-spad --tags run/                                    # read through the PTU adapter
 ```
 
@@ -40,8 +42,15 @@ DADL marks them simulated, and calibrations from them are recorded with
 `backend: sim`.
 
 `SimulatedTagger` emulates a live device: it streams batches and injects
-faults, each reported as an event. `check_accounting` checks the rule every
-adapter must meet: tags delivered plus tags reported lost equal tags generated.
+faults, each reported as an event. `check_accounting` compares the delivered
+tag times with the simulator's truth: every tag is either delivered or inside
+a window reported lost, with no extras or duplicates. A real device has no
+truth to compare with; there the rule is record accounting plus the vendor's
+loss flags (see [TEMPLATE.md](TEMPLATE.md), rule 7).
+
+PTU files stopped by a FIFO overrun, transfer failure or lost clock
+(`TTResult_StopReason`) are marked incomplete and refused by the CLI, and the
+duration is taken from the data, not the requested acquisition time.
 
 ```python
 from dadl import load_setup

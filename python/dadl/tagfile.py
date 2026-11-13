@@ -21,6 +21,7 @@ exporting to one of these.
 
 from __future__ import annotations
 
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -48,23 +49,36 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
     settings = tuple(settings)
     if path.is_dir():
         return _read_ptu_dir(path, channels, settings)
+    if path.exists() and not path.is_file():
+        raise ConfigError(f"{path}: not a regular file")
     try:
         if path.suffix == ".npz":
+            _check_npz_size(path)
             with np.load(path, allow_pickle=False) as npz:
                 missing = [c for c in COLUMNS if c not in npz.files]
                 if missing:
                     raise ConfigError(f"{path}: missing array(s) {missing}; need {list(COLUMNS)}")
                 cols = {c: npz[c] for c in COLUMNS}
         elif path.suffix == ".csv":
-            with path.open(encoding="utf-8") as fh:
-                header = [h.strip() for h in fh.readline().split(",")]
+            # utf-8-sig: Excel's "CSV UTF-8" starts with a byte-order mark.
+            with path.open(encoding="utf-8-sig") as fh:
+                first = fh.readline()
+                skip = 1
+                if first.strip() == SIMULATED_CSV_MARK:
+                    first, skip = fh.readline(), 2
+                header = [h.strip() for h in first.split(",")]
             if header != list(COLUMNS):
                 raise ConfigError(f"{path}: header must be {','.join(COLUMNS)}, got {','.join(header)}")
             # Read as text and check every cell is an integer: some NumPy versions
             # silently truncate "1.5" when asked for int64 directly.
-            text = np.loadtxt(path, delimiter=",", skiprows=1, dtype=str, ndmin=2)
+            text = np.loadtxt(path, delimiter=",", skiprows=skip, dtype=str, ndmin=2, encoding="utf-8-sig")
             if text.size:
                 text = np.char.strip(text)
+                # ASCII only: str.isdigit and int() accept full-width digits (archivist review).
+                try:
+                    text.astype(np.bytes_)
+                except UnicodeEncodeError as exc:
+                    raise ConfigError(f"{path}: non-ASCII characters in the tag columns") from exc
                 digits = np.char.isdigit(np.char.lstrip(text, "+-"))
                 if not digits.all():
                     row, col = map(int, np.argwhere(~digits)[0])
@@ -79,7 +93,11 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
             raise ConfigError(f"{path}: tag files must be .npz or .csv")
     except FileNotFoundError as exc:
         raise ConfigError(f"tag file not found: {path}") from exc
-    except ValueError as exc:
+    except PermissionError as exc:
+        raise ConfigError(f"cannot read {path}: permission denied") from exc
+    except (zipfile.BadZipFile, EOFError) as exc:
+        raise ConfigError(f"{path}: not a readable .npz file (truncated or corrupt): {exc}") from exc
+    except (ValueError, OverflowError) as exc:
         raise ConfigError(f"{path}: cannot parse as integer columns: {exc}") from exc
 
     try:
@@ -100,16 +118,61 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
     runs: Runs = {}
     for i, pair in enumerate(settings):
         in_setting = setting == i
-        runs[pair] = {
-            name: np.sort(stamps[in_setting & (channel == num)]) for num, name in channels.items()
-        }
+        runs[pair] = {}
+        for num, name in channels.items():
+            arr = stamps[in_setting & (channel == num)]
+            # Each channel's tags must already be in time order in the file: sorting them hid a
+            # tagger clock reset, which read as one overlapping run at twice the rate (operator
+            # review, cycle 8).
+            back = np.flatnonzero(np.diff(arr) < 0)
+            if back.size:
+                raise ConfigError(
+                    f"{path}: channel {name} of acquisition {pair}: timestamps go back in time "
+                    f"({int(arr[back[0]])} then {int(arr[back[0] + 1])} ps). A tagger clock reset, or files "
+                    "joined out of order? Split the acquisition at the reset; DADL does not sort tags."
+                )
+            runs[pair][name] = arr
     return runs
 
 
+#: Largest decompressed size, and compression ratio, accepted for a .npz tag file: a 584 KB file
+#: of zeros decompressed to 1.2 GB (security review, cycle 9). Tag columns compress about 2-4x.
+MAX_NPZ_BYTES = 16 * 2**30
+MAX_NPZ_RATIO = 200
+
+
+def _check_npz_size(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ConfigError(f"{path}: not a readable .npz file (truncated or corrupt): {exc}") from exc
+    total = sum(i.file_size for i in infos)
+    packed = sum(i.compress_size for i in infos) or 1
+    if total > MAX_NPZ_BYTES or (total > 2**26 and total / packed > MAX_NPZ_RATIO):
+        raise ConfigError(
+            f"{path}: decompresses to {total} bytes ({total / packed:.0f}x its stored size); refused as a likely "
+            f"decompression bomb (limits {MAX_NPZ_BYTES} bytes, {MAX_NPZ_RATIO}x above 64 MiB)"
+        )
+
+
+#: First line of a CSV tag file written from a simulation.
+SIMULATED_CSV_MARK = "# dadl-simulated"
+
+
 def write_tags(
-    path: str | Path, runs: Runs, channels: dict[int, str] | None = None, settings: Sequence = SETTING_PAIRS
+    path: str | Path,
+    runs: Runs,
+    channels: dict[int, str] | None = None,
+    settings: Sequence = SETTING_PAIRS,
+    *,
+    simulated: bool,
 ) -> Path:
-    """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`)."""
+    """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`).
+
+    `simulated` is required: a read-trim-write round trip must not drop the marking (red-team
+    review, cycle 5). Simulated CSV files start with the line `# dadl-simulated`.
+    """
     path = Path(path)
     channels = channels or dict(enumerate(CHANNELS))
     number = {name: num for num, name in channels.items()}
@@ -121,9 +184,11 @@ def write_tags(
     table = np.concatenate(parts) if parts else np.empty((0, 3), dtype=np.int64)
     table = table[np.lexsort((table[:, 2], table[:, 1], table[:, 0]))]
     if path.suffix == ".npz":
-        np.savez_compressed(path, **{c: table[:, i] for i, c in enumerate(COLUMNS)})
+        extra = {"dadl_simulated": np.array(True)} if simulated else {}
+        np.savez_compressed(path, **{c: table[:, i] for i, c in enumerate(COLUMNS)}, **extra)
     elif path.suffix == ".csv":
-        np.savetxt(path, table, fmt="%d", delimiter=",", header=",".join(COLUMNS), comments="")
+        header = (SIMULATED_CSV_MARK + "\n" if simulated else "") + ",".join(COLUMNS)
+        np.savetxt(path, table, fmt="%d", delimiter=",", header=header, comments="")
     else:
         raise ConfigError(f"{path}: tag files must be .npz or .csv")
     return path
@@ -141,16 +206,40 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
     runs: Runs = {}
     for i, key in enumerate(settings):
         path = ptu_file(directory, i)
-        if not path.exists():
+        if not path.is_file():
             raise ConfigError(f"{directory}: missing {path.name} (one PTU file per acquisition, setting0.ptu, ...)")
         try:
-            tagset = PtuFile(path).read()
+            reader = PtuFile(path)
+            tagset = reader.read()
         except AdapterError as exc:
             raise ConfigError(str(exc)) from exc
+        unknown_records = reader.record_counts().get("unknown", 0)
+        if unknown_records:
+            # Tagger engineer review, cycle 2: 1000 unrecognised special records were dropped
+            # silently and the analysis printed S as normal.
+            raise ConfigError(
+                f"{path}: {unknown_records} special records of an unrecognised kind; DADL does not analyse files "
+                "it cannot fully account for. Inspect them with dadl.adapters.PtuFile(path).events()."
+            )
+        divided = [e.value for e in reader.events() if e.kind == "sync-divider"]
+        if divided and 0 in channels:
+            raise ConfigError(
+                f"{path}: input 0 (sync) is divided by {divided[0]} (HWSync_Divider) but is mapped to "
+                f"channel {channels[0]!r}; a divided input records one event in {divided[0]} and cannot be a detector"
+            )
+        if tagset.metadata.get("incomplete"):
+            raise ConfigError(
+                f"{path}: the acquisition lost data ({tagset.metadata.get('data_loss')}, from TTResult_StopReason); "
+                "DADL does not analyse incomplete files. Read it with dadl.adapters.PtuFile to inspect it."
+            )
         by_input = {ch.input: tagset[ch] for ch in tagset.channels}
         unknown = sorted(set(by_input) - set(channels))
         if unknown:
-            raise ConfigError(f"{path}: inputs {unknown} are not in the setup's channel map")
+            raise ConfigError(
+                f"{path}: inputs {unknown} are not in the setup's channel map. On HydraHarp, MultiHarp and "
+                "TimeHarp 260 files input 0 is the sync input and detector inputs are numbered from 1 (as in "
+                "PicoQuant's software); map them under `channels:` in setup.yaml"
+            )
         runs[key] = {name: by_input.get(num, np.empty(0, dtype=np.int64)) for num, name in channels.items()}
     return runs
 
@@ -190,12 +279,73 @@ def write_ptu_dir(
     return out
 
 
-def tags_are_simulated(path: str | Path) -> bool:
-    """True for a folder of PTU files written by DADL's simulator (their header says so)."""
+def tag_tick_ps(path: str | Path) -> int | None:
+    """The tagger tick in whole ps for a folder of PTU files (from the header), else None."""
     path = Path(path)
     if not path.is_dir():
-        return False
-    from dadl.adapters.ptu import parse_header
+        return None
+    from dadl.adapters.ptu import PtuFile
 
     files = sorted(path.glob("setting*.ptu"))
-    return bool(files) and all(parse_header(f.read_bytes()[:65536])[0].get("DADL_Simulated") is True for f in files)
+    if not files:
+        return None
+    res = PtuFile(files[0]).resolution_s * 1e12
+    whole = round(res)
+    return whole if whole >= 1 and abs(res - whole) <= 1e-9 * res else None
+
+
+#: PTU header entries that define where a tag lands in time: input offsets, trigger/CFD levels and
+#: edges, dead-time settings, sync offset and divider, and the tick.
+TAGGER_SETTING_PREFIXES = ("HWInpChan_", "HWSync_", "HW_InpChannels", "MeasDesc_GlobalResolution", "HW_ExternalRefClock")
+
+
+def tagger_settings(path: str | Path) -> dict[str, float]:
+    """Numeric tagger settings from a folder of PTU files, for an artifact's `conditions`.
+
+    A calibrated delay holds only while these stay as they were (tagger engineer review, cycle 2:
+    input offsets and trigger levels were never recorded). Files of one folder must agree.
+    """
+    path = Path(path)
+    if not path.is_dir():
+        return {}
+    from dadl.adapters.ptu import PtuFile
+
+    found: dict[str, float] | None = None
+    for f in sorted(path.glob("setting*.ptu")):
+        header = PtuFile(f).header
+        settings = {
+            f"tagger_{k}": float(v)
+            for k, v in sorted(header.items())
+            if k.startswith(TAGGER_SETTING_PREFIXES) and isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        if found is None:
+            found = settings
+        elif settings != found:
+            changed = sorted(k for k in set(found) | set(settings) if found.get(k) != settings.get(k))
+            raise ConfigError(f"{path}: the tagger settings differ between files ({', '.join(changed[:5])})")
+    return found or {}
+
+
+def tags_are_simulated(path: str | Path) -> bool:
+    """True when the tags were written by DADL's simulator: a folder of PTU files whose headers say
+    so, or an .npz written by `write_tags` with simulated=True.
+
+    A folder mixing simulated and recorded files is refused: its provenance cannot be one label.
+    """
+    path = Path(path)
+    if path.suffix == ".npz" and path.is_file():
+        with np.load(path, allow_pickle=False) as npz:
+            return "dadl_simulated" in npz.files and bool(npz["dadl_simulated"])
+    if path.suffix == ".csv" and path.is_file():
+        with path.open(encoding="utf-8-sig") as fh:
+            return fh.readline().strip() == SIMULATED_CSV_MARK
+    if not path.is_dir():
+        return False
+    from dadl.adapters.ptu import PtuFile
+
+    files = sorted(path.glob("setting*.ptu"))
+    headers = [PtuFile(f).header for f in files]
+    flags = {h.get("DADL_Simulated") is True or h.get("CreatorSW_Name") == "DADL" for h in headers}
+    if len(flags) > 1:
+        raise ConfigError(f"{path} mixes simulated and recorded PTU files; keep them in separate folders")
+    return bool(files) and flags == {True}

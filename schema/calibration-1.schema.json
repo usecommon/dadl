@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/usecommon/dadl/main/schema/calibration-1.schema.json",
-  "title": "DADL calibration artifact manifest, version 1 (draft)",
-  "description": "DRAFT: may change until phase 2 produces real artifacts. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
+  "$id": "https://raw.githubusercontent.com/usecommon/dadl/v0.1.0/schema/calibration-1.schema.json",
+  "title": "DADL calibration artifact manifest, version 1",
+  "description": "Frozen at DADL 0.1.0: later versions may add optional fields; changing existing ones needs calibration/2. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -47,11 +47,19 @@
         "properties": {
           "device": {
             "type": "string",
-            "description": "Device serial or simulator ID"
+            "description": "Tagger serial (e.g. HydraHarp-1234567), or 'sim' for simulated data"
           },
           "input": {
             "type": "integer",
             "minimum": 0
+          },
+          "role": {
+            "type": "string",
+            "description": "The setup's name for the channel (e.g. A+); a label, not an identity"
+          },
+          "detector": {
+            "type": "string",
+            "description": "Serial of the detector cabled to this input"
           }
         }
       }
@@ -78,7 +86,7 @@
       "pattern": "Z$"
     },
     "valid_for": {
-      "description": "Time range and conditions the artifact may be applied to. Datasets outside it are refused unless overridden.",
+      "description": "Intended time range and conditions for the artifact. Recorded only: DADL does not yet enforce it.",
       "type": "object",
       "properties": {
         "from": {
@@ -123,8 +131,14 @@
               "histogram",
               "telemetry",
               "config",
-              "previous-artifact"
-            ]
+              "previous-artifact",
+              "raw-file"
+            ],
+            "description": "raw-tags: hash of one channel's int64 tag array (little-endian); raw-file: hash of an input file's bytes; config: hash of the setup file."
+          },
+          "name": {
+            "type": "string",
+            "description": "File name or channel the hash refers to."
           }
         }
       }
@@ -167,6 +181,36 @@
             "type": "string"
           },
           "minItems": 1
+        },
+        "stand_in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Draw columns that are conservative stand-ins (e.g. uniform below an upper limit), not posterior draws; not to be propagated as a posterior."
+        }
+      }
+    },
+    "uncertainty": {
+      "description": "What the intervals include and leave out. DADL intervals are statistical (counting) only.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "validation": {
+          "type": "string"
+        },
+        "not_included": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -184,6 +228,13 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        },
+        "status": {
+          "description": "ok, or misfit when the posterior predictive check fails (p below 0.001): the model does not describe the data and the intervals must not be used.",
+          "enum": [
+            "ok",
+            "misfit"
+          ]
         },
         "prior_dominated_params": {
           "type": "array",
@@ -234,6 +285,15 @@
             },
             "additionalProperties": false
           }
+        },
+        "numpy": {
+          "type": "string"
+        },
+        "scipy": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -273,7 +333,11 @@
         ],
         "properties": {
           "value": {
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Point estimate; null for a parameter reported only as a bound."
           },
           "low": {
             "type": "number"
@@ -287,7 +351,18 @@
             "exclusiveMaximum": 1
           },
           "unit": {
-            "type": "string"
+            "type": "string",
+            "description": "UCUM unit (ps, s-1, 1, eV, {count})."
+          },
+          "bound": {
+            "enum": [
+              "upper"
+            ],
+            "description": "Present when only an upper limit is reported: the interval is [low, high] = [0, limit]."
+          },
+          "definition": {
+            "type": "string",
+            "description": "What the parameter is (the unit alone does not say)."
           }
         }
       }
@@ -305,6 +380,19 @@
       "items": {
         "type": "string"
       }
+    },
+    "acquired": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the data were acquired, in UTC (declared with --acquired, which needs an offset). A tagger file's local creation time goes in instrument.file_created_local.",
+      "pattern": "Z$"
+    },
+    "instrument": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Instrument identification as reported by the tagger file: model, serial, firmware."
     }
   }
 }

@@ -28,17 +28,21 @@ from collections.abc import Sequence
 import numpy as np
 from scipy import stats as _st
 
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import N_DRAWS, Calibration, draws_rng
 from dadl.calibration.dark import KIND as DARK_KIND
 from dadl.closed_form import K_B_EV
 from dadl.stats import LEVEL, Laplace
 
 KIND = "dcr-temperature"
 METHOD = "arrhenius-wls"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 MIN_TEMPERATURES = 3
 
-UNITS = {"dcr_ref_cps": "1/s", "activation_energy_ev": "eV"}
+UNITS = {"dcr_ref_cps": "s-1", "activation_energy_ev": "eV"}
+DEFINITIONS = {
+    "dcr_ref_cps": "dark count rate at the reference temperature (Arrhenius fit)",
+    "activation_energy_ev": "Arrhenius activation energy of the dark count rate",
+}
 
 
 def calibrate_dcr_temperature(
@@ -47,9 +51,20 @@ def calibrate_dcr_temperature(
     reference_k: float | None = None,
     seed: int | None = None,
     n_draws: int = N_DRAWS,
+    accept_misfit_inputs: bool = False,
 ) -> Calibration:
-    """Fit DCR_ref (at `reference_k`) and the activation energy from dark calibrations at several temperatures."""
+    """Fit DCR_ref (at `reference_k`) and the activation energy from dark calibrations at several temperatures.
+
+    Misfit dark calibrations are refused unless `accept_misfit_inputs` (applications review, cycle
+    6: two misfit cold runs pulled Ea to 0.280 [0.278, 0.282] for a true 0.30).
+    """
     darks = list(darks)
+    bad = [f"{d.conditions.get('temperature_K', '?')} K" for d in darks if d.status == "misfit"]
+    if bad and not accept_misfit_inputs:
+        raise ValueError(
+            f"the dark calibrations at {', '.join(bad)} are misfits; their dark rates are not reliable. "
+            "Pass accept_misfit_inputs=True to fit them anyway."
+        )
     if len(darks) < MIN_TEMPERATURES:
         raise ValueError(f"need dark calibrations at {MIN_TEMPERATURES} or more temperatures, got {len(darks)}")
     for d in darks:
@@ -64,6 +79,22 @@ def calibrate_dcr_temperature(
     if len(backends) != 1:
         raise ValueError("cannot mix simulated and hardware calibrations")
 
+    bias_keys = sorted({k for d in darks for k in d.conditions if k.startswith("bias")})
+    current = [k for k in bias_keys if not k.endswith(("_V", "_mV", "_kV"))]
+    if current:
+        # SNSPD specialist review: SNSPDs are current-biased and their dark counts are not
+        # thermally activated; an Arrhenius fit gave Ea = 0.0007 eV with a tight interval.
+        raise ValueError(
+            f"the dark calibrations record a bias current ({', '.join(current)}): DCR(T) is an Arrhenius model "
+            "for voltage-biased SPADs, not for current-biased detectors such as SNSPDs"
+        )
+    for key in bias_keys:
+        values = {d.conditions.get(key) for d in darks}
+        if len(values) > 1:
+            raise ValueError(
+                f"the dark calibrations were taken at different {key} {sorted(str(v) for v in values)}: at fixed "
+                "temperature the dark rate depends on bias, so an Arrhenius fit across them is not meaningful"
+            )
     temps = np.array([float(d.conditions["temperature_K"]) for d in darks])
     if np.any(temps <= 0):
         raise ValueError("temperature_K must be positive (kelvin)")
@@ -88,7 +119,21 @@ def calibrate_dcr_temperature(
     chi2 = float(np.sum(w * resid**2))
     dof = len(darks) - 2
 
-    rng = np.random.default_rng(seed)
+    notes = [
+        f"{len(darks)} dark calibrations from {temps.min():g} K to {temps.max():g} K; chi-square {chi2:.3g} on {dof} dof",
+        f"valid from {temps.min():g} K to {temps.max():g} K only: outside the scan other mechanisms (trap-assisted "
+        "tunnelling) can dominate and an Arrhenius extrapolation can be several times off",
+        "an effective activation energy at constant bias, for SPADs; not meaningful for SNSPDs",
+    ]
+    if bad:
+        notes.append(f"misfit dark calibrations were accepted as inputs ({', '.join(bad)})")
+    few = [d.conditions.get("gaps") for d in darks if d.conditions.get("gaps") is not None and d.conditions["gaps"] < 100]
+    if few:
+        notes.append(
+            f"{len(few)} input(s) had fewer than 100 dark gaps: near the 20-gap minimum, runs that pass are biased "
+            "upward (and re-acquiring until one passes biases more); prefer longer cold acquisitions"
+        )
+    rng = draws_rng(seed, *(i[0] for d in darks for i in d.inputs))
     draws = laplace.draws(rng, n_draws)
     inputs = tuple(dict.fromkeys(i for d in darks for i in d.inputs))
     return Calibration(
@@ -101,14 +146,20 @@ def calibrate_dcr_temperature(
             "activation_energy_ev": laplace.interval(1, lambda v: v),
         },
         units=dict(UNITS),
+        definitions=dict(DEFINITIONS),
         samples=np.column_stack([np.exp(draws[:, 0]), draws[:, 1]]),
         sample_params=("dcr_ref_cps", "activation_energy_ev"),
         converged=True,
         ppc_pvalue=float(_st.chi2.sf(chi2, dof)),
         inputs=inputs,
         backend=next(iter(backends)),
-        conditions={"reference_K": t_ref},
-        notes=(f"{len(darks)} dark calibrations from {temps.min():g} K to {temps.max():g} K; chi-square {chi2:.3g} on {dof} dof",),
+        conditions={
+            "reference_K": t_ref,
+            "temperature_min_K": float(temps.min()),
+            "temperature_max_K": float(temps.max()),
+            **{k: float(darks[0].conditions[k]) for k in bias_keys if k in darks[0].conditions},
+        },
+        notes=tuple(notes),
     )
 
 

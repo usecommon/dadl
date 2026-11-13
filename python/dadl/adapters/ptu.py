@@ -8,7 +8,7 @@ Supported record types (T2: every event carries its absolute time):
 | --- | --- | --- |
 | PicoHarp 300 | 0x00010203 | 210698240 |
 | HydraHarp, format v1 | 0x00010204 | 33552000 |
-| HydraHarp v2, TimeHarp 260 N/P, MultiHarp | 0x01010204, 0x00010205, 0x00010206, 0x00010207 | 33554432 x count |
+| HydraHarp v2, TimeHarp 260 N/P, generic T2 (MultiHarp, PicoHarp 330) | 0x01010204, 0x00010205, 0x00010206, 0x00010207 | 33554432 x count |
 
 T3 files (times relative to a sync pulse) are refused with a clear error.
 
@@ -21,8 +21,18 @@ that is a whole number of ps (1, 4, 5, 80 ps, ...) the conversion is exact
 integer arithmetic; otherwise tags are rounded to the nearest ps and a note
 says so.
 
-The whole file is read into memory (about 50 bytes per record while
-decoding); chunked reading for very large files is planned.
+The whole record body is decoded in memory: about 100 bytes per record at
+peak (a 160 MB file took 4.2 GB; with markers about 215 bytes per record).
+Chunked reading for very large files is planned. Metadata checks read the
+header only.
+
+Data loss: PicoQuant reports how an acquisition ended in
+`TTResult_StopReason`. Codes for lost data (3 error, -2 FIFO overrun, -9 queue
+overrun, -10 transfer failure, -12 reference clock lost, -13 sync lost, and
+any other negative code) become a `data-loss` event and mark the TagSet
+`incomplete`; 0 (time over), 1 (manual stop) and 2 (count overflow stop) end a
+complete acquisition. The duration comes from the data (last record time),
+not from `MeasDesc_AcquisitionTime`, which is the requested time.
 
 Every record is accounted for: tags, rollovers, markers and unrecognised
 special records add up to `TTResult_NumberOfRecords`, and a file shorter or
@@ -64,6 +74,19 @@ HYDRAHARP2_T2 = 0x01010204
 TIMEHARP260N_T2 = 0x00010205
 TIMEHARP260P_T2 = 0x00010206
 MULTIHARP_T2 = 0x00010207
+#: TTResult_StopReason values that end a complete acquisition; any other value means data were lost.
+COMPLETE_STOP_REASONS = {0: "time over", 1: "manual stop", 2: "count overflow stop"}
+STOP_REASON_NAMES = {3: "error", -2: "FIFO overrun", -9: "queue overrun", -10: "data transfer failure",
+                     -12: "reference clock lost", -13: "sync lost"}
+#: PicoHarp 300 T2 channel values: 0 is the sync input (Ch0), 1-4 are Ch1 through a PHR router
+#: (channel 1 without one). PicoQuant's T2 demo code treats channel > 4 as illegal.
+PICOHARP_MAX_INPUT = 4
+
+#: Header bytes read first; a longer header is read on in steps.
+HEADER_CHUNK = 1 << 16
+#: More inputs than any PicoQuant device has; a larger HW_InpChannels is a corrupt header.
+MAX_HEADER_INPUTS = 256
+
 T3_TYPES = {0x00010303, 0x00010304, 0x01010304, 0x00010305, 0x00010306, 0x00010307}
 
 PICOHARP_WRAP = 210_698_240
@@ -156,6 +179,9 @@ def _decode(records: np.ndarray, family: str, wrap: int) -> tuple[np.ndarray, np
         is_tag = ~sp | sync
         tag_input = np.where(sync, 0, ch + 1)
         marker_bits = ch
+    # A crafted file of maximal overflow records wrapped the int64 sum silently (QKD review, cycle 4).
+    if incr.size and float(np.sum(incr, dtype=np.float64)) + float(wrap) >= float(np.iinfo(np.int64).max):
+        raise AdapterError("PTU overflow records exceed the int64 tick range")
     offset = np.cumsum(incr, dtype=np.int64)
     time = offset + tt
     extra = {
@@ -185,20 +211,34 @@ class PtuFile:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        # Only the header is read here; `read` loads the records. Metadata checks (simulated
+        # flag, tick, serial) used to read whole files several times each (tagger engineer
+        # review, cycle 2).
         try:
-            self._data = self.path.read_bytes()
+            with self.path.open("rb") as fh:
+                head = fh.read(HEADER_CHUNK)
+                while True:
+                    try:
+                        self.header, self._offset = parse_header(head)
+                        break
+                    except AdapterError as exc:
+                        more = fh.read(len(head))
+                        if not more or "truncated" not in str(exc) and "beyond the end" not in str(exc):
+                            raise
+                        head += more
         except OSError as exc:
             raise AdapterError(f"cannot read {self.path}: {exc}") from exc
-        self.header, self._offset = parse_header(self._data)
         rtype = self.header.get("TTResultFormat_TTTRRecType")
+        if not isinstance(rtype, int) or isinstance(rtype, bool):
+            raise AdapterError(f"{self.path}: TTResultFormat_TTTRRecType must be an integer, got {rtype!r}")
         if rtype in T3_TYPES:
             raise AdapterError(f"{self.path}: T3 mode (record type 0x{rtype:08X}) is not supported; record in T2 mode")
         if rtype not in FORMATS:
             raise AdapterError(f"{self.path}: unsupported PTU record type {rtype!r}")
         self.record_type = int(rtype)
         res = self.header.get("MeasDesc_GlobalResolution")
-        if not isinstance(res, float) or not res > 0:
-            raise AdapterError(f"{self.path}: MeasDesc_GlobalResolution is missing or not positive")
+        if not isinstance(res, float) or not 1e-15 <= res <= 1e-6:
+            raise AdapterError(f"{self.path}: MeasDesc_GlobalResolution is missing or outside 1 fs - 1 us")
         self.resolution_s = res
         self._events: tuple[Event, ...] = ()
         self._counts: dict[str, int] = {}
@@ -207,8 +247,8 @@ class PtuFile:
         family = FORMATS[self.record_type][0]
         n_inputs = self.header.get("HW_InpChannels")
         if family == "picoharp":
-            channels = (0, 1)
-        elif isinstance(n_inputs, int) and n_inputs > 0:
+            channels = tuple(range(PICOHARP_MAX_INPUT + 1))
+        elif isinstance(n_inputs, int) and 0 < n_inputs <= MAX_HEADER_INPUTS:
             # As the header reports it; check against the inputs that carry tags after `read`.
             channels = tuple(range(n_inputs))
         else:
@@ -239,18 +279,22 @@ class PtuFile:
         n_records = self.header.get("TTResult_NumberOfRecords")
         if not isinstance(n_records, int) or n_records < 0:
             raise AdapterError(f"{self.path}: TTResult_NumberOfRecords is missing")
-        body = self._data[self._offset :]
-        if len(body) != 4 * n_records:
+        body_bytes = self.path.stat().st_size - self._offset
+        if body_bytes != 4 * n_records:
             raise AdapterError(
                 f"{self.path}: header says {n_records} records ({4 * n_records} bytes) but the file holds "
-                f"{len(body)} bytes of records; the file is truncated or has trailing data"
+                f"{body_bytes} bytes of records; the file is truncated or has trailing data"
             )
-        records = np.frombuffer(body, dtype="<u4")
+        records = np.fromfile(self.path, dtype="<u4", count=n_records, offset=self._offset)
         family, wrap = FORMATS[self.record_type]
         ticks, inputs, extra = _decode(records, family, wrap)
         ps, exact = _to_ps(ticks, self.resolution_s)
         marker_ps, _ = _to_ps(extra["marker_times"], self.resolution_s)
 
+        if family == "picoharp" and inputs.size and int(inputs.max()) > PICOHARP_MAX_INPUT:
+            raise AdapterError(
+                f"{self.path}: PicoHarp T2 record on input {int(inputs.max())}; valid inputs are 0-{PICOHARP_MAX_INPUT}"
+            )
         info = self.describe()
         device = info.model if info.serial is None else f"{info.model}-{info.serial}"
         tags: dict[ChannelId, np.ndarray] = {}
@@ -266,8 +310,25 @@ class PtuFile:
         if extra["unknown"]:
             events.append(Event("unknown-special", value=extra["unknown"]))
         stop = self.header.get("TTResult_StopReason")
+        incomplete = False
+        if stop is None:
+            # QKD review, cycle 4: without a stop reason, completeness is unknown, not assured.
+            events.append(Event("stop-reason", detail={"reason": "not recorded: completeness unknown"}))
         if stop is not None:
-            events.append(Event("stop-reason", value=int(stop), detail={"note": "vendor code, recorded as is"}))
+            if not isinstance(stop, int) or isinstance(stop, bool):
+                raise AdapterError(f"{self.path}: TTResult_StopReason must be an integer, got {stop!r}")
+            if stop in COMPLETE_STOP_REASONS:
+                events.append(Event("stop-reason", value=stop, detail={"reason": COMPLETE_STOP_REASONS[stop]}))
+            else:
+                incomplete = True
+                events.append(Event("data-loss", value=stop, detail={
+                    "reason": STOP_REASON_NAMES.get(stop, "unrecognised stop reason"),
+                    "source": "TTResult_StopReason",
+                }))
+        divider = self.header.get("HWSync_Divider")
+        if isinstance(divider, int) and divider > 1 and any(ch.input == 0 for ch in tags) and family != "picoharp":
+            events.append(Event("sync-divider", value=divider,
+                                detail={"note": "input 0 (sync) is divided: it records one event in every " f"{divider}"}))
         self._events = tuple(events)
         self._counts = {
             "tags": int(ticks.size),
@@ -277,8 +338,9 @@ class PtuFile:
             "total": int(records.size),
         }
 
-        acq_ms = self.header.get("MeasDesc_AcquisitionTime")
-        duration = int(round(float(acq_ms) * 1e9)) if isinstance(acq_ms, (int, float)) and acq_ms > 0 else None
+        # Duration from the data: the requested acquisition time is not the time acquired.
+        last = max([int(a[-1]) for a in tags.values() if a.size] + [int(t) for t in marker_ps], default=-1)
+        duration = last + max(1, int(round(info.resolution_ps))) if last >= 0 else None
         metadata: dict[str, Any] = {
             "source": "ptu",
             "file": self.path.name,
@@ -286,8 +348,12 @@ class PtuFile:
             "resolution_ps": info.resolution_ps,
             "exact_ps": exact,
             # Written by DADL's hardware twin (dadl.adapters.ptu_write), not by an instrument.
-            "simulated": self.header.get("DADL_Simulated") is True,
+            "simulated": self.header.get("DADL_Simulated") is True or self.header.get("CreatorSW_Name") == "DADL",
+            "incomplete": incomplete,
+            "inputs_with_tags": sorted(ch.input for ch in tags),
         }
+        if incomplete:
+            metadata["data_loss"] = STOP_REASON_NAMES.get(stop, f"stop reason {stop}")
         if not exact:
             metadata["note"] = "the tick is not a whole number of ps; tags were rounded to the nearest ps"
         return TagSet(tags, duration_ps=duration, clock=f"{device} T2 clock", metadata=metadata)

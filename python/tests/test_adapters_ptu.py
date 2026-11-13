@@ -42,7 +42,8 @@ def test_round_trip_across_many_rollovers(tmp_path, rtype):
     (roll,) = [e for e in reader.events() if e.kind == "rollover"]
     assert roll.value >= 39
     assert tags.metadata["exact_ps"] is True
-    assert tags.duration_ps == 10**12
+    # Duration from the data (last tag plus one tick), not the requested acquisition time.
+    assert tags.duration_ps == max(int(tags[c][-1]) for c in tags.channels) + scale
 
 
 def test_hh2_single_and_multi_overflow_records_agree(tmp_path):
@@ -131,3 +132,31 @@ def test_times_agree_with_ptufile(tmp_path, rtype):
     theirs = np.sort(rec["time"][rec["channel"] >= 0].astype(np.int64))
     mine = np.sort(np.concatenate([ours[c] for c in ours.channels]))
     np.testing.assert_array_equal(mine, theirs)
+
+
+@pytest.mark.parametrize("code, lost", [(0, False), (1, False), (2, False), (3, True), (-2, True), (-13, True), (-99, True)])
+def test_stop_reason_marks_data_loss(tmp_path, code, lost):
+    # Expert review W5: a FIFO overrun or lost clock ended the acquisition early with data lost;
+    # before that review, such files were read as complete.
+    path = write_ptu(tmp_path / "f.ptu", ptu.HYDRAHARP2_T2, [(10, "tag", 1), (20, "tag", 1)],
+                     acquisition_ms=360_000_000.0, extra=[("TTResult_StopReason", "int", code)])
+    reader = PtuFile(path)
+    tags = reader.read()
+    assert tags.metadata["incomplete"] is lost
+    assert any(e.kind == ("data-loss" if lost else "stop-reason") for e in reader.events())
+    assert tags.duration_ps == 21  # from the data, not the requested 100 hours
+
+
+def test_incomplete_files_are_refused_in_a_folder(tmp_path):
+    from dadl.errors import ConfigError
+    from dadl.tagfile import read_tags
+
+    write_ptu(tmp_path / "setting0.ptu", ptu.HYDRAHARP2_T2, [(10, "tag", 1)], extra=[("TTResult_StopReason", "int", -2)])
+    with pytest.raises(ConfigError, match="FIFO overrun"):
+        read_tags(tmp_path, {1: "A"}, ("s",))
+
+
+def test_picoharp_channels_beyond_its_inputs_are_refused(tmp_path):
+    path = write_ptu(tmp_path / "f.ptu", ptu.PICOHARP_T2, [(10, "tag", 5)])
+    with pytest.raises(AdapterError, match="valid inputs"):
+        read_ptu(path)

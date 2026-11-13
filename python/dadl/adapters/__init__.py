@@ -11,7 +11,7 @@ This is the Python subset of the Rust `Adapter` trait in docs/design.md
 - declares its capabilities rather than letting callers assume them;
 - records the device configuration it saw, as provenance.
 
-Phase 2 ships one adapter, `PtuFile` (PicoQuant PTU, T2 mode). Writing a new
+Phase 2 ships one file adapter, `PtuFile` (PicoQuant PTU, T2 mode), and a simulated live device, `SimulatedTagger`. Writing a new
 one: see adapters/TEMPLATE.md in the repository.
 """
 

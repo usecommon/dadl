@@ -48,13 +48,30 @@ def test_hom_uses_dip_convention():
 
 
 @pytest.mark.parametrize("fn", [bell_visibility, hom_visibility])
-def test_corrected_visibility_cannot_exceed_one(fn):
+def test_corrected_visibility_beyond_one_is_left_out_not_refused(fn):
+    # Statistician review (cycle 1): refusing censored the best datasets; the raw value stays.
+    from dadl.guardrails import CORRECTION_NOT_COMPUTED
+
     kwargs = {"policy": LOOSE} if fn is bell_visibility else {}
-    with pytest.raises(ValueError):
-        fn(100.0, 10.0, accidentals=20.0, **kwargs)
+    r = fn(100.0, 10.0, accidentals=20.0, **kwargs)
+    assert r.corrected is None and CORRECTION_NOT_COMPUTED in r.labels
+    assert r.raw.low <= r.raw.value <= r.raw.high
 
 
-@pytest.mark.parametrize("args", [(-1.0, 5.0), (float("nan"), 5.0), (5.0, float("inf")), (0.0, 0.0), (5.0, 10.0)])
+def test_raw_visibility_may_be_negative():
+    r = bell_visibility(950.0, 1000.0)
+    assert r.raw.value < 0 and r.raw.low < 0 < r.raw.high
+    assert hom_visibility(100.0, 130.0).raw.value == pytest.approx(-0.3)
+
+
+def test_low_counts_key_on_the_signal_after_subtraction():
+    from dadl.guardrails import LOW_COUNTS
+
+    assert LOW_COUNTS in hom_visibility(1000.0, 50.0, accidentals=45.0).labels
+    assert LOW_COUNTS not in hom_visibility(1000.0, 50.0).labels
+
+
+@pytest.mark.parametrize("args", [(-1.0, 5.0), (float("nan"), 5.0), (5.0, float("inf")), (0.0, 0.0)])
 def test_bad_counts_refused(args):
     with pytest.raises((TypeError, ValueError)):
         bell_visibility(*args)
@@ -72,9 +89,23 @@ def test_zero_minimum_is_labelled_as_invalid_gaussian():
 
 
 def test_near_threshold_is_labelled():
-    # V = 0.70 with ~0.05 error sits within 1.96 sigma of 1/sqrt(2).
+    # V = 0.70: the exact 95% interval for the raw value contains 1/sqrt(2).
+    from dadl.guardrails import NEAR_THRESHOLD_EXACT
+
     r = bell_visibility(85.0, 15.0)
-    assert NEAR_THRESHOLD in r.labels
+    assert NEAR_THRESHOLD_EXACT in r.labels and r.raw.low < 0.7071 < r.raw.high
+    # The corrected value (delta method) still uses the 1.96 sigma rule.
+    assert NEAR_THRESHOLD not in r.labels
+
+
+def test_low_counts_get_an_exact_interval_and_a_label():
+    # Statistician review W8: near V = 1 the delta method covered 63-93%; the exact interval >= 95%.
+    from dadl.analysis.visibility import hom_visibility
+    from dadl.guardrails import LOW_COUNTS
+
+    r = hom_visibility(50.0, 1.0)
+    assert LOW_COUNTS in r.labels and r.raw.low < 0.98 <= r.raw.high <= 1.0
+    assert LOW_COUNTS not in hom_visibility(5000.0, 400.0).labels
 
 
 def test_results_record_policy_provenance():

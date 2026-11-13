@@ -4,20 +4,21 @@ Nov 10, 2026 · @Jeff · revised Nov 11, 2026 after the third review
 
 ## Summary
 
-We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, designed to keep a living, versioned calibration model for every single-photon detector channel and carry that model's uncertainty into Bell S, visibility and fidelity. An MCP server may later sit on top so agents can call the same validated tools. Status: draft. Phase 1 is partly released (v0.0.3); this doc is the canonical phase plan, and the README and the overview site copy it.
+We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, designed to keep a living, versioned calibration model for every single-photon detector channel and carry that model's uncertainty into Bell S, visibility and fidelity. An MCP server may later sit on top so agents can call the same validated tools. Status: draft. Version 0.1.0 is released, with phase 1 partly and phase 2 fully done; this doc is the canonical phase plan, and the README and the overview site copy it.
 
 **What users get:** a downloadable starter kit, not a turnkey product. A user installs it, runs the full pipeline on simulated data in minutes, then tests and adjusts adapters, detector models, analyses and guardrail policies to fit their own setup. Everything is built to be read, changed and re-tested.
 
 The positioning is "known, bounded, auditable imperfections", not "cheap detectors become research-grade." Software cannot recover lost efficiency or jitter. In Bell tests and QKD security paths, correcting the data is not allowed at all, so the layer reports raw and corrected values side by side and refuses invalid corrections.
 
-**What works today (v0.0.3).** Everything else in this doc is design, not code.
+**What works today (0.1.0).** Everything else in this doc is design, not code; the README's "Known limits" lists what the built parts do not do.
 
-- A seeded time-tag simulator with injected efficiency, dark counts, non-paralyzable dead time, jitter, delay and one generation of afterpulsing.
-- `setup.yaml` drives it: `dadl quickstart`, `dadl init`, `dadl simulate` and `dadl analyze` (raw CHSH S from your own tags in a generic `.npz`/`.csv` format).
-- Raw CHSH S from fixed-grid coincidences with a declared window; Bell fringe and HOM dip visibility, with accidental subtraction where the policy allows it.
+- A seeded time-tag simulator with injected efficiency, dark counts, non-paralyzable dead time, jitter, delay and cascading afterpulsing, and a hardware twin (PTU files and a simulated live tagger).
+- `setup.yaml` drives it: `dadl quickstart`, `dadl init`, `dadl simulate`, `dadl analyze` and `dadl calibrate dark|pairs`, on simulated data, generic `.npz`/`.csv` tag files or PicoQuant PTU (T2) folders.
+- Raw CHSH S from fixed-grid coincidences with a declared window; Bell fringe and HOM dip visibility, with accidental subtraction where the policy allows it; labels for dead-time selection, output imbalance, interruptions and simulated input.
+- Calibrations with 95% intervals checked by simulation gates: dark rate, afterpulsing and dead time; DCR(T); delay and jitter; off-peak accidentals; heralding efficiency. Results are content-addressed artifacts (not signed).
 - Guardrail refusals, policy fingerprints recorded on every result, and threshold labels.
-- Statistical (Gaussian) uncertainties only. No calibration fits, no calibration uncertainty, no corrected CHSH, no signing, no adapters, no MCP.
-- A Rust core with the same per-tag functions, held to the Python reference by shared test vectors; it is not yet called from Python.
+- Statistical uncertainties only. No calibration uncertainty in analyses, no corrected CHSH, no signing, no registry, no MCP.
+- A Rust core with the same per-tag functions, used from Python when `dadl-quantum-core` is installed.
 
 Three design commitments shape everything below:
 
@@ -108,7 +109,7 @@ Each example is a folder with a config file, a seeded simulation recipe (data is
 | Example | Setup | Shows |
 | --- | --- | --- |
 | `chsh-spad` | Polarization-entangled SPDC, four Si SPAD channels, simulator (shipped) | Raw S from a planned fixed window beside the closed-form expectation; calibration and corrected S in phase 2 |
-| `hom-snspd` | HOM interference, two SNSPDs, PicoQuant | Visibility fit, latching signatures |
+| `hom-snspd` | HOM interference, two SNSPDs, simulator (shipped) | Two-point visibility at the declared delay with an interruption (latch) label; visibility scan fit and SNSPD latching signatures are planned |
 | `tomography` | Two-qubit state tomography | MLE vs. Bayesian estimates, low-count bias warnings |
 | `link-monitor` | One network link with the health monitor running | Change-point alerts, explain a fidelity drop |
 | `cheap-vs-reference` | Same source split between CMOS SPADs and a reference detector | The hardware A/B method from the validation plan (after the MVP: needs CMOS SPAD and crosstalk support) |
@@ -188,7 +189,7 @@ Each channel has one generative model, stored as posterior samples with provenan
 | --- | --- | --- | --- |
 | Efficiency η | In-situ heralded system efficiency (detector × coupling, "as detected" per NIST IR 8486r1); optional Klyshko anchor; detector-only η needs an external reference | SPDC heralding ratio, Beta posterior | Change-point on heralding; connector event |
 | Dark count rate | DCR = f(T, V\_ex), Arrhenius generation plus field-dependent tunnelling (SPAD); bias/I\_sw curve plus stray light (SNSPD) | Shuttered or gated dark windows, fitted jointly with afterpulsing | Residual vs. fitted model, not a fixed threshold |
-| Dead time | Series model: a paralyzable stage τ\_p then a non-paralyzable stage τ\_np, m = m₁/(1 + m₁(τ\_np − τ\_p)) with m₁ = n·e^(−nτ\_p) for τ\_np > τ\_p; fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
+| Dead time | (Phase 2 implements a hard-edge non-paralyzable effective channel dead time only; the series model below is phase 3.) Series model: a paralyzable stage τ\_p then a non-paralyzable stage τ\_np, m = m₁/(1 + m₁(τ\_np − τ\_p)) with m₁ = n·e^(−nτ\_p) for τ\_np > τ\_p; fitted in the time domain together with afterpulsing | Inter-arrival histogram (hard-zero region + recovery) | Rate regime change |
 | TDC dead time | Separate term from detector dead time | Tagger config + histogram | Firmware/config change |
 | Afterpulse kernel | Excess over exponential Poisson tail; "well-defined initial condition" method | Autocorrelation / inter-arrival histogram; double-window for gated InGaAs | Temperature or bias change |
 | Crosstalk matrix | Branching (geometric/Borel) or nearest-neighbour; Si SPAD breakdown-flash peaks at a fitted nonzero delay | Dark-only zero-delay correlations between pixels | Overvoltage change |
@@ -208,7 +209,7 @@ The model is parameterized per family because the dominant imperfection differs:
 
 Routines run on a schedule and on triggers. Triggers come from change-point detection (CUSUM or Bayesian online change-point) on heralding efficiency, model residuals, and connector or config events. Each run emits a signed, immutable calibration artifact; a new artifact supersedes but never overwrites the old one. Fiber-connector reconnection is logged as its own uncertainty component, since it often dominates the budget for fiber-coupled detectors.
 
-Known pitfalls the engine must model: Klyshko overestimates η as pump power rises (multi-photon SPDC); SPAD intrinsic efficiency can depend on detection rate; inter-arrival afterpulse estimates depend on the detector's prior state.
+Known pitfalls the engine must model: multi-photon SPDC raises the raw coincidence-to-herald ratio with pump power, while a background-subtracted estimate falls slightly (phase 2: about −μη_a(1 − η_b)/2 for CW); SPAD intrinsic efficiency can depend on detection rate; inter-arrival afterpulse estimates depend on the detector's prior state.
 
 ## Correction, inference and uncertainty
 
@@ -317,7 +318,7 @@ Safety design:
 
 ## Data model, storage and provenance
 
-Photon-HDF5 is the interchange container. DADL writes its calibration data under `/user/dadl_calibration`, the spec's extension point, and proposes a `/calibration` group upstream instead of inventing a new format; paths below are relative to that group. It also fills the native point-value fields under `/setup/detectors` with posterior medians in SI units, and sets `timestamps_unit` = 1e-12 s for its int64 ps tags. All three are to be checked against the spec and phconvert's validator in phase 2. Raw tags stay on-prem; the project runs no hosted service.
+Photon-HDF5 is the planned interchange container (no HDF5 code exists yet). DADL is to write its calibration data under `/user/dadl_calibration`, the spec's extension point, and proposes a `/calibration` group upstream instead of inventing a new format; paths below are relative to that group. It also fills the native point-value fields under `/setup/detectors` with posterior medians in SI units, and sets `timestamps_unit` = 1e-12 s for its int64 ps tags. All three are to be checked against the spec and phconvert's validator in phase 2. Raw tags stay on-prem; the project runs no hosted service.
 
 ```
 /photon_data      timestamps (typically int64), timestamps_specs/timestamps_unit, detector IDs   [existing]
@@ -334,12 +335,12 @@ Photon-HDF5 is the interchange container. DADL writes its calibration data under
 
 ### Calibration artifacts
 
-Artifacts are immutable, content-addressed and signed. Each holds the method, input data hashes, posterior samples, software versions and the artifact it supersedes. Results reference artifact IDs, never copied parameter values, so any number can be traced back and recomputed.
+Artifacts are immutable and content-addressed; signing is planned (see "Signing" below). Each holds the method, input data hashes, posterior samples, software versions and the artifact it supersedes. Results reference artifact IDs, never copied parameter values, so any number can be traced back and recomputed.
 
 ### Minimum metadata for reproducibility
 
 - Detector serial, type, bias/overvoltage, temperature.
-- Time-tagger model, firmware, trigger levels, input delays, dead-time filter settings.
+- Time-tagger model, firmware, trigger levels, input delays, dead-time filter settings. (Phase 2: numeric PTU header settings are recorded in calibration `conditions` as `tagger_*`; they are not yet compared at analysis time.)
 - Coincidence window and how it was chosen (pre-registered).
 - Calibration artifact IDs, the connector-event log.
 - Software versions, including the tomography library version.
@@ -435,13 +436,13 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 - Calibration fits store a fixed number of posterior samples per artifact (target 2,000). Phase 2 uses maximum likelihood with SciPy: exact conjugate posteriors where they exist (Beta for heralding ratios, Gamma for Poisson rates) and Laplace posteriors in log or logit coordinates otherwise. MCMC (NUTS) arrives with the joint model in phase 3; the probabilistic-programming library (NumPyro, PyMC or Stan) is chosen then, after an install benchmark on Windows.
 - Between calibrations, drift is tracked by a state-space filter with explicit process noise per parameter, in logit or log coordinates, so uncertainty grows with time since the last calibration instead of shrinking.
 - Every filter state used in a correction is snapshotted as an artifact. Data is never corrected with parameters updated from that same data.
-- An artifact is accepted only after posterior predictive checks pass on held-out bins; otherwise the previous artifact stays current. A prior-sensitivity check in CI flags any parameter whose posterior is mostly prior.
+- An artifact is accepted only after posterior predictive checks pass on held-out bins; otherwise the previous artifact stays current. (Phase 2: the check runs on the fitted bins, a failure (p < 0.001) sets `checks.status: misfit`, and the CLI refuses to write a misfit unless `--accept-misfit` is given.) A prior-sensitivity check in CI flags any parameter whose posterior is mostly prior.
 
 ### Calibration artifact format
 
 An artifact is a small JSON manifest plus a posterior sample table, addressed by the SHA-256 of its canonical manifest. It is stored under `/calibration/artifacts/<id>` and can also live as a standalone file.
 
-The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until every phase 2 calibration writes artifacts; `dadl calibrate dark` already does):
+The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, frozen at 0.1.0). It illustrates the format, including fields phase 2 does not yet write (a method name and version from the planned engine, `valid_for.conditions`); what `dadl calibrate` writes today is described in the README under "Records, not certificates":
 
 ```json
 {
@@ -518,7 +519,7 @@ Size: 2,000 samples × \~20 parameters × 8 bytes is about 320 kB per artifact, 
 
 **Schema versions.** The kit reads every past schema version indefinitely. Upgrades create new artifacts that link back to the old ones, so existing hashes and signatures stay valid.
 
-**Content addressing (phase 2–3).** The ID is the SHA-256 of the manifest canonicalized with RFC 8785 (JCS). Cross-language test vectors (manifest, JCS bytes, ID) ship with the schema. The posterior hash covers a canonical layout (little-endian float64 columns in `params` order), not Arrow file bytes; input hashes cover datasets, not container files, so writing calibration into the same HDF5 file does not change them. `dadl verify` checks that a recomputed artifact agrees statistically, since MCMC output is not bit-reproducible.
+**Content addressing (phase 2–3).** The ID is the SHA-256 of the manifest canonicalized with RFC 8785 (JCS). Cross-language test vectors ship with the schema (JCS numbers and objects today; manifest-to-ID vectors are planned). The posterior hash covers a canonical layout (little-endian float64 columns in `params` order), not Arrow file bytes; `raw-tags` input hashes cover datasets, not container files, so writing calibration into the same HDF5 file does not change them (the CLI also records container hashes, role `raw-file`). A planned `dadl verify` checks that a recomputed artifact agrees statistically, since MCMC output is not bit-reproducible.
 
 **Signing (deferred to v0.2+).** Until a user needs attestation, artifacts are content-addressed only. The planned design: the signed payload is `"dadl-calibration-v1\0"` followed by the JCS bytes; `sig` is base64url; `key_id` is the SHA-256 of the public key; a per-chain `seq` counter rejects rollback; and small labs can sign with minisign or SSH signatures against an `allowed_signers`-style trust file instead of a keystore or HSM. Each site holds its own key; the project never holds lab keys. Key custody for QKD attestation stays an open question.
 
@@ -615,8 +616,8 @@ Proposed sequence. Each phase gates the next, and each gate is a named CI job wi
 
 | Phase | Delivers | Gate (CI job) | Status |
 | --- | --- | --- | --- |
-| 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): afterpulse closed-form test and crosstalk simulation outstanding |
-| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated data and PTU files; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration and regime (dark: Si SPAD, CMOS SPAD; pairs: CW SPAD, sparse SNSPD, broad IRF; DCR(T)); each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 0.1% per calibration, on a seed fixed in advance (Bonferroni across its parameters: 92.6–97.1% for one parameter, 92.3–97.3% for four; where counts are too low for an exact 95%, declared in advance, coverage of at least the lower bound) | Done on `main` (unreleased): data types, intervals, artifacts, setup schema; six calibrations (dark/afterpulse/dead time, DCR(T), delay/jitter, off-peak accidentals, heralding efficiency) passing the gate; PTU T2 adapter, adapter template, hom-snspd example; PyO3 bindings (`dadl-quantum-core`, NumPy arrays; Arrow C Stream still planned). Limits: PTU T3 and replay files from real hardware outstanding |
+| 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (0.1.0): crosstalk simulation outstanding (the afterpulse closed-form test arrived in phase 2) |
+| 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated data and PTU files; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration and regime (dark: Si SPAD, CMOS SPAD, free-running InGaAs, the bundled example's SPAD; pairs: CW SPAD, sparse SNSPD, afterpulsing SPAD, bright background, high-rate SNSPD, broad IRF, and an ideal heralding check; DCR(T); each regime also limits the share of clean runs marked misfit to 1%); each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 0.1% per calibration, on a seed fixed in advance (Bonferroni across its parameters: 92.6–97.1% for one parameter, 92.3–97.3% for four; where counts are too low for an exact 95%, declared in advance, coverage of at least the lower bound) | Done (0.1.0): data types, intervals, artifacts, setup schema; six calibrations (dark/afterpulse/dead time, DCR(T), delay/jitter, off-peak accidentals, heralding efficiency) passing the gate; PTU T2 adapter, adapter template, hom-snspd example; PyO3 bindings (`dadl-quantum-core`, NumPy arrays; Arrow C Stream still planned). Limits: PTU T3 and replay files from real hardware outstanding |
 | 3. Inference and plans | Forward model, joint Monte Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n) coincidences | `guardrails`: every regression case refuses, including window shopping under a signed plan | Not started |
 | 4. Explain (v0.2+) | Attribution with family-wise-adjusted 95% intervals and a misfit interval | `explain`: N named scenarios, correct top attribution in ≥ 90% | Seeking contributors |
 | 5. Hardware pilot | One SPDC lab, one network testbed | Hardware A/B results published, including disagreements | Conditional on a design partner |

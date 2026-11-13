@@ -26,7 +26,10 @@ SUPPORTED_SCHEMA_VERSIONS = (1,)
 REQUIRED_KEYS = ("schema_version", "name", "source", "detectors", "analysis")
 MAX_FILE_BYTES = 1_000_000
 
-TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy"}
+TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy", "hardware"}
+#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned).
+SOURCE_TYPES = ("spdc-cw",)
+HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
      "afterpulse_tau_ps", "delay_ps"}
@@ -72,8 +75,35 @@ class Setup:
     path: Path | None = None
     data: dict[str, Any] = field(default_factory=dict, repr=False)
     analysis_type: str = "chsh"
+    #: Tagger serial and detector serials per channel name (hardware setups; recorded with calibrations).
+    tagger: str | None = None
+    detector_serials: dict[str, str] = field(default_factory=dict)
     #: HOM only: the path delay of the reference acquisition, far from the dip.
     reference_delay_ps: float | None = None
+
+    def channel_id(self, name: str):
+        """The ChannelId of a channel name: tagger serial (or "sim") and input number, with role and detector."""
+        from dadl.data import ChannelId
+
+        number = {n: k for k, n in self.channels.items()}
+        if self.backend == "sim":
+            device = "sim"
+        elif self.tagger:
+            device = self.tagger
+        else:
+            raise ConfigError(
+                f"{self.name}: calibrations of hardware data need hardware.tagger (the tagger's serial) in "
+                "setup.yaml, so the record identifies the physical device, not just the channel name"
+            )
+        detector = self.detector_serials.get(name)
+        if self.backend != "sim" and not detector:
+            # Calibration-lab review, cycle 3: the tagger port was identified but not the detector
+            # being calibrated.
+            raise ConfigError(
+                f"{self.name}: calibrations of hardware data need the detector's serial for channel {name!r} "
+                f"under hardware.detectors in setup.yaml, so the record identifies the calibrated item"
+            )
+        return ChannelId(device, number[name], role=name, detector=detector)
 
     @property
     def channel_names(self) -> tuple[str, ...]:
@@ -108,6 +138,26 @@ def _wrap(where: str, fn, *args, **kwargs):
         raise ConfigError(f"{where}: {exc}") from exc
 
 
+#: Largest number of values a setup may expand to, counting each use of an alias again: a 2 KB
+#: file of nested aliases expanded to gigabytes when a value was turned into text (security
+#: review, cycle 9).
+MAX_NODES = 100_000
+
+
+def _check_size(data: Any) -> None:
+    count, stack = 0, [data]
+    while stack:
+        item = stack.pop()
+        count += 1
+        if count > MAX_NODES:
+            raise ConfigError(f"setup file expands to more than {MAX_NODES} values (nested aliases?)")
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
 def read_yaml(path: str | Path) -> dict[str, Any]:
     """Read a YAML mapping, refusing duplicate keys, oversize files and bad encodings."""
     path = Path(path)
@@ -128,6 +178,11 @@ def read_yaml(path: str | Path) -> dict[str, Any]:
         data = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
     except yaml.YAMLError as exc:
         raise ConfigError(f"setup file is not valid YAML: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError("setup file is nested too deeply") from exc
+    except TypeError as exc:
+        raise ConfigError(f"setup file has an invalid key: {exc}") from exc
+    _check_size(data)
     return _mapping(data, "the setup file's top level")
 
 
@@ -168,6 +223,11 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     # source
     src = _mapping(data["source"], "source")
     _no_unknown(src, SOURCE_KEYS, "source")
+    if src.get("type", "spdc-cw") not in SOURCE_TYPES:
+        raise ConfigError(
+            f"source.type {src.get('type')!r} is not supported; DADL models {list(SOURCE_TYPES)} only "
+            "(pulsed sources need coincidence slots locked to the laser, which is planned)"
+        )
     source = _wrap(
         "source",
         PairSource,
@@ -234,6 +294,9 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     if "width_ps" not in win:
         raise ConfigError("analysis.window.width_ps is required")
     delays = _mapping(win.get("delays_ps", {}), "analysis.window.delays_ps")
+    unknown_delays = sorted(str(k) for k in delays if str(k) not in names)
+    if unknown_delays:
+        raise ConfigError(f"analysis.window.delays_ps: unknown channel(s) {unknown_delays}; the channels are {list(names)}")
     window = _wrap("analysis.window", Window, width_ps=win["width_ps"], source="plan", delays_ps=delays)
 
     # channel map for tag files: number -> name; default 0, 1, ... in channel-name order
@@ -247,6 +310,16 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     if sorted(channels.values()) != sorted(names):
         raise ConfigError(f"channels must map exactly one number to each of {list(names)}")
 
+    hw = _mapping(data.get("hardware", {}), "hardware")
+    _no_unknown(hw, HARDWARE_KEYS, "hardware")
+    tagger = hw.get("tagger")
+    if tagger is not None and (not isinstance(tagger, str) or not tagger.strip()):
+        raise ConfigError("hardware.tagger must be the tagger's serial, e.g. HydraHarp-1234567")
+    serials = {str(k): str(v) for k, v in _mapping(hw.get("detectors", {}), "hardware.detectors").items()}
+    unknown_roles = sorted(set(serials) - set(names))
+    if unknown_roles:
+        raise ConfigError(f"hardware.detectors names unknown channels {unknown_roles}")
+
     return Setup(
         name=name,
         backend=backend,
@@ -259,5 +332,7 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         channels=channels,
         data=data,
         analysis_type=kind,
+        tagger=tagger,
+        detector_serials=serials,
         reference_delay_ps=reference_delay,
     )

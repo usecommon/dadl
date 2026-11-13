@@ -77,19 +77,25 @@ def test_seed_makes_draws_reproducible():
     tags = dark()
     a = calibrate_dark(tags, CH, seed=5)
     b = calibrate_dark(tags, CH, seed=5)
-    np.testing.assert_array_equal(a.samples, b.samples)
+    # Tolerance, not bitwise: once on Linux with NumPy 1.24 two fits of the same data differed in
+    # the last digits (floating-point summation order), which an optimizer can amplify slightly.
+    np.testing.assert_allclose(a.samples, b.samples, rtol=1e-6)
 
 
 def test_no_afterpulsing_gives_an_upper_limit():
     det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000, afterpulse_prob=0.0)
     cal = calibrate_dark(dark(det), CH, seed=1)
-    assert cal.unidentified == ("afterpulse_tau_ps",)
+    assert cal.unidentified[0] == "afterpulse_tau_ps"
+    # SNSPD specialist review: a dead time bounded only above is marked unidentified too.
+    assert ("dead_time_ps" in cal.unidentified) == (cal.estimates["dead_time_ps"].low == 0)
     assert "afterpulse_tau_ps" not in cal.estimates
     p = cal.estimates["afterpulse_prob"]
     assert p.low == 0.0 and 0.0 < p.high < 0.01
     assert cal.estimates["dark_rate_cps"].contains(1000.0)
     assert any("upper limit" in n for n in cal.notes)
-    assert cal.sample_params == ("dark_rate_cps", "dead_time_ps")
+    # Statistician review: the posterior table now carries p even when it is only an upper limit.
+    assert cal.sample_params == ("dark_rate_cps", "afterpulse_prob", "dead_time_ps")
+    assert cal.samples[:, 1].max() <= p.high
 
 
 def test_misfit_is_flagged_by_the_predictive_check():
@@ -180,7 +186,7 @@ def test_twenty_gaps_are_enough_and_fewer_are_refused():
     det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000)
     tags = dark(det, 1.0, seed=3)[:21]
     cal = calibrate_dark(tags, CH, seed=0)
-    assert cal.unidentified == ("afterpulse_tau_ps",) and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
+    assert cal.unidentified == ("afterpulse_tau_ps", "dead_time_ps") and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
     with pytest.raises(InsufficientCounts):
         calibrate_dark(tags[:15], CH)
 
@@ -191,3 +197,40 @@ def test_low_rate_dead_time_is_an_upper_bound_not_zero():
     tags = dark(det, 60.0, seed=1)
     iv = calibrate_dark(tags, CH, seed=1).estimates["dead_time_ps"]
     assert iv.value == iv.high == int(np.diff(tags).min()) and iv.low == 0.0 and iv.contains(30_000.0)
+
+
+
+def test_a_lone_double_trigger_does_not_become_the_dead_time():
+    # Time-tagging review: one tag 2 ns after another collapsed the dead time to about 2 ns.
+    tags = dark(TRUTH, 5.0, seed=4)
+    spoiled = np.sort(np.append(tags, tags[100] + 2_000))
+    cal = calibrate_dark(spoiled, CH, seed=1, n_draws=10)
+    assert cal.estimates["dead_time_ps"].contains(22_000.0)
+    assert any("double triggers" in n for n in cal.notes)
+
+
+def test_profile_path_draws_agree_with_the_intervals():
+    # Statistician review: below 5,000 gaps the Laplace draws for p and tau_a disagreed with the
+    # profile intervals (draw coverage down to 73%); they are now importance-reweighted.
+    cal = calibrate_dark(dark(TRUTH, 3.0, seed=6), CH, seed=2)
+    for name in ("afterpulse_prob", "afterpulse_tau_ps"):
+        iv = cal.estimates[name]
+        lo, hi = np.quantile(cal.samples[:, cal.sample_params.index(name)], [0.025, 0.975])
+        width = iv.high - iv.low
+        assert abs(lo - iv.low) < 0.25 * width and abs(hi - iv.high) < 0.25 * width, (name, lo, hi, iv)
+
+
+def test_a_latch_or_drift_marks_the_calibration_a_misfit():
+    # Detector physicist review: a 6 s latch in 60 s was written as a normal calibration, and a
+    # +-20% drift was flagged in only 20% of runs.
+    det = DetectorParams(dark_rate_cps=100.0, dead_time_ps=30_000, afterpulse_prob=0.0)
+    tags = dark(det, 60.0, seed=5)
+    cut = tags[0] + 20 * 10**12
+    latched = np.concatenate([tags[tags < cut], tags[tags >= cut + 6 * 10**12]])
+    assert calibrate_dark(latched, CH, seed=1, n_draws=10).status == "misfit"
+    rng = np.random.default_rng(7)
+    t = np.sort(rng.uniform(0, 60e12, 6000))
+    keep = rng.random(t.size) < 0.6 + 0.4 * (t / 60e12)  # rate rises by a factor 1.67 over the run
+    drifting = (t[keep] + 30_000 * np.arange(keep.sum())).astype(np.int64)
+    assert calibrate_dark(drifting, CH, seed=1, n_draws=10).status == "misfit"
+    assert calibrate_dark(tags, CH, seed=1, n_draws=10).status == "ok"

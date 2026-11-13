@@ -1,0 +1,398 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/usecommon/dadl/v0.1.0/schema/calibration-1.schema.json",
+  "title": "DADL calibration artifact manifest, version 1",
+  "description": "Frozen at DADL 0.1.0: later versions may add optional fields; changing existing ones needs calibration/2. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kind",
+    "channels",
+    "method",
+    "created",
+    "backend",
+    "inputs",
+    "posterior",
+    "checks",
+    "software"
+  ],
+  "properties": {
+    "schema": {
+      "const": "calibration/1"
+    },
+    "kind": {
+      "description": "What was calibrated. Parameters fitted from the same data share one artifact (one joint posterior).",
+      "enum": [
+        "dark-afterpulse-deadtime",
+        "dcr-temperature",
+        "heralding-efficiency",
+        "delay-jitter",
+        "accidentals",
+        "crosstalk",
+        "klyshko",
+        "drift-filter-state"
+      ]
+    },
+    "channels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "device",
+          "input"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "Tagger serial (e.g. HydraHarp-1234567), or 'sim' for simulated data"
+          },
+          "input": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "role": {
+            "type": "string",
+            "description": "The setup's name for the channel (e.g. A+); a label, not an identity"
+          },
+          "detector": {
+            "type": "string",
+            "description": "Serial of the detector cabled to this input"
+          }
+        }
+      }
+    },
+    "method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "valid_for": {
+      "description": "Intended time range and conditions for the artifact. Recorded only: DADL does not yet enforce it.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "to": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "conditions": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "backend": {
+      "enum": [
+        "sim",
+        "hardware"
+      ]
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sha256",
+          "role"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "role": {
+            "enum": [
+              "raw-tags",
+              "histogram",
+              "telemetry",
+              "config",
+              "previous-artifact",
+              "raw-file"
+            ],
+            "description": "raw-tags: hash of one channel's int64 tag array (little-endian); raw-file: hash of an input file's bytes; config: hash of the setup file."
+          },
+          "name": {
+            "type": "string",
+            "description": "File name or channel the hash refers to."
+          }
+        }
+      }
+    },
+    "conditions": {
+      "description": "Measured conditions during calibration, e.g. temperature_K, bias_V.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "posterior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "sha256",
+        "n_samples",
+        "params"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "npy",
+            "arrow"
+          ],
+          "description": "npy: a <id>.posterior.npy file next to the manifest, little-endian float64, one row per draw, one column per name in params. arrow is reserved for the Photon-HDF5 store."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "n_samples": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "stand_in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Draw columns that are conservative stand-ins (e.g. uniform below an upper limit), not posterior draws; not to be propagated as a posterior."
+        }
+      }
+    },
+    "uncertainty": {
+      "description": "What the intervals include and leave out. DADL intervals are statistical (counting) only.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "validation": {
+          "type": "string"
+        },
+        "not_included": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "required": [
+        "converged",
+        "ppc_pvalue"
+      ],
+      "properties": {
+        "converged": {
+          "type": "boolean"
+        },
+        "ppc_pvalue": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "status": {
+          "description": "ok, or misfit when the posterior predictive check fails (p below 0.001): the model does not describe the data and the intervals must not be used.",
+          "enum": [
+            "ok",
+            "misfit"
+          ]
+        },
+        "prior_dominated_params": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "supersedes": {
+      "description": "ID of the artifact this one replaces for the same channels and kind.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "software": {
+      "type": "object",
+      "required": [
+        "dadl"
+      ],
+      "properties": {
+        "dadl": {
+          "type": "string"
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "version",
+              "sha256"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "numpy": {
+          "type": "string"
+        },
+        "scipy": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "key_id",
+        "sig"
+      ],
+      "properties": {
+        "alg": {
+          "const": "ed25519"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "sig": {
+          "type": "string"
+        }
+      }
+    },
+    "summary": {
+      "description": "Point estimate and two-sided interval per parameter, for reading without loading the posterior.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "low",
+          "high",
+          "level",
+          "unit"
+        ],
+        "properties": {
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Point estimate; null for a parameter reported only as a bound."
+          },
+          "low": {
+            "type": "number"
+          },
+          "high": {
+            "type": "number"
+          },
+          "level": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 1
+          },
+          "unit": {
+            "type": "string",
+            "description": "UCUM unit (ps, s-1, 1, eV, {count})."
+          },
+          "bound": {
+            "enum": [
+              "upper"
+            ],
+            "description": "Present when only an upper limit is reported: the interval is [low, high] = [0, limit]."
+          },
+          "definition": {
+            "type": "string",
+            "description": "What the parameter is (the unit alone does not say)."
+          }
+        }
+      }
+    },
+    "unidentified_params": {
+      "description": "Parameters the data could not identify; they are absent from the posterior or reported as limits.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "description": "Human-readable caveats from the fit.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acquired": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the data were acquired, in UTC (declared with --acquired, which needs an offset). A tagger file's local creation time goes in instrument.file_created_local.",
+      "pattern": "Z$"
+    },
+    "instrument": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Instrument identification as reported by the tagger file: model, serial, firmware."
+    }
+  }
+}

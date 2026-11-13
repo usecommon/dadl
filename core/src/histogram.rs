@@ -3,6 +3,17 @@
 use crate::error::{check_sorted, check_span, DadlError};
 use crate::Timestamp;
 
+/// Largest histogram either backend allocates: 2^28 bins (2 GiB of counts). Larger requests are
+/// refused instead of panicking on allocation (Rust review, cycle 6).
+pub const MAX_BINS: usize = 1 << 28;
+
+fn check_bins(n_bins: usize) -> Result<(), DadlError> {
+    if n_bins > MAX_BINS {
+        return Err(DadlError::TooManyBins { n_bins: n_bins as u64 });
+    }
+    Ok(())
+}
+
 /// Histogram of gaps between consecutive events on one channel.
 ///
 /// Bin `k` counts gaps in `[k * bin_width_ps, (k + 1) * bin_width_ps)`. Gaps
@@ -26,6 +37,7 @@ pub fn interarrival(times: &[Timestamp], bin_width_ps: Timestamp, n_bins: usize)
     }
     check_sorted(times)?;
     check_span(times)?;
+    check_bins(n_bins)?;
     let mut hist = vec![0u64; n_bins];
     for pair in times.windows(2) {
         // Sorted and span-checked: the gap is non-negative and fits in i64.
@@ -75,6 +87,7 @@ pub fn cross_correlation(
     check_sorted(b)?;
     let span = range_ps.checked_mul(2).ok_or(DadlError::Overflow)?;
     let n_bins = usize::try_from((span - 1) / bin_width_ps + 1).map_err(|_| DadlError::Overflow)?;
+    check_bins(n_bins)?;
     let mut hist = vec![0u64; n_bins];
     let mut start = 0usize;
     for &tb in b {

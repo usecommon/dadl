@@ -31,7 +31,35 @@ POLICY_MODIFIED = "policy modified"
 THRESHOLD_AFTER_CORRECTION = "threshold crossed only after correction"
 NEAR_THRESHOLD = "within 1.96 sigma of the threshold"
 GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
+NEAR_THRESHOLD_EXACT = "the exact 95% interval contains the threshold"
+LOW_COUNTS = "low counts: the Gaussian error is unreliable; use the exact interval"
 UNVALIDATED_ANALYSIS = "unvalidated analysis"
+SINGLE_BASIS = (
+    "single-basis fringe: V > 1/sqrt(2) implies S > 2 only for a Werner state with this visibility in two "
+    "mutually unbiased bases"
+)
+WINDOW_UNDECLARED = "coincidence window not given: the counts are trusted as given"
+ACCIDENTALS_SUBTRACTED = (
+    "corrected value: accidentals subtracted (off-peak estimate); secondary, not an indistinguishability or "
+    "Bell claim"
+)
+DEAD_TIME_SELECTION = (
+    "dead-time selection: coincidence rate x the slowest channel's dead time (estimated from its gaps) exceeds "
+    "1%; a recorded click makes the partner arm's dead state depend on the outcome, which can raise |E| and S"
+)
+SIMULATED_INPUT = "simulated data: the input tags were written by DADL's simulator, not recorded"
+EFFICIENCY_IMBALANCE = (
+    "output imbalance: unequal singles on the two outputs of each side (unequal detector efficiencies) shift raw "
+    "S by up to 2 m_a m_b, upward when both sides lean the same way; swap outputs or normalise per detector"
+)
+CORRECTION_NOT_COMPUTED = (
+    "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
+    "exact interval"
+)
+INTERRUPTED = (
+    "interrupted: a channel has a gap far longer than its count rate allows (latch, shutdown or lost data); "
+    "the result is not reliable"
+)
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
 KNOWN_CORRECTIONS = frozenset({"accidental_subtraction", "afterpulse", "dead_time", "efficiency"})
@@ -106,10 +134,22 @@ class Policy:
     overrides: tuple[Override, ...] = ()
 
     def __post_init__(self) -> None:
-        rules = MappingProxyType(dict(self.rules))
+        # Rules are rebuilt from their raw fields: a subclass overriding to_json or the strictness
+        # test made a loosened policy fingerprint as the default (red-team review, cycle 5).
+        clean: dict[str, AnalysisRule] = {}
+        for name, rule in dict(self.rules).items():
+            if type(rule) is not AnalysisRule:
+                raise TypeError(f"policy rule for {name!r} must be an AnalysisRule, not {type(rule).__name__}")
+            clean[str(name)] = AnalysisRule(
+                frozenset(str(c) for c in rule.allowed_corrections), frozenset(str(w) for w in rule.window_sources)
+            )
+        rules = MappingProxyType(clean)
         for name, rule in rules.items():
             baseline = DEFAULT_RULES.get(name, STRICTEST)
-            if not rule.is_at_least_as_strict_as(baseline):
+            if not (
+                rule.allowed_corrections <= baseline.allowed_corrections
+                and rule.window_sources <= baseline.window_sources
+            ):
                 raise ValueError(
                     f"Policy rules for '{name}' are looser than the default. "
                     "Loosen a rule with Policy.allow(analysis, correction, reason), so the reason is recorded."
@@ -205,6 +245,12 @@ class Policy:
         return rules
 
 
+def _mirror(est: Estimate) -> Estimate:
+    low = None if est.high is None else -est.high
+    high = None if est.low is None else -est.low
+    return Estimate(-est.value, est.stderr, low, high)
+
+
 def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = None) -> tuple[str, ...]:
     """Labels that qualify a value against the analysis's physical threshold.
 
@@ -215,6 +261,11 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
       of exactly +-1 or n_min = 0), where the Gaussian interval means nothing.
     """
     labels: list[str] = []
+    if analysis == "chsh" and raw.value < 0:
+        # |S| > 2 violates the inequality whatever the sign convention (Bell review, cycle 2:
+        # S = -2.01 +- 0.02 carried no label).
+        raw = _mirror(raw)
+        corrected = None if corrected is None else _mirror(corrected)
     if raw.stderr == 0 or (corrected is not None and corrected.stderr == 0):
         labels.append(GAUSSIAN_INVALID)
     threshold = THRESHOLDS.get(analysis)
@@ -223,7 +274,13 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
     if corrected is not None and raw.value < threshold <= corrected.value:
         labels.append(THRESHOLD_AFTER_CORRECTION)
     for est in (raw, corrected):
-        if est is not None and abs(est.value - threshold) < 1.96 * est.stderr:
+        if est is None:
+            continue
+        if est.low is not None and est.high is not None:
+            if est.low <= threshold <= est.high:
+                labels.append(NEAR_THRESHOLD_EXACT)
+                break
+        elif abs(est.value - threshold) < 1.96 * est.stderr:
             labels.append(NEAR_THRESHOLD)
             break
     return tuple(labels)
