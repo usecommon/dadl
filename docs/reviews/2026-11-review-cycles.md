@@ -62,7 +62,7 @@ evidence or a stated limit), **minor** (documentation, polish).
 | 2.18 | Minor | CSV out-of-range integer traceback; BOM refused | Fixed |
 | 2.19 | Minor | Corrupt `HW_InpChannels` exhausted memory | Fixed: capped at 256 |
 | 2.20 | Minor | Library ValueErrors reached CLI users as tracebacks; huge counts leaked a SciPy TypeError | Fixed |
-| 2.21 | Minor | Schemas not in the wheel; version still 0.0.3 | Schemas shipped (`dadl/schemas`, guarded copy); version bump at release |
+| 2.21 | Minor | Schemas not in the wheel; version still 0.0.3 | Schemas shipped (`dadl/schemas`, guarded copy); version 0.1.0 |
 
 ## Cycle 3: Bayesian computation specialist, calibration-lab quality manager, HOM experimentalist
 
@@ -189,7 +189,7 @@ since analyses refuse duplicate timestamps.
 | # | Severity | Finding | Status |
 | --- | --- | --- | --- |
 | 8.1 | Wrong | The technical report said the heralding ratio yields "system efficiency" (the example reads 0.397 for η = 0.5) | Corrected in both places (7.1 had reached the README and CLI only) |
-| 8.2 | Wrong | The report is stale for 0.1.0 (version, abstract, Table 2, Availability) | For the release commit |
+| 8.2 | Wrong | The report is stale for 0.1.0 (version, abstract, Table 2, Availability) | Done in the 0.1.0 release commit |
 | 8.3 | Questionable | Figure 3, Table 1 and the architecture text describe unbuilt components in the present tense | Marked as design, with status in Table 2 |
 | 8.4 | Questionable | "No tool connects..." without a related-work comparison | Narrowed; comparison noted as in preparation |
 | 8.5 | Questionable | The dark afterpulse interval covered 92% in the bundled example's own weak-afterpulse regime (250 runs) | Gate regime `example-spad` (60 s) added |
@@ -198,7 +198,7 @@ since analyses refuse duplicate timestamps.
 | 8.8 | Questionable | Input hashes had no names | Fixed: channel, file and setup names recorded |
 | 8.9 | Questionable | PTU local file time stored as UTC; `--acquired` without offset taken as UTC | Fixed: offset required; the PTU time is kept as local in `instrument.file_created_local` |
 | 8.10 | Questionable | Method versions not bumped while methods changed | Bumped (accidentals 3, dark 6, dcr 2, delay 6, heralding 4); a test pins each module's source hash to its version |
-| 8.11 | Questionable | The schema would ship as a mutable draft | For the release commit: freeze `calibration/1` |
+| 8.11 | Questionable | The schema would ship as a mutable draft | Done: `calibration/1` frozen at 0.1.0 |
 | 8.12 | Minor | `as_record` labels split ambiguously; Python repr cells | Fixed: JSON cells; `dadl_version` and `simulated` columns |
 | 8.13 | Minor | Docs promised Photon-HDF5 output, manifest-ID vectors and `dadl verify` | Marked planned |
 | 8.14 | Minor | User conditions could overwrite fit diagnostics | Refused |

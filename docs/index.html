@@ -142,12 +142,12 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
   <h1>DADL: A Detector-Aware Data Layer for Single-Photon Experiments</h1>
   <p class="sub">Making detector imperfections known, bounded and auditable</p>
   <p class="authors">The DADL contributors</p>
-  <p class="meta">Technical report · Version 0.0.3 · November 2026 · <a href="https://github.com/usecommon/dadl">github.com/usecommon/dadl</a></p>
+  <p class="meta">Technical report · Version 0.1.0 · November 2026 · <a href="https://github.com/usecommon/dadl">github.com/usecommon/dadl</a></p>
 </header>
 
 <section class="abstract" aria-labelledby="abs">
   <h2 id="abs">Abstract</h2>
-  <p>Results in quantum optics, from Bell tests and Hong–Ou–Mandel interference to state tomography and quantum key distribution, are computed from coincidence counts recorded by imperfect single-photon detectors. Efficiency loss, dark counts, dead time, afterpulsing, crosstalk and timing drift all shift the reported numbers, yet the corrections applied for them are rarely recorded, rarely carried into the stated uncertainty, and occasionally large enough to manufacture a result. We describe DADL, an open-source data layer designed to keep a versioned, uncertainty-carrying model of every detector channel, compute analyses through a single forward model of the detection process, always report raw and corrected values together, and refuse corrections that are invalid for the analysis at hand. The first phase, available now, provides a detector simulator, raw Bell and visibility analyses on simulated or recorded time tags, and the guardrails; calibration and corrected values follow. We explain the problem it addresses, how it is used in an experiment, its guardrails, and its current status.</p>
+  <p>Results in quantum optics, from Bell tests and Hong–Ou–Mandel interference to state tomography and quantum key distribution, are computed from coincidence counts recorded by imperfect single-photon detectors. Efficiency loss, dark counts, dead time, afterpulsing, crosstalk and timing drift all shift the reported numbers, yet the corrections applied for them are rarely recorded, rarely carried into the stated uncertainty, and occasionally large enough to manufacture a result. We describe DADL, an open-source data layer designed to keep a versioned, uncertainty-carrying model of every detector channel, compute analyses through a single forward model of the detection process, always report raw and corrected values together, and refuse corrections that are invalid for the analysis at hand. Version 0.1.0 provides a detector simulator, raw Bell and visibility analyses on simulated or recorded time tags, the guardrails, and calibrations of dark counts, afterpulsing, dead time, delay and timing response, accidentals and heralding efficiency with simulation-checked intervals; corrected values follow. We explain the problem it addresses, how it is used in an experiment, its guardrails, and its current status.</p>
 </section>
 <p class="keywords"><b>Keywords:</b> single-photon detection; detector calibration; coincidence counting; Bell inequalities; uncertainty propagation; reproducibility.</p>
 <hr class="sep">
@@ -381,8 +381,8 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
 <ol class="proc">
   <li><b>Describe the setup.</b> A single configuration file names the source, each detector channel and its family, the time tagger and the analysis (Listing 1). <span class="avail">Available: <code>dadl init</code> copies the example and <code>dadl quickstart setup.yaml</code> runs the edited copy.</span></li>
   <li><b>Declare the analysis before acquisition.</b> The coincidence window, sample size and any data-exclusion rules are fixed in advance. For Bell-type analyses a window derived from the data is rejected, since this is the mechanism of the coincidence-time loophole <span class="cite">[7]</span>. <span class="avail">Window rule available; the declared window is recorded but cannot be verified until signed analysis plans (planned).</span></li>
-  <li><b>Acquire.</b> Time tags are read from a tagger, a recorded file or the built-in simulator. Configuration changes, buffer overflows and dropped data are logged as events. <span class="avail">Simulator, generic tag files (<code>dadl analyze</code>) and PicoQuant PTU files (T2 mode, on the main branch) available; other vendor adapters planned.</span></li>
-  <li><b>Calibrate.</b> Dark counts and afterpulsing are fitted jointly from dark inter-arrival data; delays and timing response from the cross-correlation peak; a window-specific heralded detection probability from the heralding ratio. Each fit is stored with its posterior uncertainty, and a new record never overwrites the previous one. <span class="avail">Dark counts, afterpulsing, dead time, DCR(T), delay and timing response, off-peak accidentals and heralding efficiency available on the main branch (<code>dadl calibrate dark</code>, <code>dadl calibrate pairs</code>), with content-addressed records; supersession and validity are recorded, not yet enforced.</span></li>
+  <li><b>Acquire.</b> Time tags are read from a tagger, a recorded file or the built-in simulator. Configuration changes, buffer overflows and dropped data are logged as events. <span class="avail">Simulator, generic tag files (<code>dadl analyze</code>) and PicoQuant PTU files (T2 mode, on the 0.1.0) available; other vendor adapters planned.</span></li>
+  <li><b>Calibrate.</b> Dark counts and afterpulsing are fitted jointly from dark inter-arrival data; delays and timing response from the cross-correlation peak; a window-specific heralded detection probability from the heralding ratio. Each fit is stored with its posterior uncertainty, and a new record never overwrites the previous one. <span class="avail">Dark counts, afterpulsing, dead time, DCR(T), delay and timing response, off-peak accidentals and heralding efficiency available in 0.1.0 (<code>dadl calibrate dark</code>, <code>dadl calibrate pairs</code>), with content-addressed records; supersession and validity are recorded, not yet enforced.</span></li>
   <li><b>Correct and fit.</b> CHSH, HOM visibility and tomography are computed through the forward model, with calibration uncertainty propagated by joint Monte Carlo sampling. Every result returns its raw value first, its corrected value where permitted, and its labels (Listing 2). <span class="avail">Raw CHSH and visibility available; corrected values planned.</span></li>
   <li><b>Explain.</b> When a result changes between runs, the analysis is recomputed with each identifiable cause held at its earlier value (Section 7). <span class="avail">Planned.</span></li>
   <li><b>Archive.</b> Time tags from calibration windows and declared runs are stored in Photon-HDF5 <span class="cite">[9]</span> with a calibration group (under <code>/user</code> until a <code>/calibration</code> group is accepted upstream) recording which records were applied, in what order, and with which software versions. <span class="avail">Schema available; export planned.</span></li>
@@ -400,7 +400,7 @@ analysis:
 </div>
 
 <div class="listing">
-  <div class="lcap"><b>Listing 2.</b> Excerpt of the output of the bundled example on simulated data (main branch).</div>
+  <div class="lcap"><b>Listing 2.</b> Excerpt of the output of the bundled example on simulated data (version 0.1.0).</div>
 <pre>$ dadl quickstart chsh-spad
   Raw S = 2.6941 ± 0.0105   (statistical only (Gaussian, 1 sigma))
   Labels: fair sampling and fair coincidence assumed (post-selected on coincidences);
@@ -529,7 +529,7 @@ analysis:
 
 <!-- ========== 10 ========== -->
 <h2 id="status"><span class="num">10</span>Status and roadmap</h2>
-<p>DADL is pre-alpha, and the first phase is partly released (version 0.0.3). Its tests, including the published guardrail cases, closed-form checks and test cases shared by the Rust and Python implementations, run in <a href="https://github.com/usecommon/dadl/actions/workflows/ci.yml">continuous integration</a> on Windows, Linux and macOS. Table 2 copies the canonical phase plan in the <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md#mvp-scope-and-milestones">design document</a>; the project is maintained by a small team, so later phases are scoped to what it can sustain. All review to date has been AI-agent role-play review, with no independent human review yet, recorded in the <a href="https://github.com/usecommon/dadl/tree/main/docs/reviews">review records</a>.</p>
+<p>DADL is pre-alpha (version 0.1.0): the first phase is partly done and the second is done. Its tests, including the published guardrail cases, closed-form checks and test cases shared by the Rust and Python implementations, run in <a href="https://github.com/usecommon/dadl/actions/workflows/ci.yml">continuous integration</a> on Windows, Linux and macOS. Table 2 copies the canonical phase plan in the <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md#mvp-scope-and-milestones">design document</a>; the project is maintained by a small team, so later phases are scoped to what it can sustain. All review to date has been AI-agent role-play review, with no independent human review yet, recorded in the <a href="https://github.com/usecommon/dadl/tree/main/docs/reviews">review records</a>.</p>
 
 <div class="tcap"><span class="lab">Table 2.</span> Development phases.</div>
 <div class="table">
@@ -537,7 +537,7 @@ analysis:
   <thead><tr><th style="width:26%">Phase</th><th>Scope</th><th style="width:14%">Status</th></tr></thead>
   <tbody>
     <tr><td>1. Simulator and starter kit</td><td>Time-tag simulator with injected imperfections; configuration-driven quickstart; raw CHSH and visibility from simulated or recorded tags; guardrail policy with recorded provenance; Rust core held to shared test cases</td><td class="st">partial</td></tr>
-    <tr><td>2. Calibration engine</td><td>Dark counts, dead time, afterpulsing, delay and timing response, heralding efficiency, off-peak accidentals; one tagger adapter (PicoQuant PTU); dataset and detector-model interfaces; Python bindings to the Rust core</td><td class="st">done, unreleased</td></tr>
+    <tr><td>2. Calibration engine</td><td>Dark counts, dead time, afterpulsing, delay and timing response, heralding efficiency, off-peak accidentals; one tagger adapter (PicoQuant PTU); dataset and detector-model interfaces; Python bindings to the Rust core</td><td class="st">done (0.1.0)</td></tr>
     <tr><td>3. Inference</td><td>Forward model; joint Monte Carlo uncertainty; corrected CHSH and HOM visibility; signed analysis plans</td><td class="st">planned</td></tr>
     <tr><td>4. Attribution and agents</td><td>Attribution engine; typed MCP tools with human approval for hazardous instrument changes; artifact signing</td><td class="st">seeking contributors</td></tr>
     <tr><td>5. Hardware pilot</td><td>One research laboratory and one network testbed; comparison of inexpensive and reference detectors, published including disagreements</td><td class="st">needs a partner</td></tr>
@@ -565,7 +565,7 @@ analysis:
 </ol>
 
 <footer>
-  DADL v0.0.3 · <a href="https://github.com/usecommon/dadl">Source</a> · <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md">Design document</a> · <a href="https://github.com/usecommon/dadl/issues">Issues</a> · MIT OR Apache-2.0
+  DADL v0.1.0 · <a href="https://github.com/usecommon/dadl">Source</a> · <a href="https://github.com/usecommon/dadl/blob/main/docs/design.md">Design document</a> · <a href="https://github.com/usecommon/dadl/issues">Issues</a> · MIT OR Apache-2.0
 </footer>
 </article>
 </body>

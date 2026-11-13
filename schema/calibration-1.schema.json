@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/usecommon/dadl/main/schema/calibration-1.schema.json",
-  "title": "DADL calibration artifact manifest, version 1 (draft)",
-  "description": "DRAFT: may change until phase 2 produces real artifacts. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
+  "$id": "https://raw.githubusercontent.com/usecommon/dadl/v0.1.0/schema/calibration-1.schema.json",
+  "title": "DADL calibration artifact manifest, version 1",
+  "description": "Frozen at DADL 0.1.0: later versions may add optional fields; changing existing ones needs calibration/2. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
   "type": "object",
   "additionalProperties": false,
   "required": [

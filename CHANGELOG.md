@@ -1,10 +1,16 @@
 # Changelog
 
-All notable changes. DADL is pre-alpha: in 0.0.x anything may change between
-releases. The `calibration/1` schema is a draft and is versioned separately
-from the packages.
+All notable changes. DADL is pre-alpha: in 0.x anything may change between
+releases. The `calibration/1` artifact schema is frozen from 0.1.0 (new
+optional fields may be added; changes to existing ones need `calibration/2`)
+and is versioned separately from the packages.
 
-## Unreleased
+## 0.1.0 (2026-11-13)
+
+Phase 2: calibrations with simulation-checked 95% intervals, content-addressed
+artifacts, PicoQuant PTU input, a hardware twin and the optional compiled core,
+after an outside-expert review of the assumptions and ten further review
+cycles. Pre-alpha: read the README's "Known limits".
 
 ### Phase 2, milestone 1: data model and the dark calibration
 

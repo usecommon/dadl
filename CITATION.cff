@@ -4,7 +4,8 @@ title: "DADL: Detector-Aware Data Layer for quantum optics experiments"
 type: software
 authors:
   - name: "The DADL contributors"
-version: "0.0.3"
+version: "0.1.0"
+date-released: "2026-11-13"
 license: "MIT OR Apache-2.0"
 repository-code: "https://github.com/usecommon/dadl"
 url: "https://usecommon.github.io/dadl/"

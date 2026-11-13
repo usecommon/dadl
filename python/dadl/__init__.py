@@ -9,7 +9,7 @@ intervals.)
 installed, else "python". Set DADL_BACKEND=python or =rust to choose.
 """
 
-__version__ = "0.0.3"
+__version__ = "0.1.0"
 
 from dadl._backend import name as backend  # noqa: E402
 from dadl.analysis.chsh import Window, chsh  # noqa: E402

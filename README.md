@@ -13,14 +13,14 @@ result look better than the data supports.
 a short technical report on the problem DADL solves, how it is used in an
 experiment, its guardrails and its roadmap.
 
-> **Status: pre-alpha, phase 1 (partial), phase 2 in progress.** Anything may change in 0.0.x. The
+> **Status: pre-alpha (0.1.0): phase 1 partial, phase 2 done.** Anything may change in 0.x. The
 > canonical phase plan is in [docs/design.md](docs/design.md#mvp-scope-and-milestones).
 
-## What works today (on `main`; 0.0.3 is the latest release)
+## What works today (0.1.0)
 
 - A seeded time-tag simulator with injected efficiency, dark counts,
   non-paralyzable dead time, jitter, delay and cascading afterpulsing.
-- **Calibration (phase 2, on `main`, unreleased):** dark rate, afterpulse
+- **Calibration (phase 2):** dark rate, afterpulse
   probability and time constant, and dead time fitted from a dark acquisition,
   with 95% intervals whose coverage is checked in CI at a few simulated
   regimes (see "Known limits"), written as
@@ -38,14 +38,14 @@ experiment, its guardrails and its roadmap.
   the guardrail policy allows it. `dadl quickstart hom-snspd` simulates a HOM
   dip on two SNSPDs and analyses it from the tags.
 - **PicoQuant PTU files** (T2: PicoHarp, HydraHarp, TimeHarp 260, MultiHarp)
-  read by DADL's own adapter (phase 2, on `main`).
+  read by DADL's own adapter (phase 2).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
-- **Hardware twin** (phase 2, on `main`): `dadl simulate SETUP --out DIR
+- **Hardware twin** (phase 2): `dadl simulate SETUP --out DIR
   --format ptu` writes the simulation as PicoQuant PTU files (marked
   simulated), and `SimulatedTagger` emulates a live tagger with buffer
   overflows, dropped batches and config changes. See `adapters/README.md`.
-- **Optional compiled core** (phase 2, on `main`): with `dadl-quantum-core`
+- **Optional compiled core** (phase 2): with `dadl-quantum-core`
   installed, dead time, coincidences and histograms run in Rust (about 40-60x
   faster; about 5x for cross-correlation); `dadl.backend()` says which is in use.
 
@@ -333,7 +333,7 @@ histograms; about 5x for the cross-correlation the calibrations use).
 | `bindings/python/` | PyO3 bindings: the optional `dadl-quantum-core` package (module `dadl_core`) |
 | `python/` | Python package `dadl`: simulator, analyses, guardrails, config, tag files, CLI, tests |
 | `tests/vectors/` | Test cases shared by the Rust and Python suites |
-| `schema/` | JSON Schemas for calibration artifacts (`calibration/1`, draft) and `setup.yaml` (`setup-1`), with a validated example |
+| `schema/` | JSON Schemas for calibration artifacts (`calibration/1`, frozen at 0.1.0) and `setup.yaml` (`setup-1`), with a validated example |
 | `examples/` | Example setups, starting with `chsh-spad` (also bundled in the package) |
 | `adapters/` | Vendor adapters (phase 2 onward) |
 | `mcp/` | MCP agent surface (v0.2+, seeking contributors) |

@@ -6,9 +6,9 @@ reported as a typed event.
 
 | Adapter | Status | Module |
 | --- | --- | --- |
-| PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available on `main` (phase 2) | `dadl.adapters.ptu` |
+| PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available (0.1.0) | `dadl.adapters.ptu` |
 | PicoQuant T3 mode | Planned | |
-| Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available on `main` (phase 2) | `dadl.adapters.simdevice` |
+| Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available (0.1.0) | `dadl.adapters.simdevice` |
 | Swabian Instruments, qutools, IDQ | Seeking contributors | |
 
 ```python
