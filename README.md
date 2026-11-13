@@ -127,7 +127,10 @@ plainly:
   unidentified); DCR(T) refuses runs whose bias condition is recorded as a
   current (a `bias*` key not in volts). A latch or other
   interruption in any acquisition is detected (longest gap against the count
-  rate) and marks calibrations `misfit` and analyses "interrupted"; a source
+  rate) and marks calibrations `misfit` and analyses "interrupted". Many short
+  dropouts (microseconds each, as from a self-resetting latch) are not caught
+  by this single-gap test: 14% of a signal lost in 5–20 µs pieces read
+  heralding 0.627 for 0.729, status ok. A source
   modulated by ±50% or more can trip the same test. Dark-rate drift within
   ±2% between the halves of a run is tolerated and recorded.
 - **Heralding efficiency is grid-specific.** It counts pairs in the same fixed
@@ -148,6 +151,13 @@ plainly:
   reference delay must be small against the window. Acquisitions of different
   length are compared as rates; singles cannot normalise drift (they fall at
   the dip by design).
+- **Provenance in the Python API.** The CLI labels simulated input and records
+  input hashes; `read_tags` followed by `chsh` or `hom_from_tags` in Python
+  does not (it returns arrays, not their provenance).
+- **Hardware twin.** PicoHarp 300 and TimeHarp 260 P presets have two inputs,
+  so they can run the two-channel HOM example but not chsh-spad. The twin
+  puts the first detector on input 0, the sync input of HydraHarp and
+  MultiHarp devices; recordings usually start detectors at input 1.
 - **Whole-file PTU reading.** A PTU file is decoded in memory at about 100
   bytes per record (215 with many markers): a 4 GB file needs about 100 GB.
   Chunked reading is planned. Unrecognised special records and a divided sync

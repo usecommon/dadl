@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-DADL is pre-alpha. Only the latest 0.0.x release receives fixes.
+DADL is pre-alpha. Only the latest 0.x release receives fixes.
 
 ## Reporting
 
@@ -23,8 +23,13 @@ In scope for the code that exists today:
   value without the refusal or labels the policy requires, other than
   deliberately constructing or editing a result in your own process (which
   the docs state cannot be prevented).
-- Parsing of setup files and tag files (crashes, resource exhaustion, unsafe
-  YAML loading).
+- Parsing of setup files, tag files (npz, csv, PTU) and calibration artifacts
+  (crashes, resource exhaustion, unsafe YAML loading, decompression bombs).
+- Artifact verification: a file that `read_artifact` accepts although its
+  bytes, hashes or self-consistency checks should fail. (Artifacts are not
+  signed: anyone who can write a file can mint a self-consistent one.)
+- Output paths: the CLI writing outside `--out`, through symlinks, or over
+  existing files without `--force`.
 - The release supply chain: workflows, published packages and their
   provenance.
 

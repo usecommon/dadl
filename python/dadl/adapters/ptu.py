@@ -229,14 +229,16 @@ class PtuFile:
         except OSError as exc:
             raise AdapterError(f"cannot read {self.path}: {exc}") from exc
         rtype = self.header.get("TTResultFormat_TTTRRecType")
+        if not isinstance(rtype, int) or isinstance(rtype, bool):
+            raise AdapterError(f"{self.path}: TTResultFormat_TTTRRecType must be an integer, got {rtype!r}")
         if rtype in T3_TYPES:
             raise AdapterError(f"{self.path}: T3 mode (record type 0x{rtype:08X}) is not supported; record in T2 mode")
         if rtype not in FORMATS:
             raise AdapterError(f"{self.path}: unsupported PTU record type {rtype!r}")
         self.record_type = int(rtype)
         res = self.header.get("MeasDesc_GlobalResolution")
-        if not isinstance(res, float) or not res > 0:
-            raise AdapterError(f"{self.path}: MeasDesc_GlobalResolution is missing or not positive")
+        if not isinstance(res, float) or not 1e-15 <= res <= 1e-6:
+            raise AdapterError(f"{self.path}: MeasDesc_GlobalResolution is missing or outside 1 fs - 1 us")
         self.resolution_s = res
         self._events: tuple[Event, ...] = ()
         self._counts: dict[str, int] = {}
@@ -313,7 +315,8 @@ class PtuFile:
             # QKD review, cycle 4: without a stop reason, completeness is unknown, not assured.
             events.append(Event("stop-reason", detail={"reason": "not recorded: completeness unknown"}))
         if stop is not None:
-            stop = int(stop)
+            if not isinstance(stop, int) or isinstance(stop, bool):
+                raise AdapterError(f"{self.path}: TTResult_StopReason must be an integer, got {stop!r}")
             if stop in COMPLETE_STOP_REASONS:
                 events.append(Event("stop-reason", value=stop, detail={"reason": COMPLETE_STOP_REASONS[stop]}))
             else:

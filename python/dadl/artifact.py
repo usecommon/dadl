@@ -334,13 +334,31 @@ def _jcs_int(text: str) -> int | float:
     return value if abs(value) <= 2**53 else float(value)
 
 
+#: Largest manifest read (a 100 MB manifest took 710 MB to parse; security review, cycle 9).
+MAX_MANIFEST_BYTES = 16 * 2**20
+
+
 def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
-    """Read and verify an artifact manifest and its posterior table."""
-    path = Path(path)
+    """Read and verify an artifact manifest and its posterior table.
+
+    "Verify" means integrity and self-consistency only: anyone who can write the file can mint a
+    self-consistent artifact (no signatures yet). Malformed content raises ArtifactError.
+    """
     try:
+        return _read_artifact(Path(path))
+    except ArtifactError:
+        raise
+    except (KeyError, TypeError, AttributeError, IndexError, ValueError, RecursionError) as exc:
+        raise ArtifactError(f"{path}: malformed artifact ({type(exc).__name__}: {exc})") from exc
+
+
+def _read_artifact(path: Path) -> tuple[dict[str, Any], np.ndarray]:
+    try:
+        if path.stat().st_size > MAX_MANIFEST_BYTES:
+            raise ArtifactError(f"{path}: manifest larger than {MAX_MANIFEST_BYTES} bytes")
         raw = path.read_bytes()
         manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates, parse_int=_jcs_int)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise ArtifactError(f"cannot read artifact {path}: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ArtifactError(f"{path}: not a {SCHEMA} manifest")
@@ -360,7 +378,7 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
     checks = manifest.get("checks", {})
     p = checks.get("ppc_pvalue")
     if isinstance(p, (int, float)) and "status" in checks:
-        if checks["status"] != ("misfit" if p < MISFIT_ALPHA else "ok"):
+        if checks["status"] != ("misfit" if p < MISFIT_ALPHA or checks.get("converged") is False else "ok"):
             raise ArtifactError(f"{path}: checks.status contradicts checks.ppc_pvalue")
     for name, entry in (manifest.get("summary") or {}).items():
         v, lo, hi = entry.get("value"), entry.get("low"), entry.get("high")
@@ -377,6 +395,8 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
         samples = np.load(io.BytesIO(post), allow_pickle=False)
     except ValueError as exc:
         raise ArtifactError(f"{ppath}: not a .npy table: {exc}") from exc
+    if samples.dtype.kind != "f" or samples.dtype.itemsize != 8:
+        raise ArtifactError(f"{ppath}: posterior table must be float64, not {samples.dtype}")
     if samples.ndim != 2 or posterior_sha256(samples) != manifest["posterior"]["sha256"]:
         raise ArtifactError(f"{ppath}: posterior hash does not match the manifest")
     if samples.shape != (manifest["posterior"]["n_samples"], len(manifest["posterior"]["params"])):

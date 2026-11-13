@@ -49,8 +49,11 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
     settings = tuple(settings)
     if path.is_dir():
         return _read_ptu_dir(path, channels, settings)
+    if path.exists() and not path.is_file():
+        raise ConfigError(f"{path}: not a regular file")
     try:
         if path.suffix == ".npz":
+            _check_npz_size(path)
             with np.load(path, allow_pickle=False) as npz:
                 missing = [c for c in COLUMNS if c not in npz.files]
                 if missing:
@@ -90,6 +93,8 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
             raise ConfigError(f"{path}: tag files must be .npz or .csv")
     except FileNotFoundError as exc:
         raise ConfigError(f"tag file not found: {path}") from exc
+    except PermissionError as exc:
+        raise ConfigError(f"cannot read {path}: permission denied") from exc
     except (zipfile.BadZipFile, EOFError) as exc:
         raise ConfigError(f"{path}: not a readable .npz file (truncated or corrupt): {exc}") from exc
     except (ValueError, OverflowError) as exc:
@@ -128,6 +133,27 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
                 )
             runs[pair][name] = arr
     return runs
+
+
+#: Largest decompressed size, and compression ratio, accepted for a .npz tag file: a 584 KB file
+#: of zeros decompressed to 1.2 GB (security review, cycle 9). Tag columns compress about 2-4x.
+MAX_NPZ_BYTES = 16 * 2**30
+MAX_NPZ_RATIO = 200
+
+
+def _check_npz_size(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ConfigError(f"{path}: not a readable .npz file (truncated or corrupt): {exc}") from exc
+    total = sum(i.file_size for i in infos)
+    packed = sum(i.compress_size for i in infos) or 1
+    if total > MAX_NPZ_BYTES or (total > 2**26 and total / packed > MAX_NPZ_RATIO):
+        raise ConfigError(
+            f"{path}: decompresses to {total} bytes ({total / packed:.0f}x its stored size); refused as a likely "
+            f"decompression bomb (limits {MAX_NPZ_BYTES} bytes, {MAX_NPZ_RATIO}x above 64 MiB)"
+        )
 
 
 #: First line of a CSV tag file written from a simulation.
@@ -180,7 +206,7 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
     runs: Runs = {}
     for i, key in enumerate(settings):
         path = ptu_file(directory, i)
-        if not path.exists():
+        if not path.is_file():
             raise ConfigError(f"{directory}: missing {path.name} (one PTU file per acquisition, setting0.ptu, ...)")
         try:
             reader = PtuFile(path)

@@ -209,3 +209,28 @@ since analyses refuse duplicate timestamps.
 | 8.19 | Questionable | `calibrate dark` stopped at the first bad channel; errors did not name it | Fixed: per-channel handling and a summary |
 | 8.20 | Minor | Memory figures beyond PTU undocumented; truncated npz traceback; `ppc_pvalue` unhelpful as a trend | Documented; npz errors refused cleanly |
 | 8.21 | Minor | CI (Linux, NumPy 1.24) once gave different draws for the same data and seed; not reproduced locally or in the next run | Test compares to a tight tolerance; README says IDs are reproducible on one software stack, and floating-point order can differ across builds |
+
+## Cycle 9: security engineer, second red team, hardware-twin integration tester
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 9.1 | Wrong | A 2 KB setup of nested YAML aliases expanded to gigabytes (900 MB at 8 levels) despite the 1 MB file limit | Fixed: refused above 100,000 expanded values; deep nesting and invalid keys give clean errors |
+| 9.2 | Questionable | No cap on decompressed `.npz` size (584 KB → 1.2 GB) | Fixed: refused above 16 GiB or 200x compression above 64 MiB |
+| 9.3 | Questionable | Tracebacks or a hang for unreadable files, FIFOs, read-only `--out` | Fixed: regular files required; permission and OS errors reported cleanly |
+| 9.4 | Questionable | `simulate` overwrote recorded files and wrote through symlinks | Fixed: refuses existing targets without `--force`; `--device` only with `--format ptu` |
+| 9.5 | Minor | Malformed artifacts raised raw exceptions; a complex posterior passed the hash | Fixed: `ArtifactError`; float64 required; manifest size cap |
+| 9.6 | Minor | PTU header values not type-checked (float stop reason truncated to "complete") | Fixed: integer stop reason and record type, resolution 1 fs–1 µs |
+| 9.7 | Minor | SECURITY.md said 0.0.x and left artifacts and output paths out of scope | Fixed |
+| 9.8 | Minor | `--supersedes` used in a path before its format was checked | Fixed |
+| 9.9 | Wrong | Ringing echoes on 5.5% of clicks removed the dead-time label (S = 2.13, true 1.98), and the CLI's unit refusal told the user to lower `dead_time_ps`, which also hid it | Fixed: largest lower bound over several gap quantiles (label holds at 10% echoes; no false labels in 60 short runs); the CLI names double triggers and says not to lower the dead time |
+| 9.10 | Wrong | Dark tags exported in ns passed the unit check (0.5% short gaps) and wrote 500,613 cps for 500 | Fixed: refused above 0.2% impossible gaps; a dark rate over 100x the declared one is not written |
+| 9.11 | Wrong | An undeclared 3 ns cable delay hid a source-on run from the dark refusal | Fixed: coincidence peaks searched over ±50 ns |
+| 9.12 | Wrong | The heralding peak search covered ±10 slots (±2 ns at 200 ps), and half-slot misplacement passed | Fixed: ±max(10 slots, 20 ns); a neighbour holding half the slot's excess marks misfit (heralding v5) |
+| 9.13 | Wrong | `--accept-misfit` wrote a misplaced-delay heralding artifact as status ok | Fixed: marked misfit, so it is written as such |
+| 9.14 | Questionable | Many short dropouts (5–20 µs) pass the single-gap interruption test | Stated in README |
+| 9.15 | Minor | A non-converged fit was written as status ok | Fixed: non-convergence is a misfit |
+| 9.16 | Minor | Stale CLI message about CSV; simulated label exists only in the CLI | Fixed; stated |
+| 9.17 | Questionable | The tagger serial check was a substring test ("123" matched "HydraHarp-1234567") | Fixed: whole-token comparison |
+| 9.18 | Minor | The live twin did not enforce device input counts; faults outside the acquisition were silent | Fixed: refused |
+| 9.19 | Questionable | The live twin's read after losses looked complete | Fixed: `incomplete` and `data_loss` metadata |
+| 9.20 | Minor | Stale `--acquired` help; event ordering; device-only flags; twin input 0 is the sync input; window not a whole number of ticks | Help fixed; README notes the twin's input numbering; the rest open |

@@ -66,7 +66,7 @@ from dadl.stats import LEVEL, Interval
 
 KIND = "heralding-efficiency"
 METHOD = "herald-ratio"
-METHOD_VERSION = "4"
+METHOD_VERSION = "5"
 MIN_HERALDS = 100
 
 UNITS = {"heralding_efficiency": "1"}
@@ -81,8 +81,12 @@ DEFINITIONS = {
 P_POINTS = 200
 
 
-#: Neighbouring slots checked for the pair peak, on each side of the declared one.
+#: The pair peak is searched for over +-max(PEAK_SEARCH_SLOTS windows, PEAK_SEARCH_PS) around the
+#: declared slot (sized in time: 10 slots of a 200 ps window missed a 3 ns cable change; second
+#: red-team review, cycle 9), at most PEAK_SEARCH_MAX_SLOTS slots each side.
 PEAK_SEARCH_SLOTS = 10
+PEAK_SEARCH_PS = 20_000
+PEAK_SEARCH_MAX_SLOTS = 1000
 
 
 def _peak_placement_pvalue(
@@ -91,10 +95,16 @@ def _peak_placement_pvalue(
     """0 when a neighbouring slot holds more coincidences than the declared one: the declared delay
     misses the pair peak (operator review, cycle 8: a 3 ns cable change read eta 0.0005, status ok).
     """
-    shifts = np.array([k * width_ps for k in range(-PEAK_SEARCH_SLOTS, PEAK_SEARCH_SLOTS + 1) if k], dtype=np.int64)
+    reach = min(PEAK_SEARCH_MAX_SLOTS, max(PEAK_SEARCH_SLOTS, -(-PEAK_SEARCH_PS // width_ps)))
+    shifts = np.array([k * width_ps for k in range(-reach, reach + 1) if k], dtype=np.int64)
     near = shifted_coincidences(herald, signal, width_ps, d_h, d_s, shifts)
     best = int(np.argmax(near))
-    if near[best] > max(c, 10) and near[best] - c > 5.0 * np.sqrt(near[best] + c):
+    # A neighbour holding more than half the declared slot's coincidences (significantly above the
+    # background) means the peak straddles or misses the slot: a half-slot misplacement read eta
+    # 0.466 for 0.729.
+    background = float(np.median(near))
+    excess = near[best] - background
+    if excess > 10 and excess > 0.5 * max(c - background, 0.0) and excess > 5.0 * np.sqrt(near[best] + 1.0):
         notes.append(
             f"the pair peak is {int(shifts[best])} ps from the declared slot ({int(near[best])} coincidences there "
             f"against {c}): the declared delays are stale; recalibrate the delay and declare it"

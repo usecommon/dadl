@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
+import os
+import re
 import shutil
 import sys
 from importlib import resources
@@ -29,7 +32,7 @@ from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
-from dadl.tagfile import read_tags, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags
+from dadl.tagfile import ptu_file, read_tags, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -211,6 +214,21 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     else:
         runs = simulate_setup(setup)
         what = "HOM tags (setting 0 dip, 1 reference)" if setup.analysis_type == "hom" else "CHSH tags"
+    # Security review, cycle 9: simulate replaced recorded PTU files and wrote through symlinks.
+    out_path = Path(args.out)
+    if args.format != "ptu" and args.device is not None:
+        raise DadlError("--device applies only with --format ptu")
+    args.device = args.device or "hydraharp"
+    if args.format == "ptu" and out_path.suffix in (".npz", ".csv"):
+        raise DadlError(f"--format ptu writes a folder of PTU files; {args.out} looks like a tag file name")
+    targets = [ptu_file(out_path, k) for k in range(len(setup.setting_keys))] if args.format == "ptu" else [out_path]
+    existing = [str(t) for t in targets if os.path.lexists(t)]
+    if existing and not args.force:
+        raise DadlError(f"{', '.join(existing[:3])} already exist(s); pass --force to overwrite them with simulated data")
+    if args.force:
+        for t in existing:
+            if Path(t).is_symlink():
+                Path(t).unlink()
     if args.format == "ptu":
         try:
             files = write_ptu_dir(args.out, runs, setup.channels, setup.setting_keys, device=args.device)
@@ -228,7 +246,7 @@ def _add_record_options(p: argparse.ArgumentParser) -> None:
     """Options that complete the artifact as a record (calibration-lab review, cycle 3)."""
     p.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",
                    help="a numeric condition to record, e.g. temperature_K=233.1 or bias_V=24.5 (repeatable)")
-    p.add_argument("--acquired", help="when the data were taken (ISO 8601); default: from the PTU header, if any")
+    p.add_argument("--acquired", help="when the data were taken (ISO 8601 with a UTC offset); a PTU file's local creation time is recorded separately")
     p.add_argument("--created", help="record creation time (ISO 8601), to reproduce an artifact; default now")
     p.add_argument("--valid-until", help="end of the intended validity (ISO 8601); recorded, not enforced")
     p.add_argument("--supersedes", help="ID of the artifact this one replaces (must exist in --out)")
@@ -282,6 +300,8 @@ def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str,
             local = dt.datetime(1899, 12, 30) + dt.timedelta(days=stamp)
             instrument["file_created_local"] = local.strftime("%Y-%m-%dT%H:%M:%S") + " (local time, zone unknown)"
     supersedes = args.supersedes
+    if supersedes and not re.fullmatch(r"[0-9a-f]{64}", supersedes):
+        raise DadlError(f"--supersedes must be an artifact ID (64 hex digits), got {supersedes!r}")
     if supersedes and not (Path(args.out) / f"{supersedes}.json").exists():
         raise DadlError(f"--supersedes: no artifact {supersedes} in {args.out}")
     write = {
@@ -320,7 +340,8 @@ def _backend(setup, tags_path: str) -> str:
         raise DadlError(
             f"{tags_path} is not marked as simulated (DADL marks the .npz and PTU files it simulates), but the "
             "setup says `backend: sim`. For recorded data set `backend: file` and `hardware: {tagger: <serial>}` "
-            "in setup.yaml; for simulated data write .npz or PTU instead of .csv."
+            "in setup.yaml. (Files written by `dadl simulate` are marked; a file re-saved by other software loses "
+            "the mark.)"
         )
     path = Path(tags_path)
     if path.is_dir() and setup.tagger:
@@ -328,7 +349,9 @@ def _backend(setup, tags_path: str) -> str:
 
         serials = {str(PtuFile(f).header.get("HW_SerialNo", "")).strip() for f in sorted(path.glob("setting*.ptu"))}
         serials.discard("")
-        wrong = sorted(sn for sn in serials if sn not in setup.tagger)
+        # Whole-token comparison: "123" must not match "HydraHarp-1234567" (twin review, cycle 9).
+        tagger = setup.tagger
+        wrong = sorted(sn for sn in serials if not (sn == tagger or tagger.endswith(("-" + sn, " " + sn, "_" + sn))))
         if wrong:
             raise DadlError(
                 f"the PTU files were recorded on tagger serial {', '.join(wrong)}, but setup.yaml says "
@@ -356,12 +379,18 @@ def _check_time_units(runs: dict, setup) -> None:
             if det is None or det.dead_time_ps <= 0 or arr.size < 100:
                 continue
             short = float(np.mean(np.diff(arr) < det.dead_time_ps / 2))
-            if short > 0.05:
+            # Recorded ps data have essentially no gaps under half the dead time; 0.2% catches ns
+            # exports of dark data too (second red-team review, cycle 9: 0.5% passed at 5%).
+            if short > 0.002:
                 raise DadlError(
-                    f"{name} in acquisition {key}: {short:.0%} of the gaps between tags are shorter than half the "
-                    f"declared dead time ({det.dead_time_ps} ps). Are the timestamps in picoseconds (not ns)? "
-                    "If they are, correct dead_time_ps in setup.yaml."
+                    f"{name} in acquisition {key}: {short:.1%} of the gaps between tags are shorter than half the "
+                    f"declared dead time ({det.dead_time_ps} ps). Are the timestamps in picoseconds (not ns)? If "
+                    "they are, the channel has double triggers or echoes (a cable reflection, a discriminator "
+                    "ringing): fix the hardware, or remove them and say so; do not lower dead_time_ps to pass."
                 )
+
+
+SOURCE_ON_RANGE_PS = 50_000
 
 
 def _refuse_source_on(tags: dict, setup) -> None:
@@ -370,24 +399,28 @@ def _refuse_source_on(tags: dict, setup) -> None:
     The new-user review ran `calibrate dark` on source-on CHSH tags and got a confident dark rate
     of 25,400 cps (true 500), written as a normal artifact.
     """
-    from dadl.coincidences import grid_coincidences
+    from dadl.histogram import cross_correlation
 
+    # Searched over +-50 ns, not only at the declared delays: dark calibration usually comes before
+    # the delays are declared (second red-team review, cycle 9: a 3 ns cable delay hid the peak).
     names = [n for n in sorted(tags) if np.asarray(tags[n]).size > 1]
     width = setup.window.width_ps
-    delays = setup.window.delays_ps
     for i, x in enumerate(names):
         for y in names[i + 1:]:
             a, b = np.asarray(tags[x]), np.asarray(tags[y])
             span = float(max(a[-1], b[-1]) - min(a[0], b[0]))
             if span <= 0:
                 continue
-            c = grid_coincidences(a, b, width, delays.get(x, 0), delays.get(y, 0))
+            hist = cross_correlation(a, b, width, SOURCE_ON_RANGE_PS).astype(float)
             expected = a.size * b.size * width / span
-            if c - expected > 10 and (c - expected) / np.sqrt(expected + 1.0) > 6:
+            peak = float(hist.max())
+            n_bins = hist.size
+            # 6 sigma plus a look-elsewhere margin over the bins searched.
+            if peak - expected > 10 and (peak - expected) / np.sqrt(expected + 1.0) > 6 + math.log(n_bins):
                 raise DadlError(
-                    f"channels {x} and {y} share {c} coincidences where {expected:.3g} are expected by chance: "
-                    "the source was on. A dark calibration needs an acquisition with the source off "
-                    "(simulated: dadl simulate SETUP --dark)."
+                    f"channels {x} and {y} share a coincidence peak of {peak:.0f} in one {width} ps bin where "
+                    f"{expected:.3g} are expected by chance: the source was on. A dark calibration needs an "
+                    "acquisition with the source off (simulated: dadl simulate SETUP --dark)."
                 )
 
 
@@ -438,6 +471,14 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
             )
         declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
         fitted = cal.estimates["dark_rate_cps"].low
+        if declared > 0 and fitted > 100 * declared:
+            # Second red-team review, cycle 9: dark tags exported in ns read 500,613 cps for 500, ok.
+            print(
+                f"  {name}: not written: the dark rate is more than 100x the setup's declared {declared:g} cps. "
+                "Timestamps in ns rather than ps, light on the detector, or a wrong declared rate?"
+            )
+            failed.append(name)
+            continue
         if declared > 0 and fitted > 10 * declared:
             print(
                 f"  warning: the dark rate is more than 10x the setup's declared {declared:g} cps. Check that the "
@@ -547,10 +588,10 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     for cal in cals:
         print()
         print(cal)
-        if misplaced and cal is cals[2] and not args.accept_misfit:
-            refused.append(cal.kind)
-            print("  not written: the declared delay does not put pairs in the declared slot; declare the fitted delay")
-            continue
+        if misplaced and cal is cals[2]:
+            # Marked misfit, so --accept-misfit writes it as such rather than as ok (second
+            # red-team review, cycle 9).
+            cal = dataclasses.replace(cal, ppc_pvalue=0.0)
         try:
             path = _write_checked(dataclasses.replace(cal, inputs=cal.inputs + inputs), args.out, args.accept_misfit, **write)
         except DadlError as exc:
@@ -667,7 +708,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     from dadl.adapters.ptu_write import DEVICES
 
-    sim.add_argument("--device", choices=sorted(DEVICES), default="hydraharp", help="PTU device to mimic (default hydraharp)")
+    sim.add_argument("--device", choices=sorted(DEVICES), default=None, help="PTU device to mimic (default hydraharp)")
+    sim.add_argument("--force", action="store_true", help="overwrite existing output files")
     sim.add_argument("--dark", action="store_true", help="simulate dark acquisitions (source off) for calibration")
     sim.add_argument(
         "--heralding", action="store_true",
@@ -738,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
-    except (DadlError, ValueError, OverflowError) as exc:
+    except (DadlError, ValueError, OverflowError, OSError) as exc:
         # Library input errors (ValueError, OverflowError) reach CLI users as a message, not a
         # traceback (software review, cycle 2).
         print(f"dadl: error: {exc}", file=sys.stderr)

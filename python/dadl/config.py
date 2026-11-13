@@ -138,6 +138,26 @@ def _wrap(where: str, fn, *args, **kwargs):
         raise ConfigError(f"{where}: {exc}") from exc
 
 
+#: Largest number of values a setup may expand to, counting each use of an alias again: a 2 KB
+#: file of nested aliases expanded to gigabytes when a value was turned into text (security
+#: review, cycle 9).
+MAX_NODES = 100_000
+
+
+def _check_size(data: Any) -> None:
+    count, stack = 0, [data]
+    while stack:
+        item = stack.pop()
+        count += 1
+        if count > MAX_NODES:
+            raise ConfigError(f"setup file expands to more than {MAX_NODES} values (nested aliases?)")
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
 def read_yaml(path: str | Path) -> dict[str, Any]:
     """Read a YAML mapping, refusing duplicate keys, oversize files and bad encodings."""
     path = Path(path)
@@ -158,6 +178,11 @@ def read_yaml(path: str | Path) -> dict[str, Any]:
         data = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
     except yaml.YAMLError as exc:
         raise ConfigError(f"setup file is not valid YAML: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError("setup file is nested too deeply") from exc
+    except TypeError as exc:
+        raise ConfigError(f"setup file has an invalid key: {exc}") from exc
+    _check_size(data)
     return _mapping(data, "the setup file's top level")
 
 

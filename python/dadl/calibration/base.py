@@ -108,8 +108,9 @@ class Calibration:
 
     @property
     def status(self) -> str:
-        """"ok", or "misfit" when the predictive check fails (p < MISFIT_ALPHA)."""
-        return "misfit" if self.ppc_pvalue < MISFIT_ALPHA else "ok"
+        """"ok", or "misfit" when the predictive check fails (p < MISFIT_ALPHA) or the fit did not
+        converge (second red-team review, cycle 9: a non-converged delay fit was written as ok)."""
+        return "misfit" if self.ppc_pvalue < MISFIT_ALPHA or not self.converged else "ok"
 
     def __str__(self) -> str:
         lines = [f"{self.kind} ({self.method} {self.method_version}) for {', '.join(map(str, self.channels))}"]

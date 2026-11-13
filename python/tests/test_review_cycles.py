@@ -763,3 +763,91 @@ def test_acquired_needs_an_offset_and_records_are_json(tmp_path, capsys):
     argv = ["calibrate", "dark", "chsh-spad", "--tags", str(tags), "--channel", "A+", "--out", str(tmp_path / "a")]
     assert main(argv + ["--acquired", "2026-11-01T09:00"]) == 1
     assert "UTC offset" in capsys.readouterr().err
+
+
+# --- Cycle 9 -----------------------------------------------------------------------------------
+
+
+def test_yaml_alias_bombs_and_npz_bombs_are_refused(tmp_path):
+    import zipfile
+
+    from dadl.config import read_yaml
+    from dadl.tagfile import read_tags
+
+    lines = ["a0: &l0 [x, x, x, x, x, x, x, x, x, x]"]
+    lines += [f"a{i}: &l{i} [" + ", ".join([f"*l{i - 1}"] * 10) + "]" for i in range(1, 7)]
+    bomb = tmp_path / "bomb.yaml"
+    bomb.write_text("\n".join(lines), encoding="utf-8")
+    with pytest.raises(ConfigError, match="expands"):
+        read_yaml(bomb)
+    z = tmp_path / "bomb.npz"
+    with zipfile.ZipFile(z, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("timestamp_ps.npy", b"\0" * (80 * 2**20))
+    with pytest.raises(ConfigError, match="bomb"):
+        read_tags(z)
+
+
+def test_simulate_does_not_overwrite_without_force(tmp_path, capsys):
+    out = tmp_path / "t.npz"
+    out.write_bytes(b"recorded data")
+    assert main(["simulate", "chsh-spad", "--out", str(out)]) == 1
+    assert "--force" in capsys.readouterr().err and out.read_bytes() == b"recorded data"
+    assert main(["simulate", "chsh-spad", "--out", str(out), "--force"]) == 0
+    assert main(["simulate", "chsh-spad", "--out", str(tmp_path / "x.npz"), "--device", "picoharp"]) == 1
+
+
+def test_twin_refuses_impossible_inputs_and_marks_losses():
+    from dadl.adapters import Faults, SimulatedTagger
+    from dadl.cli import example_path
+    from dadl.config import load_setup
+
+    setup = load_setup(example_path("chsh-spad"))
+    with pytest.raises(ValueError, match="inputs"):
+        SimulatedTagger(setup, device="picoharp")
+    with pytest.raises(ValueError, match="within"):
+        SimulatedTagger(setup, faults=Faults(buffer_overflows=((-0.05, 0.1),)))
+    dev = SimulatedTagger(setup, faults=Faults(dropped_batches=(3,)))
+    assert dev.read().metadata["incomplete"] is True
+
+
+def test_echoes_do_not_hide_the_dead_time_label():
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import DEAD_TIME_SELECTION
+    from dadl.sim import PairSource, simulate_chsh
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=0.0, dead_time_ps=1_000_000, jitter_sigma_ps=350.0)
+    rng = np.random.default_rng(4)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=1e6, visibility=0.7), {k: det for k in ("A+", "A-", "B+", "B-")},
+                         0.05, rng)
+    echoed = {k: {c: np.sort(np.concatenate([v, v[rng.random(v.size) < 0.06] + 1000])) for c, v in r.items()}
+              for k, r in runs.items()}
+    assert DEAD_TIME_SELECTION in chsh(echoed, Window(width_ps=2000, source="plan")).labels
+
+
+def test_heralding_peak_search_covers_nanoseconds_at_narrow_windows():
+    from dadl.calibration import calibrate_heralding
+
+    a_det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    b_det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0,
+                           delay_ps=3000)
+    a, b = simulate_pairs(2e5, a_det, b_det, 0.3, np.random.default_rng(1))
+    assert calibrate_heralding(a, b, CHS, width_ps=200, n_draws=10).status == "misfit"
+    assert calibrate_heralding(a, b, CHS, width_ps=200, delay_signal_ps=3000, n_draws=10).status == "ok"
+
+
+def test_non_converged_fits_are_misfits_and_artifacts_check_dtype(tmp_path):
+    import dataclasses
+    import datetime as dt
+
+    from dadl.artifact import ArtifactError, read_artifact, write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.sim import simulate_dark
+
+    tags = simulate_dark(DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000), 2.0, np.random.default_rng(1))
+    cal = calibrate_dark(tags, CHS[0])
+    assert dataclasses.replace(cal, converged=False).status == "misfit"
+    path = write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
+    post = path.with_name(path.stem + ".posterior.npy")
+    np.save(post, np.load(post).astype(np.complex128))
+    with pytest.raises(ArtifactError, match="float64"):
+        read_artifact(path)

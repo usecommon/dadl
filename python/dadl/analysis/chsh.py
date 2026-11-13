@@ -73,9 +73,8 @@ class Window:
         }
 
 
-#: Gap quantile behind the dead-time estimate: high enough that a few percent of double triggers
-#: or duplicates do not set it.
-DEAD_TIME_QUANTILE = 0.05
+#: Gap quantiles behind the dead-time estimate; the largest resulting lower bound is used.
+DEAD_TIME_QUANTILES = (0.05, 0.15, 0.30)
 
 
 def _dead_time_estimate(gaps: np.ndarray) -> float:
@@ -84,17 +83,25 @@ def _dead_time_estimate(gaps: np.ndarray) -> float:
     0.01 / R at low counts and labelled every short run; audit, cycle 6)."""
     if gaps.size < 20:
         return 0.0
-    p = DEAD_TIME_QUANTILE
-    q = float(np.quantile(gaps, p))
-    excess = float(gaps.mean()) - q
-    if excess <= 0:
-        return q
-    rate = 1.0 / excess
-    estimate = q + math.log1p(-p) / rate
-    # A lower bound, 3 standard errors of the quantile below: the label then needs the dead time to
-    # be established, not a fluctuation of a short run's quantile (maximised over 16 channels).
-    se = math.sqrt(p * (1 - p) / gaps.size) / ((1 - p) * rate)
-    return max(0.0, estimate - 3.0 * se)
+    # The largest of the lower bounds from several quantiles: a cluster of echoes or double triggers
+    # below the dead time sets the low quantiles but not the higher ones (second red-team review,
+    # cycle 9: 5.5% ringing echoes removed the label at the 5% quantile).
+    best = 0.0
+    for p in DEAD_TIME_QUANTILES:
+        q = float(np.quantile(gaps, p))
+        excess = float(gaps.mean()) - q
+        if excess <= 0:
+            continue
+        # For gaps tau + Exp(R): mean - Q_p = (1 + ln(1 - p)) / R.
+        rate = (1.0 + math.log1p(-p)) / excess
+        estimate = q + math.log1p(-p) / rate
+        # A lower bound, 3 standard errors of the quantile below: the label then needs the dead
+        # time to be established, not a fluctuation of a short run's quantile.
+        # Quantile noise plus the mean gap's noise, which enters through the rate.
+        lever = math.log1p(-p) / (1.0 + math.log1p(-p))
+        se = math.sqrt(p * (1 - p) / gaps.size / ((1 - p) * rate) ** 2 + lever**2 * float(gaps.var()) / gaps.size)
+        best = max(best, estimate - 4.0 * se)  # 4 sigma: the maximum is taken over many bounds
+    return best
 
 
 def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
