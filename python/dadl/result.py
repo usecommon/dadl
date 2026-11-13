@@ -39,6 +39,15 @@ class Estimate:
             text += f" (exact 95%: [{self.low:.4f}, {self.high:.4f}])"
         return text
 
+    def __format__(self, spec: str) -> str:
+        """Format value and stderr with `spec` (e.g. f"{r.raw:.3f}"); an empty spec is str()."""
+        if not spec:
+            return str(self)
+        text = f"{format(self.value, spec)} ± {format(self.stderr, spec)}"
+        if self.low is not None and self.high is not None:
+            text += f" (exact 95%: [{format(self.low, spec)}, {format(self.high, spec)}])"
+        return text
+
 
 @dataclass(frozen=True)
 class LabelledValue:

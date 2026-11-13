@@ -14,7 +14,9 @@ Phase 1 limits, stated so nobody over-reads the result:
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import numpy as np
 
@@ -45,19 +47,21 @@ SIGNS: dict[tuple[str, str], int] = {("a", "b"): 1, ("a", "b'"): -1, ("a'", "b")
 class Window:
     """A fixed coincidence window. `source` must be "plan" for Bell-type analyses.
 
-    `delays_ps` maps channel name to its declared delay in integer ps.
+    `source` has no default: saying "plan" is the user's declaration, not the library's (API
+    review, cycle 7). `delays_ps` maps channel name to its declared delay in integer ps and is
+    read-only after construction.
     """
 
     width_ps: int
-    source: str = "plan"
-    delays_ps: dict[str, int] = field(default_factory=dict)
+    source: str
+    delays_ps: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "width_ps", _checks.integer(self.width_ps, "window width_ps", minimum=1))
         if not isinstance(self.source, str):
             raise TypeError("window source must be a string")
         delays = {str(ch): _checks.integer(d, f"delay for {ch}") for ch, d in dict(self.delays_ps).items()}
-        object.__setattr__(self, "delays_ps", delays)
+        object.__setattr__(self, "delays_ps", MappingProxyType(delays))
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -130,6 +134,14 @@ def check_no_duplicates(runs: dict, channels: tuple[str, ...]) -> None:
             arr = np.asarray(tags.get(ch, ()))
             if arr.size > 1 and np.any(np.diff(np.sort(arr)) == 0):
                 raise ValueError(f"{ch} in acquisition {key}: duplicate timestamps on one channel")
+
+
+def check_delay_channels(window: Window, channels: tuple[str, ...]) -> None:
+    """Refuse delays declared for channels the analysis does not have (a misspelt name was ignored
+    and its channel ran at delay 0: API review, cycle 7)."""
+    unknown = sorted(set(window.delays_ps) - set(channels))
+    if unknown:
+        raise ValueError(f"delays declared for unknown channel(s) {unknown}; the channels are {list(channels)}")
 
 
 def check_reference_channel(window: Window, channels: tuple[str, ...]) -> None:
@@ -205,8 +217,12 @@ def chsh(
     """
     policy = policy or Policy.default()
     policy.check_window("chsh", window.source)
+    check_delay_channels(window, CHANNELS)
     check_reference_channel(window, CHANNELS)
     check_no_duplicates(runs, CHANNELS)
+    # Counting does not need sorted tags, but the dead-time and interruption guards do (unsorted
+    # input dropped both labels: API review, cycle 7).
+    runs = {k: {ch: np.sort(np.asarray(v)) for ch, v in r.items()} for k, r in runs.items()}
     s = 0.0
     var = 0.0
     for key, sign in SIGNS.items():

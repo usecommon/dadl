@@ -193,7 +193,9 @@ def heralding_ratio_expected(
     by eta_a eta_b R min(tau_a, tau_b) (the statistician's review measured +1.24%
     at 1 Mpairs/s, 20 ns, eta 0.8, against +1.28% from this term; the
     unconditional form read 0/30 inside the interval). Remaining terms are of
-    order (R tau)^2.
+    order (R tau)^2: at 1 Mpairs/s and 20-100 ns the truth sits about 0.0005 above
+    the simulated mean, half an interval at 1 s; use it for runs up to about 1 s at
+    such rates.
     """
     ra, fa = _recorded(efficiency_a * pair_rate_per_s + dark_a_cps, dead_time_a_s, *afterpulse_a)
     _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s, *afterpulse_b)

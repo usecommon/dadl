@@ -299,7 +299,7 @@ def _write_checked(cal, out: str, accept_misfit: bool, **write) -> str:
             f"(predictive check p = {cal.ppc_pvalue:.3g}). No artifact written. Inspect the data (drift, latching, "
             "a timing tail, afterpulse structure, a pulsed source), or pass --accept-misfit to keep it marked misfit."
         )
-    return str(write_artifact(cal, out, **write))
+    return str(write_artifact(cal, out, accept_misfit=accept_misfit, **write))
 
 
 def _backend(setup, tags_path: str) -> str:
@@ -487,13 +487,24 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     common = {"backend": backend, "seed": setup.seed, "conditions": run_conditions}
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
     print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
+    # The declared detectors' dead time and afterpulse time constant set the off-peak guard and the
+    # dead-time notes (source-physics review, cycle 7: the CLI never passed them).
+    dets = [setup.detectors[n] for n in (args.herald, args.signal) if n in setup.detectors]
+    dead = max((float(d.dead_time_ps) for d in dets), default=0.0) or None
+    tau_a = max((float(d.afterpulse_tau_ps) for d in dets if d.afterpulse_prob > 0), default=0.0) or None
+    if dead or tau_a:
+        print(f"  Off-peak guard and dead-time notes use the setup's declared dead time ({dead or 0:g} ps) and "
+              f"afterpulse time constant ({tau_a or 0:g} ps).")
+    detector_args = {"dead_time_ps": dead, "afterpulse_tau_ps": tau_a}
     cals = [
         calibrate_delay(
             a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_tick_ps(args.tags), **common
         ),
-        calibrate_accidentals(a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **common),
+        calibrate_accidentals(
+            a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **detector_args, **common
+        ),
         calibrate_heralding(
-            a, b, chs, width_ps=window.width_ps, delay_herald_ps=d_a, delay_signal_ps=d_b, **common
+            a, b, chs, width_ps=window.width_ps, delay_herald_ps=d_a, delay_signal_ps=d_b, **detector_args, **common
         ),
     ]
     # Each artifact is checked and refused on its own: a timing tail that makes the delay fit a
@@ -534,15 +545,29 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     capture = _grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps)
     eta = cals[2].estimates["heralding_efficiency"].value
     print()
-    if capture > 0.01:
+    if cals[0].status == "misfit":
+        # Source-physics review, cycle 7: a Gaussian capture from a rejected fit read 7% low.
+        print("  Window capture not estimated: the delay fit's Gaussian timing model does not describe these data.")
+    elif capture > 0.01:
         print(
             f"  Window capture: about {capture:.3f} of true pairs fall in the same {window.width_ps} ps slot, from the "
             f"fitted jitter and delay offset. heralding_efficiency / capture = {eta / capture:.3f}, a figure closer to "
             "a sliding-window or Klyshko efficiency (an estimate, not recorded in the artifact; dead-time losses "
-            "are still included)."
+            "and dilution by herald dark counts and afterpulses are still included)."
         )
     else:
         print(f"  Window capture: {capture:.3g}; the declared window and delays miss the pair peak.")
+    from dadl.coincidences import grid_coincidences
+
+    n_c = grid_coincidences(a, b, window.width_ps, d_a, d_b)
+    acc = cals[1].estimates["accidental_coincidences"].value
+    if n_c > 0 and span_s > 0:
+        car = f"{n_c / acc:.4g}" if acc > 0 else "no accidentals seen"
+        print(
+            f"  Source figures (secondary, not recorded): coincidences-to-accidentals {car}; pair rate from "
+            f"singles x singles / coincidences {a.size * b.size / n_c / span_s:.4g} per s (diluted and dead-time "
+            "limited like the heralding figure)."
+        )
     if refused:
         raise DadlError(f"{len(refused)} of {len(cals)} artifacts not written (misfit): {', '.join(refused)}")
     return 0

@@ -44,8 +44,8 @@ ACCIDENTALS_SUBTRACTED = (
     "Bell claim"
 )
 DEAD_TIME_SELECTION = (
-    "dead-time selection: coincidence rate x shortest gap exceeds 1%; a recorded click makes the partner arm's "
-    "dead state depend on the outcome, which can raise |E| and S"
+    "dead-time selection: coincidence rate x the slowest channel's dead time (estimated from its gaps) exceeds "
+    "1%; a recorded click makes the partner arm's dead state depend on the outcome, which can raise |E| and S"
 )
 SIMULATED_INPUT = "simulated data: the input tags were written by DADL's simulator, not recorded"
 CORRECTION_NOT_COMPUTED = (

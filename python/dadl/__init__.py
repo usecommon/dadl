@@ -1,7 +1,8 @@
 """DADL: Detector-Aware Data Layer for quantum optics experiments.
 
 Calibrations live in `dadl.calibration` and artifacts in `dadl.artifact`;
-they are not imported here, so `import dadl` does not load SciPy.
+they are not imported here. (SciPy is loaded for the exact visibility
+intervals.)
 
 `dadl.backend()` says which implementation runs the per-tag functions:
 "rust" when the optional compiled core (`pip install dadl-quantum-core`) is

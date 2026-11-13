@@ -269,6 +269,9 @@ def parse_setup(data: dict[str, Any]) -> Setup:
     if "width_ps" not in win:
         raise ConfigError("analysis.window.width_ps is required")
     delays = _mapping(win.get("delays_ps", {}), "analysis.window.delays_ps")
+    unknown_delays = sorted(str(k) for k in delays if str(k) not in names)
+    if unknown_delays:
+        raise ConfigError(f"analysis.window.delays_ps: unknown channel(s) {unknown_delays}; the channels are {list(names)}")
     window = _wrap("analysis.window", Window, width_ps=win["width_ps"], source="plan", delays_ps=delays)
 
     # channel map for tag files: number -> name; default 0, 1, ... in channel-name order

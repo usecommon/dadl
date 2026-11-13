@@ -556,6 +556,17 @@ def calibrate_dark(
     columns.append(tau_draws)
     names.append("dead_time_ps")
 
+    if est_ta is not None:
+        crowding = est_r.value * est_ta.value * 1e-12
+        if crowding > 0.01:
+            # Gate review, cycle 7: the fit treats gaps as independent, so a later dark count ends
+            # a pending afterpulse; in the detector (and simulator) it does not. At dark rate x
+            # tau_a = 0.04 the afterpulse probability covered 72-75%, biased +2%.
+            notes.append(
+                f"dark rate x afterpulse time constant = {crowding:.3g}: above about 0.01 the fit's independent-gap "
+                "model loses afterpulses that outlive the next dark count, and afterpulse_prob reads high with "
+                "intervals that cover less than 95%"
+            )
     # The three parts of the check are recorded, and a failure is named (point-process review, cycle 5).
     st = _stationarity(tags, float(np.exp(theta[0])), n, float(s.max()))
     p_shape = _ppc_pvalue(s, theta)

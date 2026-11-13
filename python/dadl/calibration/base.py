@@ -90,6 +90,10 @@ class Calibration:
     notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        # A calibration of simulated channels is simulated, whatever the default backend said (API
+        # review, cycle 7: device "sim" was written with backend "hardware").
+        if self.backend == "hardware" and self.channels and all(ch.device == "sim" for ch in self.channels):
+            object.__setattr__(self, "backend", "sim")
         samples = np.asarray(self.samples, dtype=float)
         if samples.ndim != 2 or samples.shape[1] != len(self.sample_params):
             raise ValueError("samples must be a 2-D array with one column per sample parameter")

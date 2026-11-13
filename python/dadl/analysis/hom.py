@@ -32,7 +32,7 @@ import math
 
 import numpy as np
 
-from dadl.analysis.chsh import Window, check_no_duplicates, check_reference_channel
+from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.guardrails import INTERRUPTED, Policy
@@ -80,6 +80,7 @@ def hom_from_tags(
         missing = [ch for ch in HOM_CHANNELS if ch not in runs[name]]
         if missing:
             raise ValueError(f"the {name!r} acquisition is missing channel(s) {missing}")
+    check_delay_channels(window, HOM_CHANNELS)
     check_reference_channel(window, HOM_CHANNELS)
     check_no_duplicates(runs, HOM_CHANNELS)
     d = window.delays_ps

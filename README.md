@@ -65,8 +65,9 @@ yet people; [register](docs/reviews/2026-11-expert-assumptions.md)). Their
 limits, stated plainly:
 
 - **CW sources only.** `source.type` must be `spdc-cw`. Pulsed sources and
-  multi-pair emission are not modelled; heralding efficiency reads low when
-  the mean pair number per slot is not small.
+  pulsed or thermal pair statistics are not modelled. Independent CW
+  multi-pair coincidences are handled, leaving a bias of about
+  −μη_a(1 − η_b)/2 (−1.3% at μ = 0.1 pairs per slot).
 - **Single-exponential afterpulsing.** Detectors with a multi-component or
   power-law afterpulse kernel get an effective single-exponential value
   between the fast component and the total, with an interval that covers
@@ -75,7 +76,9 @@ limits, stated plainly:
   lengths. The afterpulse probability belongs to the hold-off setting it was
   measured at. Free-running InGaAs/InP detectors (µs hold-off, time constants
   of tens of µs) are fitted when the time constant is below a tenth of the
-  mean dark gap.
+  mean dark gap; when dark rate × time constant exceeds about 0.01 (a hot
+  InGaAs detector), the afterpulse probability reads high and its interval
+  covers less than 95% (72–75% at 0.04), and the calibration says so.
 - **No crosstalk or twilight counts** are modelled: 1% crosstalk between the
   HOM detectors lowered V from 0.919 to 0.896 unlabelled. Crosstalk is
   planned.
@@ -127,8 +130,10 @@ limits, stated plainly:
   ±2% between the halves of a run is tolerated and recorded.
 - **Heralding efficiency is grid-specific.** It counts pairs in the same fixed
   slot, so it includes the window capture (about 1 − E|Δt|/W) and the signal
-  arm's live fraction given a recorded herald. `calibrate pairs` prints the
-  capture implied by the fitted jitter.
+  arm's live fraction given a recorded herald, and it is diluted by the
+  herald channel's dark counts and afterpulses (20 kcps of herald darks read
+  0.095 for a coupling of 0.2). `calibrate pairs` prints the capture implied
+  by the fitted jitter when the delay fit passes its check.
 - **Off-peak checks have limited power.** A side-window excess smaller than
   about twice the accidentals interval can pass the check unseen.
 - **Corrected visibility** is refused when the accidentals exceed the minimum

@@ -27,7 +27,7 @@ def run(dark_rate_cps: float, seed: int, **overrides):
         p["duration_s"],
         np.random.default_rng(seed),
     )
-    result = chsh(runs, Window(width_ps=p["width_ps"]))
+    result = chsh(runs, Window(width_ps=p["width_ps"], source="plan"))
     expected = chsh_expected_grid(dark_rate_cps=dark_rate_cps, **p)
     return result, expected
 
@@ -59,27 +59,27 @@ def test_accidentals_reduce_s_as_predicted():
 def test_missing_channel_named():
     result_runs = {k: {"A+": np.array([0])} for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
     with pytest.raises(ValueError, match="A-"):
-        chsh(result_runs, Window(width_ps=1000))
+        chsh(result_runs, Window(width_ps=1000, source="plan"))
 
 
 def test_too_few_counts_hints_at_units():
     empty = {ch: np.array([1, 2, 3], dtype=np.int64) for ch in CHANNELS}
     runs = {k: empty for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
     with pytest.raises(InsufficientCounts, match="picoseconds"):
-        chsh(runs, Window(width_ps=1000))
+        chsh(runs, Window(width_ps=1000, source="plan"))
 
 
 def test_float_tags_refused():
     floats = {ch: np.array([0.1, 0.2]) for ch in CHANNELS}
     runs = {k: floats for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
     with pytest.raises(TypeError, match="picoseconds"):
-        chsh(runs, Window(width_ps=1000))
+        chsh(runs, Window(width_ps=1000, source="plan"))
 
 
 @pytest.mark.parametrize("width", [0, -5, 0.5])
 def test_window_width_validated(width):
     with pytest.raises((TypeError, ValueError)):
-        Window(width_ps=width)
+        Window(width_ps=width, source="plan")
 
 
 @pytest.mark.slow

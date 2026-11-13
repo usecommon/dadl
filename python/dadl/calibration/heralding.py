@@ -33,8 +33,12 @@ source and detectors: projections enter the ratio directly.
 Heralds are counted per slot, the unit C is counted in. The predictive check
 is the off-peak check (`dadl.calibration.accidentals.offpeak_pvalue`).
 
-Limits: multi-pair emission is not modelled (it lowers the ratio by about the
-mean pair number per slot); the source must be CW (pulsed sources need slots
+Limits: with a CW source, independent (Poisson) multi-pair coincidences are in
+the simulator and absorbed by the off-peak estimate, leaving a bias of about
+-mu eta_a (1 - eta_b) / 2 for mu pairs per slot (-1.3% at mu = 0.1, eta 0.5;
+source-physics review, cycle 7); pulsed and thermal pair statistics are not
+modelled. Herald dark counts and afterpulses dilute the ratio (500 cps: 0.185
+for 0.2; 20 kcps: 0.095; 8% herald afterpulsing: -7.6%). The source must be CW (pulsed sources need slots
 locked to the laser, planned).
 """
 
@@ -68,7 +72,8 @@ MIN_HERALDS = 100
 UNITS = {"heralding_efficiency": "1"}
 DEFINITIONS = {
     "heralding_efficiency": "heralded detection probability per herald slot, as detected in the declared window "
-    "(detector x coupling x window capture x live fraction given a recorded herald)"
+    "(detector x coupling x window capture x live fraction given a recorded herald), diluted by the herald "
+    "channel's dark counts and afterpulses"
 }
 
 
@@ -154,6 +159,7 @@ def calibrate_heralding(
         f"{c} coincidences for {s} herald slots; {lam:.4g} expected accidentals from {m} shifted windows "
         f"(accidental probability {p_hat:.3g} per herald slot)",
         "heralded detection probability as detected: detector x coupling x window capture x live fraction, "
+        "diluted by the herald channel's dark counts and afterpulses, "
         "at this calibration's rates, window and delays; not the detector-only efficiency",
     ]
     if dead_time_ps is not None and width_ps > 0.2 * float(dead_time_ps):

@@ -244,11 +244,17 @@ def build_manifest(
     return manifest, post
 
 
-def write_artifact(cal: Calibration, directory: str | Path, **kwargs: Any) -> Path:
+def write_artifact(cal: Calibration, directory: str | Path, *, accept_misfit: bool = False, **kwargs: Any) -> Path:
     """Write `<id>.json` and `<id>.posterior.npy` into `directory`; return the manifest path.
 
-    Existing artifacts are never overwritten: the same ID means the same bytes.
+    Existing artifacts are never overwritten: the same ID means the same bytes. A misfit is refused
+    unless `accept_misfit` (then written marked misfit), as the CLI does (API review, cycle 7).
     """
+    if cal.status == "misfit" and not accept_misfit:
+        raise ArtifactError(
+            f"{cal.kind}: the predictive check fails (p = {cal.ppc_pvalue:.3g}); pass accept_misfit=True to write "
+            "it marked misfit"
+        )
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     manifest, post = build_manifest(cal, **kwargs)
@@ -271,6 +277,41 @@ def write_artifact(cal: Calibration, directory: str | Path, **kwargs: Any) -> Pa
                 os.unlink(tmp)
             raise
     return mpath
+
+
+def load_calibration(path: str | Path) -> Calibration:
+    """Read and verify an artifact and rebuild its `Calibration` (e.g. dark artifacts for
+    `calibrate_dcr_temperature`). A bound-only parameter's value is its bound."""
+    from dadl.data import ChannelId
+    from dadl.stats import Interval
+
+    manifest, samples = read_artifact(path)
+    channels = tuple(
+        ChannelId(c["device"], c["input"], role=c.get("role"), detector=c.get("detector")) for c in manifest["channels"]
+    )
+    estimates = {
+        name: Interval(e["high"] if e["value"] is None else e["value"], e["low"], e["high"], e["level"])
+        for name, e in manifest["summary"].items()
+    }
+    return Calibration(
+        kind=manifest["kind"],
+        method=manifest["method"]["name"],
+        method_version=manifest["method"]["version"],
+        channels=channels,
+        estimates=estimates,
+        units={k: e["unit"] for k, e in manifest["summary"].items()},
+        samples=samples,
+        sample_params=tuple(manifest["posterior"]["params"]),
+        converged=manifest["checks"]["converged"],
+        ppc_pvalue=manifest["checks"]["ppc_pvalue"],
+        inputs=tuple((i["sha256"], i["role"]) for i in manifest["inputs"]),
+        backend=manifest["backend"],
+        conditions=dict(manifest.get("conditions", {})),
+        unidentified=tuple(manifest.get("unidentified_params", ())),
+        stand_in=tuple(manifest["posterior"].get("stand_in", ())),
+        definitions={k: e["definition"] for k, e in manifest["summary"].items() if "definition" in e},
+        notes=tuple(manifest.get("notes", ())),
+    )
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

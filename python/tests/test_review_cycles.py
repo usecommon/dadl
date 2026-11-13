@@ -639,3 +639,68 @@ def test_ci_coverage_matrix_runs_every_regime():
     listed = {r for a in args if "--regimes" in a for r in a.split("--regimes")[1].split()}
     for family, regimes in UNITS.items():
         assert family in whole or set(regimes) <= listed, family
+
+
+# --- Cycle 7 -----------------------------------------------------------------------------------
+
+
+def test_chsh_guards_do_not_depend_on_tag_order():
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import DEAD_TIME_SELECTION
+    from dadl.sim import PairSource, simulate_chsh
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=0.0, dead_time_ps=1_000_000, jitter_sigma_ps=350.0)
+    rng = np.random.default_rng(3)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=1e6, visibility=0.7), {k: det for k in ("A+", "A-", "B+", "B-")},
+                         0.05, rng)
+    shuffled = {k: {c: rng.permutation(v) for c, v in r.items()} for k, r in runs.items()}
+    w = Window(width_ps=2000, source="plan")
+    assert DEAD_TIME_SELECTION in chsh(shuffled, w).labels
+    assert chsh(shuffled, w).raw.value == chsh(runs, w).raw.value
+
+
+def test_windows_need_a_declared_source_and_known_delay_channels(tmp_path):
+    from dadl.analysis.chsh import Window, chsh
+
+    with pytest.raises(TypeError):
+        Window(width_ps=2000)  # type: ignore[call-arg]
+    w = Window(width_ps=2000, source="plan", delays_ps={"Bminus": 3000})
+    runs = {k: {ch: np.arange(0, 10**9, 10**5, dtype=np.int64) for ch in ("A+", "A-", "B+", "B-")}
+            for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
+    with pytest.raises(ValueError, match="unknown channel"):
+        chsh(runs, w)
+    from dadl.cli import example_path
+    from dadl.config import load_setup
+
+    text = example_path("chsh-spad").read_text(encoding="utf-8").replace("delays_ps: {}", "delays_ps: {Bminus: 3000}")
+    bad = tmp_path / "s.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown channel"):
+        load_setup(bad)
+
+
+def test_python_artifact_path_matches_the_cli(tmp_path):
+    import dataclasses
+    import datetime as dt
+
+    from dadl.artifact import ArtifactError, load_calibration, write_artifact
+    from dadl.calibration import calibrate_dark, calibrate_dcr_temperature
+    from dadl.sim import simulate_dark
+
+    when = dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc)
+    paths = []
+    for i, t in enumerate((253.0, 263.0, 273.0)):
+        det = DetectorParams(dark_rate_cps=100.0 * 2**i, dead_time_ps=22_000)
+        cal = calibrate_dark(simulate_dark(det, 5.0, np.random.default_rng(i)), CHS[0], conditions={"temperature_K": t})
+        assert cal.backend == "sim"  # device "sim" makes the default backend "sim"
+        paths.append(write_artifact(cal, tmp_path, created=when))
+    loaded = [load_calibration(p) for p in paths]
+    assert calibrate_dcr_temperature(loaded).kind == "dcr-temperature"
+    with pytest.raises(ArtifactError, match="misfit"):
+        write_artifact(dataclasses.replace(loaded[0], ppc_pvalue=0.0), tmp_path / "x", created=when)
+
+
+def test_estimates_format_like_numbers():
+    from dadl.result import Estimate
+
+    assert f"{Estimate(2.69412, 0.01049):.3f}" == "2.694 ± 0.010"

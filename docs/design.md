@@ -208,7 +208,7 @@ The model is parameterized per family because the dominant imperfection differs:
 
 Routines run on a schedule and on triggers. Triggers come from change-point detection (CUSUM or Bayesian online change-point) on heralding efficiency, model residuals, and connector or config events. Each run emits a signed, immutable calibration artifact; a new artifact supersedes but never overwrites the old one. Fiber-connector reconnection is logged as its own uncertainty component, since it often dominates the budget for fiber-coupled detectors.
 
-Known pitfalls the engine must model: Klyshko overestimates η as pump power rises (multi-photon SPDC); SPAD intrinsic efficiency can depend on detection rate; inter-arrival afterpulse estimates depend on the detector's prior state.
+Known pitfalls the engine must model: multi-photon SPDC raises the raw coincidence-to-herald ratio with pump power, while a background-subtracted estimate falls slightly (phase 2: about −μη_a(1 − η_b)/2 for CW); SPAD intrinsic efficiency can depend on detection rate; inter-arrival afterpulse estimates depend on the detector's prior state.
 
 ## Correction, inference and uncertainty
 

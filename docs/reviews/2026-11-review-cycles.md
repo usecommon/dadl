@@ -160,3 +160,26 @@ bright-background regime (45% of the run time) now acquires 0.2 s instead of 0.5
 
 Simulator: an ideal detector (dead time 0) now merges arrivals rounded to the same picosecond,
 since analyses refuse duplicate timestamps.
+
+## Cycle 7: heralded-source physicist, API designer, gate statistician
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 7.1 | Wrong | Herald dark counts and afterpulses dilute the heralding figure (20 kcps: 0.095 for 0.2) and the user-facing text did not say so; the CLI called it "closer to a Klyshko efficiency" | Fixed: definition, note, README and CLI state the dilution |
+| 7.2 | Questionable | The multi-pair limit dated from the v2 estimator and overstated the bias 10x; design.md had the opposite sign | Restated: CW multi-pair handled, residual about −μη_a(1 − η_b)/2; pulsed and thermal statistics not modelled; design.md reconciled |
+| 7.3 | Questionable | `calibrate pairs` never passed dead time or afterpulse time constant, so the dead-time notes and guard never used them | Fixed: the setup's declared values are passed, and the CLI says so |
+| 7.4 | Questionable | The η/capture figure came from a rejected Gaussian fit (7% low with a timing tail) | Fixed: not printed when the delay fit is a misfit |
+| 7.5 | Minor | No coincidence-to-accidental ratio or pair-rate estimate | Printed as secondary figures |
+| 7.6 | Minor | Second-order residual in the heralding closed form at 1 Mpairs/s | Validity stated in its docstring |
+| 7.7 | Wrong | `chsh` dropped the dead-time and interruption labels for unsorted tags | Fixed: tags sorted before the guards |
+| 7.8 | Wrong | The Python path lost provenance: device "sim" written as backend "hardware"; `write_artifact` wrote misfits | Fixed: simulated channels imply backend "sim"; `write_artifact(accept_misfit=False)` refuses misfits; `load_calibration` rebuilds a calibration from disk (e.g. for DCR(T)) |
+| 7.9 | Wrong | A misspelt channel in `delays_ps` was ignored and its channel ran at delay 0 | Fixed: refused in `setup.yaml`, `chsh` and `hom_from_tags` |
+| 7.10 | Questionable | `Window.source` defaulted to "plan" | Fixed: required; `delays_ps` read-only |
+| 7.11 | Minor | Stale dead-time label text; `import dadl` docstring said SciPy is not loaded | Fixed |
+| 7.12 | Minor | Error types inconsistent; `hom_visibility(c_max, c_min)` order trap; analyses do not take a `TagSet`; naming vocabulary | Open (0.1.x); `Estimate` gains `__format__` |
+| 7.13 | Wrong | At dark rate × τa ≈ 0.04 (hot InGaAs) the afterpulse probability covered 72–75%, +2% biased: the fit treats gaps as independent, but a pending afterpulse outlives the next dark count | Note on the artifact above 0.01 and README limit; a likelihood with surviving afterpulses is open |
+| 7.14 | Questionable | The heralding gate's truth is a closed form: right in the gated regimes (±0.3%) but +1.2% with slow afterpulsing and +0.4% at 4 Mpairs/s | Stated in the gate docstring; a pair-labelled simulation truth is open |
+| 7.15 | Minor | The gate docstring said the accidentals truth was a closed form | Corrected |
+| 7.16 | Questionable | The gate did not pass dead time and τa as the CLI does (accidentals +2.2% in InGaAs pairs without them) | Fixed: the gate passes the declared values |
+| 7.17 | Minor | Stored draws not gated; the at-least rule cannot fail on wide intervals | Open |
+| 7.18 | Minor | All regimes shared replicate streams | Fixed: the regime enters the seed key; all 38 checks pass on the new streams, and on three further seeds (reviewer) |

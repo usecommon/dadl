@@ -13,8 +13,13 @@ point but 89% with fast afterpulsing (fixed in method v2).
 
 `pairs` covers three calibrations from one simulated pair acquisition per
 replicate (delay and jitter, accidentals, heralding efficiency), each with
-its own gate. Truths for accidentals and heralding come from the closed forms
-in `dadl.closed_form`.
+its own gate. The accidentals truth is each replicate's own expectation from
+its occupied slots; the heralding truth comes from the closed form in
+`dadl.closed_form` (checked against a pair-labelled simulation in the gated
+regimes; with slow afterpulsing or very high rates it is only approximate);
+delay, jitter, dark and DCR(T) truths are the injected parameters. The
+calibrations get the declared dead time and afterpulse time constant, as the
+CLI passes them.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import math
 import multiprocessing
 import os
 import sys
+import zlib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
@@ -191,10 +197,15 @@ class CoverageResult:
         return "\n".join(lines)
 
 
-def _children(seed: int, replicates: int, part: range | None):
-    """The SeedSequence of each replicate, child i of `seed`; `part` selects a subset of indices."""
+def _children(seed: int, replicates: int, part: range | None, regime: str = ""):
+    """The SeedSequence of each replicate, child (regime, i) of `seed`; `part` selects indices.
+
+    The regime enters the key so regimes draw independent streams (gate review, cycle 7: shared
+    streams correlated the results within a run).
+    """
+    key = zlib.crc32(regime.encode())
     for i in range(replicates) if part is None else part:
-        yield np.random.SeedSequence(seed, spawn_key=(i,))
+        yield np.random.SeedSequence(seed, spawn_key=(key, i))
 
 
 def gate(replicates: int, n_params: int) -> tuple[float, float]:
@@ -214,7 +225,7 @@ def dark_coverage(
     }
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in _children(seed, replicates, part):
+    for child in _children(seed, replicates, part, regime):
         sim_rng, fit_seed = child.spawn(2)
         tags = simulate_dark(det, duration_s, np.random.default_rng(sim_rng))
         cal = calibrate_dark(tags, channel, backend="sim", seed=fit_seed.generate_state(1)[0], n_draws=10)
@@ -265,7 +276,13 @@ def pairs_coverage(
     covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items() if kind not in r.skip}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
-    for child in _children(seed, replicates, part):
+    declared = {
+        "dead_time_ps": float(max(r.a.dead_time_ps, r.b.dead_time_ps)) or None,
+        "afterpulse_tau_ps": max(
+            (d.afterpulse_tau_ps for d in (r.a, r.b) if d.afterpulse_prob > 0), default=0.0
+        ) or None,
+    }
+    for child in _children(seed, replicates, part, regime):
         sim_rng, fit_seed = child.spawn(2)
         a, b = simulate_pairs(r.rate, r.a, r.b, r.duration_s, np.random.default_rng(sim_rng))
         s = int(fit_seed.generate_state(1)[0])
@@ -280,10 +297,12 @@ def pairs_coverage(
         occ_b = occupied_slots(b, r.width_ps, r.b.delay_ps).size
         acc_truth = {"accidental_coincidences": occ_a * occ_b * r.width_ps * 1e-12 / r.duration_s}
         if "accidentals" in covered:
-            _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), acc_truth, covered["accidentals"])
+            _covered(
+                calibrate_accidentals(a, b, chs, seed=s, **delays, **declared, **common), acc_truth, covered["accidentals"]
+            )
         if "heralding-efficiency" in covered:
             her = calibrate_heralding(
-                a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **common
+                a, b, chs, delay_herald_ps=r.a.delay_ps, delay_signal_ps=r.b.delay_ps, seed=s, **declared, **common
             )
             _covered(her, truth["heralding-efficiency"], covered["heralding-efficiency"])
     return [
@@ -306,7 +325,7 @@ def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part:
     width = 1_000
     covered = {"heralding_efficiency": 0}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
-    for child in _children(seed, replicates, part):
+    for child in _children(seed, replicates, part, "ideal-accidentals"):
         sim_rng, fit_seed = child.spawn(2)
         rng = np.random.default_rng(sim_rng)
         # Heralds are sparse (one slot in IDEAL_SPACING) so that the shifted windows, which also
@@ -334,7 +353,7 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
     truth = {"dcr_ref_cps": DCR_REF_CPS, "activation_energy_ev": DCR_EA_EV}
     covered = dict.fromkeys(truth, 0)
     channel = ChannelId("sim", 0)
-    for child in _children(seed, replicates, part):
+    for child in _children(seed, replicates, part, "five-temperatures"):
         streams = child.spawn(len(DCR_TEMPS_K) + 1)
         darks = []
         for t_k, stream in zip(DCR_TEMPS_K, streams):
