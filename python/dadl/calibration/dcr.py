@@ -64,12 +64,22 @@ def calibrate_dcr_temperature(
     if len(backends) != 1:
         raise ValueError("cannot mix simulated and hardware calibrations")
 
-    biases = {d.conditions.get("bias_V") for d in darks}
-    if len(biases) > 1:
+    bias_keys = sorted({k for d in darks for k in d.conditions if k.startswith("bias")})
+    current = [k for k in bias_keys if not k.endswith("_V")]
+    if current:
+        # SNSPD specialist review: SNSPDs are current-biased and their dark counts are not
+        # thermally activated; an Arrhenius fit gave Ea = 0.0007 eV with a tight interval.
         raise ValueError(
-            f"the dark calibrations were taken at different bias_V {sorted(b for b in biases if b is not None)}: at "
-            "fixed temperature the dark rate depends on bias, so an Arrhenius fit across them is not meaningful"
+            f"the dark calibrations record a bias current ({', '.join(current)}): DCR(T) is an Arrhenius model "
+            "for voltage-biased SPADs, not for current-biased detectors such as SNSPDs"
         )
+    for key in bias_keys:
+        values = {d.conditions.get(key) for d in darks}
+        if len(values) > 1:
+            raise ValueError(
+                f"the dark calibrations were taken at different {key} {sorted(str(v) for v in values)}: at fixed "
+                "temperature the dark rate depends on bias, so an Arrhenius fit across them is not meaningful"
+            )
     temps = np.array([float(d.conditions["temperature_K"]) for d in darks])
     if np.any(temps <= 0):
         raise ValueError("temperature_K must be positive (kelvin)")
@@ -129,7 +139,7 @@ def calibrate_dcr_temperature(
             "reference_K": t_ref,
             "temperature_min_K": float(temps.min()),
             "temperature_max_K": float(temps.max()),
-            **({"bias_V": float(next(iter(biases)))} if next(iter(biases)) is not None else {}),
+            **{k: float(darks[0].conditions[k]) for k in bias_keys if k in darks[0].conditions},
         },
         notes=tuple(notes),
     )

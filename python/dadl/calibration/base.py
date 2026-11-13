@@ -19,6 +19,22 @@ N_DRAWS = 2000
 MISFIT_ALPHA = 0.001
 
 
+def with_interruption_check(ppc: float, notes: list[str], *streams: np.ndarray) -> float:
+    """Combine a model check with the per-channel interruption test (smaller p doubled).
+
+    Appends a note when a channel's longest gap points to a latch or interruption.
+    """
+    from dadl.stationarity import channels_pvalue
+
+    p_int, longest = channels_pvalue(*streams)
+    if p_int < MISFIT_ALPHA:
+        notes.append(
+            f"a channel has a {longest / 1e12:.3g} s gap, far longer than its count rate allows (p = {p_int:.2g}): "
+            "a latch, overload shutdown or lost data; the rates and ratios below include the dead stretch"
+        )
+    return min(1.0, 2.0 * min(ppc, p_int))
+
+
 @dataclass(frozen=True)
 class Calibration:
     """Estimates, intervals and posterior draws for one calibration run."""
@@ -65,7 +81,8 @@ class Calibration:
     def __str__(self) -> str:
         lines = [f"{self.kind} ({self.method} {self.method_version}) for {', '.join(map(str, self.channels))}"]
         for name, iv in self.estimates.items():
-            lines.append(f"  {name:<20} {iv}  {self.units.get(name, '')}".rstrip())
+            shown = f"<= {iv.high:.6g} (upper limit only)" if name in self.unidentified and iv.low == 0 else str(iv)
+            lines.append(f"  {name:<20} {shown}  {self.units.get(name, '')}".rstrip())
         lines.append(f"  converged: {self.converged}; predictive check p = {self.ppc_pvalue:.3g}")
         if self.status == "misfit":
             lines.append(

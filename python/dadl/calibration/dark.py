@@ -466,9 +466,13 @@ def calibrate_dark(
         m, n, f0, f0_samples, rng, n_draws, tag_tick(tags), afterpulsing_ruled_out=bool(detected)
     )
     if est_tau.low == 0.0:
+        # SNSPD specialist review: the stored value (the shortest dark gap) read 23x an SNSPD's
+        # 30 ns recovery, unmarked; it is an upper limit, not an estimate.
+        unidentified = (*unidentified, "dead_time_ps")
         notes.append(
-            f"the dead time is only bounded above (<= {est_tau.high:.6g} ps): too few gaps fall near it to "
-            "bound it below; measure it with light on the detector"
+            f"the dead time is not identified by these dark data, only bounded above (<= {est_tau.high:.6g} ps): "
+            "too few gaps fall near it. Do not use the stored value as a dead time; it needs an acquisition "
+            "with light on the detector (for an SNSPD's recovery, a bright-light inter-arrival histogram)"
         )
 
     estimates = {"dark_rate_cps": est_r, "afterpulse_prob": est_p}

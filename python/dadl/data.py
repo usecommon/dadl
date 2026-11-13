@@ -48,7 +48,7 @@ class ChannelId:
         return rec
 
     def __str__(self) -> str:
-        return f"{self.device}:{self.input}"
+        return f"{self.device}:{self.input}" + (f" ({self.role})" if self.role else "")
 
 
 def tags_sha256(tags: np.ndarray) -> str:

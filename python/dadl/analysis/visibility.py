@@ -23,7 +23,7 @@ import math
 
 from dadl import _checks
 from dadl.stats import clopper_pearson
-from dadl.guardrails import LOW_COUNTS, Policy, threshold_labels
+from dadl.guardrails import CORRECTION_NOT_COMPUTED, LOW_COUNTS, Policy, threshold_labels
 from dadl.result import Estimate, LabelledValue
 
 
@@ -32,17 +32,13 @@ def _counts(n_max: float, n_min: float) -> tuple[float, float]:
     n_min = _checks.finite(n_min, "n_min", minimum=0.0)
     if n_max + n_min <= 0:
         raise ValueError("counts must not both be zero")
-    if n_min > n_max:
-        raise ValueError("n_min must not exceed n_max")
+    # n_min > n_max is allowed: a fringe near zero visibility or a HOM peak gives V < 0, and
+    # refusing it (12% of datasets at V = 0.03) would censor what gets reported.
     return n_max, n_min
 
 
 def _accidentals(accidentals: float, accidentals_stderr: float | None, n_min: float) -> tuple[float, float]:
     a = _checks.finite(accidentals, "accidentals", minimum=0.0)
-    if a > n_min:
-        raise ValueError(
-            f"accidentals ({a:g}) exceed the minimum count ({n_min:g}); the corrected visibility would exceed 1"
-        )
     if accidentals_stderr is None:
         var_a = a  # Poisson
     else:
@@ -93,7 +89,11 @@ def _exact_bell(n_max: float, n_min: float) -> tuple[float, float]:
 
 
 def _exact_hom(c_max: float, c_min: float) -> tuple[float, float]:
-    """Exact 95% interval for V = 1 - rho, rho = mu_min / mu_max: given m + M, m is binomial in rho / (1 + rho)."""
+    """Exact 95% interval for V = 1 - rho, rho = mu_min / mu_max: given m + M, m is binomial in rho / (1 + rho).
+
+    Assumes C_max and C_min are integer counts over equal exposure (rounded otherwise); a C_max
+    averaged over several reference bins or acquired for longer needs rescaling first.
+    """
     n, m = int(round(c_max + c_min)), int(round(c_min))
     ci = clopper_pearson(m, n)
 
@@ -109,10 +109,13 @@ def _finish(
     corrected: Estimate | None,
     policy: Policy,
     min_count: float | None = None,
+    not_computed: bool = False,
 ) -> LabelledValue:
     labels = policy.labels_for(analysis) + threshold_labels(analysis, raw, corrected)
     if min_count is not None and min_count < LOW_COUNT_MIN:
         labels += (LOW_COUNTS,)
+    if not_computed:
+        labels += (CORRECTION_NOT_COMPUTED,)
     return LabelledValue(analysis=analysis, raw=raw, corrected=corrected, labels=labels, **policy.provenance())
 
 
@@ -136,11 +139,20 @@ def bell_visibility(
     low, high = _exact_bell(n_max, n_min)
     raw = Estimate((n_max - n_min) / total, math.sqrt(4.0 * n_max * n_min / total**3), low, high)
     corrected = None
+    not_computed = False
+    min_count = n_min
     if accidentals is not None:
         policy.check_correction("bell_visibility", "accidental_subtraction")
         a, var_a = _accidentals(accidentals, accidentals_stderr, n_min)
-        corrected = fringe_visibility_corrected(n_max, n_min, a, var_a)
-    return _finish("bell_visibility", raw, corrected, policy, n_min)
+        # Statistician review (cycle 1): refusing when A > the minimum count dropped 26-35% of
+        # true high-visibility datasets, the best ones. The raw value (exact interval) is kept and
+        # the corrected value is left out, labelled; the low-count label keys on the signal.
+        if a > n_min or a >= n_max:
+            not_computed = True
+        else:
+            corrected = fringe_visibility_corrected(n_max, n_min, a, var_a)
+        min_count = n_min - a
+    return _finish("bell_visibility", raw, corrected, policy, min_count, not_computed)
 
 
 def hom_visibility(
@@ -160,8 +172,17 @@ def hom_visibility(
     low, high = _exact_hom(c_max, c_min)
     raw = Estimate((c_max - c_min) / c_max, math.sqrt(c_min**2 / c_max**3 + c_min / c_max**2), low, high)
     corrected = None
+    not_computed = False
+    min_count = c_min
     if accidentals is not None:
         policy.check_correction("hom_visibility", "accidental_subtraction")
         a, var_a = _accidentals(accidentals, accidentals_stderr, c_min)
-        corrected = hom_visibility_corrected(c_max, c_min, a, var_a)
-    return _finish("hom_visibility", raw, corrected, policy, c_min)
+        # Statistician review (cycle 1): refusing when A > the minimum count dropped 26-35% of
+        # true high-visibility datasets, the best ones. The raw value (exact interval) is kept and
+        # the corrected value is left out, labelled; the low-count label keys on the signal.
+        if a > c_min or a >= c_max:
+            not_computed = True
+        else:
+            corrected = hom_visibility_corrected(c_max, c_min, a, var_a)
+        min_count = c_min - a
+    return _finish("hom_visibility", raw, corrected, policy, min_count, not_computed)

@@ -83,7 +83,9 @@ def test_seed_makes_draws_reproducible():
 def test_no_afterpulsing_gives_an_upper_limit():
     det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000, afterpulse_prob=0.0)
     cal = calibrate_dark(dark(det), CH, seed=1)
-    assert cal.unidentified == ("afterpulse_tau_ps",)
+    assert cal.unidentified[0] == "afterpulse_tau_ps"
+    # SNSPD specialist review: a dead time bounded only above is marked unidentified too.
+    assert ("dead_time_ps" in cal.unidentified) == (cal.estimates["dead_time_ps"].low == 0)
     assert "afterpulse_tau_ps" not in cal.estimates
     p = cal.estimates["afterpulse_prob"]
     assert p.low == 0.0 and 0.0 < p.high < 0.01
@@ -182,7 +184,7 @@ def test_twenty_gaps_are_enough_and_fewer_are_refused():
     det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000)
     tags = dark(det, 1.0, seed=3)[:21]
     cal = calibrate_dark(tags, CH, seed=0)
-    assert cal.unidentified == ("afterpulse_tau_ps",) and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
+    assert cal.unidentified == ("afterpulse_tau_ps", "dead_time_ps") and cal.estimates["dead_time_ps"].high <= int(np.diff(tags).min())
     with pytest.raises(InsufficientCounts):
         calibrate_dark(tags[:15], CH)
 

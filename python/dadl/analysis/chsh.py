@@ -21,7 +21,8 @@ import numpy as np
 from dadl import _checks
 from dadl.coincidences import grid_coincidences
 from dadl.errors import InsufficientCounts
-from dadl.guardrails import Policy, threshold_labels
+from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.stationarity import interrupted
 from dadl.result import Estimate, LabelledValue
 
 FAIR_SAMPLING = "fair sampling and fair coincidence assumed (post-selected on coincidences)"
@@ -118,6 +119,8 @@ def chsh(
         var += v
     raw = Estimate(s, math.sqrt(var))
     labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
+    if interrupted(*(runs[k][ch] for k in SIGNS for ch in CHANNELS)):
+        labels += (INTERRUPTED,)
     counts = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
     return LabelledValue(
         analysis="chsh",

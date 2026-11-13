@@ -108,7 +108,7 @@ Each example is a folder with a config file, a seeded simulation recipe (data is
 | Example | Setup | Shows |
 | --- | --- | --- |
 | `chsh-spad` | Polarization-entangled SPDC, four Si SPAD channels, simulator (shipped) | Raw S from a planned fixed window beside the closed-form expectation; calibration and corrected S in phase 2 |
-| `hom-snspd` | HOM interference, two SNSPDs, PicoQuant | Visibility fit, latching signatures |
+| `hom-snspd` | HOM interference, two SNSPDs, simulator (shipped) | Two-point visibility at the declared delay with an interruption (latch) label; visibility scan fit and SNSPD latching signatures are planned |
 | `tomography` | Two-qubit state tomography | MLE vs. Bayesian estimates, low-count bias warnings |
 | `link-monitor` | One network link with the health monitor running | Change-point alerts, explain a fidelity drop |
 | `cheap-vs-reference` | Same source split between CMOS SPADs and a reference detector | The hardware A/B method from the validation plan (after the MVP: needs CMOS SPAD and crosstalk support) |

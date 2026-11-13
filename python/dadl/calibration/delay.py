@@ -48,7 +48,7 @@ from scipy import special
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.histogram import cross_correlation
@@ -315,7 +315,7 @@ def calibrate_delay(
         samples=np.column_stack([draws[:, 2], np.exp(draws[:, 3])]),
         sample_params=("delay_ps", "jitter_sigma_ps"),
         converged=converged,
-        ppc_pvalue=_grouped_pearson(model.n, model.mu(theta), 5),
+        ppc_pvalue=with_interruption_check(_grouped_pearson(model.n, model.mu(theta), 5), notes, a, b),
         inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
         backend=backend,
         conditions={"tick_ps": float(tick), **(conditions or {})},

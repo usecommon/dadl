@@ -39,7 +39,7 @@ import numpy as np
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
 from dadl.coincidences import occupied_slots
 from dadl.data import ChannelId, tags_sha256
 from dadl.histogram import cross_correlation
@@ -146,6 +146,20 @@ def _span_s(*streams: np.ndarray) -> float:
     return (hi - lo) / 1e12
 
 
+def side_exposure(offsets: np.ndarray, *streams: np.ndarray) -> float:
+    """Exposure of the shifted windows in on-peak window units: sum of (1 - |offset| / T).
+
+    A window shifted by o loses the |o| / T of the record that falls past its end, which the
+    on-peak window does not (statistician review, cycle 1: -0.65% at 10 Mcps over 3 ms,
+    coverage 37%). Negligible for acquisitions of a second or more.
+    """
+    span_ps = _span_s(*streams) * 1e12 if any(s.size for s in streams) else 0.0
+    offsets = np.abs(np.asarray(offsets, dtype=np.float64))
+    if span_ps <= 0:
+        return float(offsets.size)
+    return float(np.clip(1.0 - offsets / span_ps, 0.0, 1.0).sum())
+
+
 def calibrate_accidentals(
     a: np.ndarray,
     b: np.ndarray,
@@ -176,7 +190,7 @@ def calibrate_accidentals(
     counts = shifted_coincidences(a, b, width_ps, delay_a_ps, delay_b_ps, offsets)
     total, m = int(counts.sum()), counts.size
     rng = np.random.default_rng(seed)
-    est, draws = gamma_posterior(total, float(m), rng, n_draws)
+    est, draws = gamma_posterior(total, side_exposure(offsets, a, b), rng, n_draws)
     notes = [
         f"{total} coincidences in {m} shifted windows ({'pulsed' if rep_period_ps else 'CW'} offsets) "
         f"from {int(np.abs(offsets).min())} to {int(np.abs(offsets).max())} ps"
@@ -201,7 +215,7 @@ def calibrate_accidentals(
         samples=draws[:, None],
         sample_params=("accidental_coincidences",),
         converged=True,
-        ppc_pvalue=offpeak_pvalue(counts, offsets),
+        ppc_pvalue=with_interruption_check(offpeak_pvalue(counts, offsets), notes, a, b),
         inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
         backend=backend,
         conditions={"width_ps": float(width_ps), "guard_ps": float(guard), **(conditions or {})},

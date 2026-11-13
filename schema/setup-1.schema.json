@@ -67,7 +67,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "family": {"type": "string"},
+        "family": {"type": "string", "description": "A label only: it selects no model. Every detector uses the same model (hard non-paralyzable dead time, Gaussian timing response, single-exponential afterpulsing); SNSPD recovery, timing tails and latching are not modelled."},
         "efficiency": {"type": "number", "minimum": 0, "maximum": 1},
         "dark_rate_cps": {"type": "number", "minimum": 0},
         "dead_time_ps": {"type": "integer", "minimum": 0},

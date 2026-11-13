@@ -12,7 +12,7 @@ p is estimated off-peak (`dadl.calibration.accidentals`): lambda accidental
 coincidences expected over the S herald slots gives p = lambda / S. With C
 coincidences, q has the Jeffreys Beta(C + 1/2, S - C + 1/2) posterior and
 lambda the Jeffreys Gamma posterior from the shifted windows; the interval is
-the exact mixture over p, so it is deterministic, and draws sample p, then q.
+the posterior mixture over p, computed exactly, so it is deterministic, and draws sample p, then q.
 (Methods v1-v2 used (C - lambda) / S, which tends to eta (1 - p): biased low
 by a fraction p, with intervals that missed the truth from p of about 1%.)
 
@@ -20,7 +20,11 @@ What it measures: the probability that a herald slot holds the signal
 photon's detection in the declared window, in situ ("as detected"): detector
 efficiency times coupling, filters and connectors, times the share of pairs
 the fixed window keeps at slot edges, times the signal channel's live
-fraction, diluted by dark counts on the herald channel. It is not the
+fraction given a recorded herald, diluted by dark counts on the herald
+channel. That live fraction is higher than the channel's average by about
+eta_a eta_b R min(dead times) (the coincidence rate times the dead time),
+because a recorded herald means no herald was recorded just before it; do
+not correct the result with the average dead fraction. It is not the
 detector-only efficiency, which needs an external reference, and it holds at
 the calibration's count rates, window and delays only (recorded in
 `conditions`). The acquisition must have no analysers or beamsplitter between
@@ -41,8 +45,16 @@ from scipy import optimize
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.accidentals import GUARD_PS, N_SIDE, guard_for, offpeak_pvalue, shifted_coincidences, side_offsets
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.accidentals import (
+    GUARD_PS,
+    N_SIDE,
+    guard_for,
+    offpeak_pvalue,
+    shifted_coincidences,
+    side_exposure,
+    side_offsets,
+)
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
 from dadl.coincidences import grid_coincidences, occupied_slots
 from dadl.data import ChannelId, tags_sha256
 from dadl.errors import InsufficientCounts
@@ -60,7 +72,7 @@ UNITS = {"heralding_efficiency": "1 (per herald slot)"}
 P_POINTS = 200
 
 
-def _p_nodes(side_total: int, n_windows: int, slots: int) -> np.ndarray:
+def _p_nodes(side_total: int, n_windows: float, slots: int) -> np.ndarray:
     """Equal-weight quantiles of p = lambda / S, lambda ~ Gamma(side_total + 1/2, rate n_windows)."""
     q = (np.arange(P_POINTS) + 0.5) / P_POINTS
     return _st.gamma.ppf(q, side_total + 0.5, scale=1.0 / n_windows) / slots
@@ -123,13 +135,14 @@ def calibrate_heralding(
     )
     side = shifted_coincidences(herald, signal, width_ps, delay_herald_ps, delay_signal_ps, offsets)
     side_total, m = int(side.sum()), side.size
-    lam = side_total / m
+    exposure = side_exposure(offsets, herald, signal)
+    lam = side_total / exposure
     p_hat = min(lam / s, 0.999)
 
-    lo, hi = _interval(c, s, _p_nodes(side_total, m, s))
+    lo, hi = _interval(c, s, _p_nodes(side_total, exposure, s))
     value = min(max((c / s - p_hat) / (1 - p_hat), 0.0), 1.0)
     rng = np.random.default_rng(seed)
-    p_draws = np.minimum(rng.gamma(side_total + 0.5, 1.0 / m, n_draws) / s, 0.999)
+    p_draws = np.minimum(rng.gamma(side_total + 0.5, 1.0 / exposure, n_draws) / s, 0.999)
     q_draws = rng.beta(c + 0.5, s - c + 0.5, n_draws)
     draws = np.clip((q_draws - p_draws) / (1 - p_draws), 0.0, 1.0)
 
@@ -152,6 +165,15 @@ def calibrate_heralding(
                 f"the signal channel is dead {dead_fraction:.0%} of the time: misses caused by dead time then "
                 "correlate with accidentals in the same slot, and the estimate reads high"
             )
+    if dead_time_ps is not None and herald.size > 1:
+        span_h = (int(herald[-1]) - int(herald[0])) or 1
+        conditional = (c - lam) / span_h * float(dead_time_ps)
+        if conditional > 0.005:
+            notes.append(
+                f"the signal channel's live fraction given a recorded herald exceeds its average by about "
+                f"{conditional:.1%} (coincidence rate x dead time): the result includes that, so do not correct it "
+                "with the channel's average dead fraction"
+            )
     if p_hat > 0.01:
         notes.append(f"accidentals are {p_hat:.1%} per herald slot; the per-slot estimator accounts for them")
     if shared:
@@ -166,7 +188,7 @@ def calibrate_heralding(
         samples=draws[:, None],
         sample_params=("heralding_efficiency",),
         converged=True,
-        ppc_pvalue=offpeak_pvalue(side, offsets),
+        ppc_pvalue=with_interruption_check(offpeak_pvalue(side, offsets), notes, herald, signal),
         inputs=((tags_sha256(herald), "raw-tags"), (tags_sha256(signal), "raw-tags")),
         backend=backend,
         conditions={"width_ps": float(width_ps), **(conditions or {})},

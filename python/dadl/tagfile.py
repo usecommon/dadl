@@ -161,7 +161,11 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
         by_input = {ch.input: tagset[ch] for ch in tagset.channels}
         unknown = sorted(set(by_input) - set(channels))
         if unknown:
-            raise ConfigError(f"{path}: inputs {unknown} are not in the setup's channel map")
+            raise ConfigError(
+                f"{path}: inputs {unknown} are not in the setup's channel map. On HydraHarp, MultiHarp and "
+                "TimeHarp 260 files input 0 is the sync input and detector inputs are numbered from 1 (as in "
+                "PicoQuant's software); map them under `channels:` in setup.yaml"
+            )
         runs[key] = {name: by_input.get(num, np.empty(0, dtype=np.int64)) for num, name in channels.items()}
     return runs
 

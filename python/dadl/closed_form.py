@@ -170,13 +170,20 @@ def heralding_ratio_expected(
     For herald a and signal b, a CW pair source and exact declared delays.
 
     Pair photons are recorded with probability eta (1 - dead fraction) on each
-    arm; both land in one slot with grid_capture_probability. Correlations of
-    the two arms' dead states enter at order (pair rate x dead time)^2.
+    arm; both land in one slot with grid_capture_probability. The signal arm's
+    live fraction is conditional on a recorded herald: the herald arm was live,
+    so no pair with a recorded herald arrived within min(dead times) before it,
+    and the signal arm is less often dead. To first order this raises the ratio
+    by eta_a eta_b R min(tau_a, tau_b) (the statistician's review measured +1.24%
+    at 1 Mpairs/s, 20 ns, eta 0.8, against +1.28% from this term; the
+    unconditional form read 0/30 inside the interval). Remaining terms are of
+    order (R tau)^2.
     """
     ra, fa = _recorded(efficiency_a * pair_rate_per_s + dark_a_cps, dead_time_a_s, *afterpulse_a)
     _, fb = _recorded(efficiency_b * pair_rate_per_s + dark_b_cps, dead_time_b_s, *afterpulse_b)
     capture = grid_capture_probability(jitter_combined_ps / math.sqrt(2.0), width_ps)
-    return pair_rate_per_s * efficiency_a * (1 - fa) * efficiency_b * (1 - fb) * capture / ra
+    conditional = 1.0 + efficiency_a * efficiency_b * pair_rate_per_s * min(dead_time_a_s, dead_time_b_s)
+    return pair_rate_per_s * efficiency_a * (1 - fa) * efficiency_b * (1 - fb) * conditional * capture / ra
 
 
 def hom_split_probability(visibility: float, path_delay_ps: float, coherence_time_ps: float) -> float:

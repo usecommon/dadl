@@ -16,7 +16,7 @@ experiment, its guardrails and its roadmap.
 > **Status: pre-alpha, phase 1 (partial), phase 2 in progress.** Anything may change in 0.0.x. The
 > canonical phase plan is in [docs/design.md](docs/design.md#mvp-scope-and-milestones).
 
-## What works today (v0.0.3)
+## What works today (on `main`; 0.0.3 is the latest release)
 
 - A seeded time-tag simulator with injected efficiency, dark counts,
   non-paralyzable dead time, jitter, delay and cascading afterpulsing.
@@ -87,6 +87,25 @@ limits, stated plainly:
   loopholes.
 - **Coverage gates** run 1,000 simulated replicates per calibration at a few
   regimes and catch gross failures (coverage below about 93%), not small ones.
+- **Gaussian timing response.** The delay fit models a Gaussian IRF plus a
+  flat background. A detector with an exponential timing tail (most SNSPDs,
+  many SPADs) is marked `misfit` and the delay artifact refused; the other
+  pair calibrations are checked on their own.
+- **SNSPDs.** `family` is a label only. Recovery, timing tails, bias-current
+  dependence and latching signatures are not modelled; dark data cannot
+  identify an SNSPD's dead time (reported as an upper limit, marked
+  unidentified); DCR(T) refuses current-biased detectors. A latch or other
+  interruption in any acquisition is detected (longest gap against the count
+  rate) and marks calibrations `misfit` and analyses "interrupted".
+- **Heralding efficiency is grid-specific.** It counts pairs in the same fixed
+  slot, so it includes the window capture (about 1 − E|Δt|/W) and the signal
+  arm's live fraction given a recorded herald. `calibrate pairs` prints the
+  capture implied by the fitted jitter.
+- **Off-peak checks have limited power.** A side-window excess smaller than
+  about twice the accidentals interval can pass the check unseen.
+- **Corrected visibility** is refused when the accidentals exceed the minimum
+  count (or the corrected value would exceed 1), which removes the datasets
+  nearest V = 1; report the raw value with its exact interval there.
 - A failed predictive check marks the calibration `misfit`; the CLI refuses to
   write it unless `--accept-misfit` is given.
 
@@ -164,9 +183,26 @@ print(dadl.bell_visibility(1450, 550))            # raw fringe visibility
 print(dadl.hom_visibility(1000, 120, accidentals=40))  # dip visibility, corrected value labelled
 ```
 
-PicoQuant `.ptu` files (T2 mode) read directly: `dadl.adapters.read_ptu("run.ptu")` returns int64 ps
-per channel, with rollovers and markers reported as events (see `adapters/README.md`).
-Other formats: export to the generic tag file.
+PicoQuant `.ptu` files (T2 mode) read directly: `from dadl.adapters import read_ptu`, then
+`read_ptu("run.ptu")` returns int64 ps per channel, with rollovers and markers reported as events
+(see `adapters/README.md`). From the command line, pass a folder of `setting0.ptu`,
+`setting1.ptu`, ... as `--tags`. On HydraHarp, MultiHarp and TimeHarp 260 files, input 0 is the
+sync input and detector inputs are numbered from 1, as in PicoQuant's software; map those
+numbers under `channels:`. Other formats: export to the generic tag file.
+
+Before calibrating recorded data, edit the copied `setup.yaml`:
+
+```yaml
+backend: file                 # not `sim`: calibrations of recorded data are refused under `sim`
+hardware:
+  tagger: HydraHarp-1234567   # the tagger's serial, recorded as the channel's device
+  detectors: {A+: SPCM-0042}  # optional detector serials
+```
+
+The fixed coincidence grid starts at t = 0 of the tag file: slot k holds
+times from k·W to (k + 1)·W after adding the declared delay. Shifting all tags
+(for example re-exporting from the first tag) moves pairs across slot edges
+and changes S within its statistical error; keep the export that was planned.
 
 ## Developing DADL
 

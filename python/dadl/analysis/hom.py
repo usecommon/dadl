@@ -23,7 +23,8 @@ import numpy as np
 from dadl.analysis.chsh import Window
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
-from dadl.guardrails import Policy
+from dadl.guardrails import INTERRUPTED, Policy
+from dadl.stationarity import interrupted
 from dadl.result import LabelledValue
 
 #: The visibility comes from two acquisitions, not a fitted scan: an off-centre dip (0.3 ps gave
@@ -84,4 +85,7 @@ def hom_from_tags(
     else:
         result = hom_visibility(c_max, c_min, policy=policy)
     labels = result.labels + (TWO_POINT,)
+    if interrupted(*(np.sort(runs[k][ch]) for k in HOM_SETTINGS for ch in HOM_CHANNELS)):
+        # SNSPD specialist review: a latch in 20% of the dip run raised V by 13 sigma, unlabelled.
+        labels += (INTERRUPTED,)
     return dataclasses.replace(result, window=window.as_record(), labels=labels, counts=counts), counts

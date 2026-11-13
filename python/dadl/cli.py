@@ -18,6 +18,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
+import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
@@ -164,7 +165,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         runs = simulate_setup(setup)
         what = "HOM tags (setting 0 dip, 1 reference)" if setup.analysis_type == "hom" else "CHSH tags"
     if args.format == "ptu":
-        files = write_ptu_dir(args.out, runs, setup.channels, setup.setting_keys, device=args.device)
+        try:
+            files = write_ptu_dir(args.out, runs, setup.channels, setup.setting_keys, device=args.device)
+        except ValueError as exc:
+            raise DadlError(str(exc)) from exc
         print(f"Wrote simulated {what} for {setup.name} as {len(files)} {args.device} PTU files in {args.out}")
         print("  The files are marked as simulated (CreatorSW_Name DADL, DADL_Simulated) and read back as such.")
         return 0
@@ -186,6 +190,63 @@ def _write_checked(cal, out: str, accept_misfit: bool) -> str:
     return str(write_artifact(cal, out))
 
 
+def _backend(setup, tags_path: str) -> str:
+    """"sim" for tags DADL marked as simulated, else "hardware".
+
+    A setup still saying `backend: sim` (as `dadl init` copies it) with tags that are not marked
+    simulated is refused: the new-user review found recorded data written up as simulated, with
+    the channel named "sim:0" instead of the tagger.
+    """
+    if tags_are_simulated(tags_path):
+        return "sim"
+    if setup.backend == "sim":
+        raise DadlError(
+            f"{tags_path} is not marked as simulated (DADL marks the .npz and PTU files it simulates), but the "
+            "setup says `backend: sim`. For recorded data set `backend: file` and `hardware: {tagger: <serial>}` "
+            "in setup.yaml; for simulated data write .npz or PTU instead of .csv."
+        )
+    path = Path(tags_path)
+    if path.is_dir() and setup.tagger:
+        from dadl.adapters.ptu import PtuFile
+
+        serials = {str(PtuFile(f).header.get("HW_SerialNo", "")).strip() for f in sorted(path.glob("setting*.ptu"))}
+        serials.discard("")
+        wrong = sorted(sn for sn in serials if sn not in setup.tagger)
+        if wrong:
+            raise DadlError(
+                f"the PTU files were recorded on tagger serial {', '.join(wrong)}, but setup.yaml says "
+                f"hardware.tagger: {setup.tagger}"
+            )
+    return "hardware"
+
+
+def _refuse_source_on(tags: dict, setup) -> None:
+    """Refuse a "dark" acquisition whose channels share coincidences: the source was on.
+
+    The new-user review ran `calibrate dark` on source-on CHSH tags and got a confident dark rate
+    of 25,400 cps (true 500), written as a normal artifact.
+    """
+    from dadl.coincidences import grid_coincidences
+
+    names = [n for n in sorted(tags) if np.asarray(tags[n]).size > 1]
+    width = setup.window.width_ps
+    delays = setup.window.delays_ps
+    for i, x in enumerate(names):
+        for y in names[i + 1:]:
+            a, b = np.asarray(tags[x]), np.asarray(tags[y])
+            span = float(max(a[-1], b[-1]) - min(a[0], b[0]))
+            if span <= 0:
+                continue
+            c = grid_coincidences(a, b, width, delays.get(x, 0), delays.get(y, 0))
+            expected = a.size * b.size * width / span
+            if c - expected > 10 and (c - expected) / np.sqrt(expected + 1.0) > 6:
+                raise DadlError(
+                    f"channels {x} and {y} share {c} coincidences where {expected:.3g} are expected by chance: "
+                    "the source was on. A dark calibration needs an acquisition with the source off "
+                    "(simulated: dadl simulate SETUP --dark)."
+                )
+
+
 def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_dark
 
@@ -200,15 +261,34 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     unknown = [c for c in wanted if c not in number]
     if unknown:
         raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
-    backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
+    backend = _backend(setup, args.tags)
+    _refuse_source_on(tags, setup)
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     for name in wanted:
         cal = calibrate_dark(tags[name], setup.channel_id(name), backend=backend, seed=setup.seed)
         print()
         print(cal)
+        declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
+        fitted = cal.estimates["dark_rate_cps"].low
+        if declared > 0 and fitted > 10 * declared:
+            print(
+                f"  warning: the dark rate is more than 10x the setup's declared {declared:g} cps. Check that the "
+                "source was off and the detector shielded from light."
+            )
         path = _write_checked(cal, args.out, args.accept_misfit)
         print(f"  artifact: {path}")
     return 0
+
+
+def _grid_capture(offset_ps: float, sigma_ps: float, width_ps: int) -> float:
+    """Probability that a pair lands in one fixed-grid slot: E[max(0, 1 - |D| / W)], D ~ N(offset, sigma)."""
+    from scipy import integrate, stats
+
+    if sigma_ps <= 0:
+        return max(0.0, 1.0 - abs(offset_ps) / width_ps)
+    pdf = stats.norm(offset_ps, sigma_ps).pdf
+    value, _ = integrate.quad(lambda d: (1.0 - abs(d) / width_ps) * pdf(d), -width_ps, width_ps, points=[0.0], limit=200)
+    return float(value)
 
 
 def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
@@ -237,7 +317,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     a, b = tags[args.herald], tags[args.signal]
     window = setup.window
     d_a, d_b = window.delays_ps.get(args.herald, 0), window.delays_ps.get(args.signal, 0)
-    backend = "sim" if setup.backend == "sim" or tags_are_simulated(args.tags) else "hardware"
+    backend = _backend(setup, args.tags)
     span_s = (max(int(a[-1]), int(b[-1])) - min(int(a[0]), int(b[0]))) / 1e12 if a.size and b.size else 0.0
     run_conditions = {
         "delay_herald_ps": float(d_a),
@@ -259,11 +339,19 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             a, b, chs, width_ps=window.width_ps, delay_herald_ps=d_a, delay_signal_ps=d_b, **common
         ),
     ]
+    # Each artifact is checked and refused on its own: a timing tail that makes the delay fit a
+    # misfit says nothing about the accidentals or the heralding ratio (SNSPD specialist review).
+    refused = []
     for cal in cals:
         print()
         print(cal)
-        path = _write_checked(cal, args.out, args.accept_misfit)
-        print(f"  artifact: {path}")
+        try:
+            path = _write_checked(cal, args.out, args.accept_misfit)
+        except DadlError as exc:
+            refused.append(cal.kind)
+            print(f"  not written: {exc}")
+        else:
+            print(f"  artifact: {path}")
     fitted = cals[0].estimates["delay_ps"].value
     if abs(fitted - (d_b - d_a)) > window.width_ps / 4:
         print()
@@ -271,6 +359,17 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             f"  The fitted delay ({fitted:.0f} ps) differs from the declared one ({d_b - d_a} ps) by more than a "
             "quarter window. Declare it in the plan before analysis; DADL never moves the window to fit the data."
         )
+    capture = _grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps)
+    eta = cals[2].estimates["heralding_efficiency"].value
+    print()
+    print(
+        f"  Window capture: about {capture:.3f} of true pairs fall in the same {window.width_ps} ps slot, from the "
+        f"fitted jitter and delay offset. heralding_efficiency / capture = {eta / capture:.3f}, a figure closer to a "
+        "sliding-window or Klyshko efficiency (an estimate, not recorded in the artifact; dead-time losses "
+        "are still included)."
+    )
+    if refused:
+        raise DadlError(f"{len(refused)} of {len(cals)} artifacts not written (misfit): {', '.join(refused)}")
     return 0
 
 
@@ -310,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     qs = sub.add_parser(
         "quickstart",
         help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility)",
-        description="Simulate a CHSH experiment from a setup file and analyse it with a fixed, planned window.",
+        description="Simulate an experiment (CHSH or HOM) from a setup file and analyse it with a fixed, planned window.",
     )
     qs.add_argument(
         "target",

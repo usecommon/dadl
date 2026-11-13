@@ -76,8 +76,9 @@ MULTIHARP_T2 = 0x00010207
 COMPLETE_STOP_REASONS = {0: "time over", 1: "manual stop", 2: "count overflow stop"}
 STOP_REASON_NAMES = {3: "error", -2: "FIFO overrun", -9: "queue overrun", -10: "data transfer failure",
                      -12: "reference clock lost", -13: "sync lost"}
-#: PicoHarp 300 T2 inputs (0-3 with a router); higher channel values are not valid records.
-PICOHARP_MAX_INPUT = 3
+#: PicoHarp 300 T2 channel values: 0 is the sync input (Ch0), 1-4 are Ch1 through a PHR router
+#: (channel 1 without one). PicoQuant's T2 demo code treats channel > 4 as illegal.
+PICOHARP_MAX_INPUT = 4
 
 T3_TYPES = {0x00010303, 0x00010304, 0x01010304, 0x00010305, 0x00010306, 0x00010307}
 

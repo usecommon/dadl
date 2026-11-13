@@ -48,13 +48,30 @@ def test_hom_uses_dip_convention():
 
 
 @pytest.mark.parametrize("fn", [bell_visibility, hom_visibility])
-def test_corrected_visibility_cannot_exceed_one(fn):
+def test_corrected_visibility_beyond_one_is_left_out_not_refused(fn):
+    # Statistician review (cycle 1): refusing censored the best datasets; the raw value stays.
+    from dadl.guardrails import CORRECTION_NOT_COMPUTED
+
     kwargs = {"policy": LOOSE} if fn is bell_visibility else {}
-    with pytest.raises(ValueError):
-        fn(100.0, 10.0, accidentals=20.0, **kwargs)
+    r = fn(100.0, 10.0, accidentals=20.0, **kwargs)
+    assert r.corrected is None and CORRECTION_NOT_COMPUTED in r.labels
+    assert r.raw.low <= r.raw.value <= r.raw.high
 
 
-@pytest.mark.parametrize("args", [(-1.0, 5.0), (float("nan"), 5.0), (5.0, float("inf")), (0.0, 0.0), (5.0, 10.0)])
+def test_raw_visibility_may_be_negative():
+    r = bell_visibility(950.0, 1000.0)
+    assert r.raw.value < 0 and r.raw.low < 0 < r.raw.high
+    assert hom_visibility(100.0, 130.0).raw.value == pytest.approx(-0.3)
+
+
+def test_low_counts_key_on_the_signal_after_subtraction():
+    from dadl.guardrails import LOW_COUNTS
+
+    assert LOW_COUNTS in hom_visibility(1000.0, 50.0, accidentals=45.0).labels
+    assert LOW_COUNTS not in hom_visibility(1000.0, 50.0).labels
+
+
+@pytest.mark.parametrize("args", [(-1.0, 5.0), (float("nan"), 5.0), (5.0, float("inf")), (0.0, 0.0)])
 def test_bad_counts_refused(args):
     with pytest.raises((TypeError, ValueError)):
         bell_visibility(*args)

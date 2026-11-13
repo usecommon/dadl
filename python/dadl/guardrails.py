@@ -34,6 +34,14 @@ GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
 NEAR_THRESHOLD_EXACT = "the exact 95% interval contains the threshold"
 LOW_COUNTS = "low counts: the Gaussian error is unreliable; use the exact interval"
 UNVALIDATED_ANALYSIS = "unvalidated analysis"
+CORRECTION_NOT_COMPUTED = (
+    "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
+    "exact interval"
+)
+INTERRUPTED = (
+    "interrupted: a channel has a gap far longer than its count rate allows (latch, shutdown or lost data); "
+    "the result is not reliable"
+)
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
 KNOWN_CORRECTIONS = frozenset({"accidental_subtraction", "afterpulse", "dead_time", "efficiency"})

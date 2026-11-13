@@ -36,6 +36,7 @@ from dadl.calibration.delay import calibrate_delay
 from dadl.calibration.heralding import calibrate_heralding
 from dadl.closed_form import accidentals_expected, arrhenius_dark_rate, heralding_ratio_expected
 from dadl.data import ChannelId
+from dadl.coincidences import occupied_slots
 from dadl.sim import DetectorParams, simulate_dark, simulate_pairs
 from dadl.stats import coverage_band
 
@@ -115,6 +116,16 @@ PAIR_REGIMES: dict[str, PairRegime] = {
         2_000,
         0.5,
         skip=frozenset({"heralding-efficiency"}),
+    ),
+    # High-rate SNSPD heralding (1 Mpairs/s, 20 ns dead time, eta 0.8): the signal arm's live
+    # fraction given a recorded herald exceeds its average by eta_a eta_b R tau = 1.3%, which the
+    # unconditional closed form missed (0/30 inside; statistician review, cycle 1).
+    "high-rate-snspd": PairRegime(
+        1e6,
+        DetectorParams(efficiency=0.8, dark_rate_cps=200.0, dead_time_ps=20_000, jitter_sigma_ps=30.0, delay_ps=0),
+        DetectorParams(efficiency=0.8, dark_rate_cps=200.0, dead_time_ps=20_000, jitter_sigma_ps=20.0, delay_ps=1_000),
+        500,
+        0.1,
     ),
     # Broad timing response (multimode fibre, slow detectors): sigma about 1.8 ns.
     "broad-irf": PairRegime(
@@ -255,8 +266,11 @@ def pairs_coverage(
             _covered(calibrate_delay(a, b, chs, backend="sim", seed=s, n_draws=10), truth["delay-jitter"], covered["delay-jitter"])
         # The accidentals measurand is this acquisition's: it follows the realised singles, so the
         # truth is n_a n_b W / T for the replicate (the long-run mean differs by the singles'
-        # Poisson scatter, which outweighs the interval at high rates).
-        acc_truth = {"accidental_coincidences": a.size * b.size * r.width_ps * 1e-12 / r.duration_s}
+        # Poisson scatter, which outweighs the interval at high rates). Counted in occupied slots,
+        # the unit the estimator counts in (tags differ from slots when dead time < W).
+        occ_a = occupied_slots(a, r.width_ps, r.a.delay_ps).size
+        occ_b = occupied_slots(b, r.width_ps, r.b.delay_ps).size
+        acc_truth = {"accidental_coincidences": occ_a * occ_b * r.width_ps * 1e-12 / r.duration_s}
         if "accidentals" in covered:
             _covered(calibrate_accidentals(a, b, chs, seed=s, **delays, **common), acc_truth, covered["accidentals"])
         if "heralding-efficiency" in covered:
