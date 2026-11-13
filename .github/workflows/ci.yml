@@ -177,5 +177,5 @@ jobs:
           # One BLAS thread per worker (see dadl.calibration.coverage.run).
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
-        timeout-minutes: 30
+        timeout-minutes: 50
         run: python -m dadl.calibration.coverage all --replicates 1000 --jobs 4

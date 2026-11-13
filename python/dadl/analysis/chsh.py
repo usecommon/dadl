@@ -21,7 +21,7 @@ import numpy as np
 from dadl import _checks
 from dadl.coincidences import grid_coincidences
 from dadl.errors import InsufficientCounts
-from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.guardrails import DEAD_TIME_SELECTION, INTERRUPTED, Policy, threshold_labels
 from dadl.stationarity import interrupted
 from dadl.result import Estimate, LabelledValue
 
@@ -69,6 +69,29 @@ class Window:
         }
 
 
+def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
+    """Largest coincidence rate x dead time over the settings, the dead time read as each run's
+    shortest gap on any channel (an upper bound on the effective dead time).
+
+    Teaching-lab review, cycle 4: with a 1 us dead time at 3e6 pairs/s a V = 0.7 source (S = 1.98)
+    read S = 2.14 +- 0.004; the shift grows with eta^2 R tau (about 0.1 eta^2 R tau in |E|).
+    """
+    worst = 0.0
+    for key, tags in runs.items():
+        arrays = [np.asarray(tags[ch]) for ch in CHANNELS if np.asarray(tags[ch]).size > 1]
+        if not arrays:
+            continue
+        tau = min(float(np.min(np.diff(a))) for a in arrays)
+        span = max(float(a[-1]) for a in arrays) - min(float(a[0]) for a in arrays)
+        if span <= 0:
+            continue
+        n_c = (coincidences or {}).get(key)
+        if n_c is None:
+            continue
+        worst = max(worst, n_c / span * tau)
+    return worst
+
+
 def check_reference_channel(window: Window, channels: tuple[str, ...]) -> None:
     """Refuse delays with no channel at 0: a common offset only moves the fixed grid's origin.
 
@@ -105,7 +128,8 @@ def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, floa
     if total < MIN_COUNTS_PER_SETTING:
         raise InsufficientCounts(
             f"{total} coincidences in a setting; need at least {MIN_COUNTS_PER_SETTING}. "
-            "Check that timestamps are int64 picoseconds and that the declared delays align the channels."
+            "Check that timestamps are int64 picoseconds, that the declared delays align the channels, and that "
+            "the window is not narrow against the timing jitter."
         )
     e = (npp + nmm - npm - nmp) / total
     return e, (1.0 - e * e) / total, total
@@ -152,10 +176,12 @@ def chsh(
         var += v
     raw = Estimate(s, math.sqrt(var))
     labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
-    if interrupted(*(runs[k][ch] for k in SIGNS for ch in CHANNELS)):
+    if interrupted(*([runs[k][ch] for ch in CHANNELS] for k in SIGNS)):
         labels += (INTERRUPTED,)
     counts: dict[str, object] = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
     counts["signs"] = {f"{k[0]},{k[1]}": s for k, s in SIGNS.items()}
+    if dead_time_selection(runs, {k: counts[f"{k[0]},{k[1]}"]["coincidences"] for k in SIGNS}) > 0.01:
+        labels += (DEAD_TIME_SELECTION,)
     if settings_deg is not None:
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     return LabelledValue(

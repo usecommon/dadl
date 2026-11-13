@@ -85,11 +85,12 @@ TAU_SEARCH_PS = (1e3, 1e7)
 #: A stringent level, because the time constant is searched over a range.
 DETECTION_LR = 13.82
 
-UNITS = {
-    "dark_rate_cps": "1/s",
-    "afterpulse_prob": "probability per avalanche, past the effective dead time (single-exponential effective value)",
-    "afterpulse_tau_ps": "ps",
-    "dead_time_ps": "ps (effective channel dead time: the longer of detector and tagger)",
+UNITS = {"dark_rate_cps": "s-1", "afterpulse_prob": "1", "afterpulse_tau_ps": "ps", "dead_time_ps": "ps"}
+DEFINITIONS = {
+    "dark_rate_cps": "rate of avalanches past the effective dead time, with the source off (undetected afterpulses included)",
+    "afterpulse_prob": "afterpulse probability per avalanche past the effective dead time (single-exponential effective value)",
+    "afterpulse_tau_ps": "afterpulse time constant (single exponential)",
+    "dead_time_ps": "effective channel dead time: the longer of the detector's and the tagger's",
 }
 
 _MODEL = DarkAfterpulseModel()
@@ -223,20 +224,31 @@ def _profile_interval(
     return lo, hi
 
 
-def _reweighted_draws(s: np.ndarray, laplace: Laplace, rng: np.random.Generator, n_draws: int) -> np.ndarray:
-    """Posterior draws (flat prior in the fit coordinates): Laplace proposals reweighted by the exact likelihood."""
+def _reweighted_draws(
+    s: np.ndarray, laplace: Laplace, rng: np.random.Generator, n_draws: int
+) -> tuple[np.ndarray, float]:
+    """Posterior draws (flat prior in the fit coordinates): Laplace proposals reweighted by the exact
+    likelihood. Returns the draws and the effective sample size of the weights (Kish)."""
     prop = laplace.draws(rng, IMPORTANCE_DRAWS)
     prop = np.clip(prop, (-80.0, -40.0, -20.0), (0.0, 40.0, 45.0))
     r, p, ta = np.exp(prop[:, 0]), expit(prop[:, 1]), np.exp(prop[:, 2])
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        dens = r[:, None] * (1 - p[:, None]) + p[:, None] * (r[:, None] + 1 / ta[:, None]) * np.exp(-s[None, :] / ta[:, None])
-        loglik = np.sum(np.log(dens), axis=1) - r * s.sum()
+    # In blocks of proposals: a 4000 x n array took 2.6 GB at 40,000 gaps (numerical review, cycle 4).
+    loglik = np.empty(prop.shape[0])
+    block = max(1, min(prop.shape[0], int(2e7 // max(s.size, 1))))
+    for i in range(0, prop.shape[0], block):
+        j = slice(i, i + block)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            dens = r[j, None] * (1 - p[j, None]) + p[j, None] * (r[j, None] + 1 / ta[j, None]) * np.exp(
+                -s[None, :] / ta[j, None]
+            )
+            loglik[j] = np.sum(np.log(dens), axis=1) - r[j] * s.sum()
     diff = prop - laplace.mean
     logq = -0.5 * np.einsum("ij,jk,ik->i", diff, np.linalg.inv(laplace.cov), diff)
     logw = np.where(np.isfinite(loglik), loglik - logq, -np.inf)
     w = np.exp(logw - np.max(logw))
     w /= w.sum()
-    return prop[rng.choice(prop.shape[0], size=n_draws, p=w)]
+    ess = float(1.0 / np.sum(w * w))
+    return prop[rng.choice(prop.shape[0], size=n_draws, p=w)], ess
 
 
 def _dead_time(
@@ -378,6 +390,8 @@ def calibrate_dark(
 
     res = _fit(s, r0)
     unidentified: tuple[str, ...] = ()
+    stand_in: tuple[str, ...] = ()
+    ess_condition: dict[str, float] = {}
     lr = 0.0 if res is None else 2.0 * (nll_null - float(res.fun))
     detected = res is not None and lr > DETECTION_LR
     if detected and res.at_bound:
@@ -421,7 +435,14 @@ def calibrate_dark(
             est_p = laplace.interval(1, lambda y: float(expit(y)))
             est_ta = laplace.interval(2, math.exp)
         if use_profile:
-            d = _reweighted_draws(s, laplace, rng, n_draws)
+            d, ess = _reweighted_draws(s, laplace, rng, n_draws)
+            # Bayesian review, cycle 3: record the importance-sampling diagnostic; warn when low.
+            ess_condition["importance_ess"] = ess
+            if ess < 0.2 * IMPORTANCE_DRAWS:
+                notes.append(
+                    f"the importance reweighting is poor (effective sample size {ess:.0f} of {IMPORTANCE_DRAWS}): "
+                    "the stored draws may not match the intervals"
+                )
         else:
             d = laplace.draws(rng, n_draws)
         r_draws = np.exp(d[:, 0]) * PS_PER_S
@@ -439,6 +460,7 @@ def calibrate_dark(
         p_draws = rng.uniform(0.0, est_p.high, n_draws)
         est_ta = None
         unidentified = ("afterpulse_tau_ps",)
+        stand_in = ("afterpulse_prob",)
         notes.append(
             f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
             f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
@@ -469,6 +491,7 @@ def calibrate_dark(
         # SNSPD specialist review: the stored value (the shortest dark gap) read 23x an SNSPD's
         # 30 ns recovery, unmarked; it is an upper limit, not an estimate.
         unidentified = (*unidentified, "dead_time_ps")
+        stand_in = (*stand_in, "dead_time_ps")
         notes.append(
             f"the dead time is not identified by these dark data, only bounded above (<= {est_tau.high:.6g} ps): "
             "too few gaps fall near it. Do not use the stored value as a dead time; it needs an acquisition "
@@ -495,6 +518,8 @@ def calibrate_dark(
         channels=(channel,),
         estimates=estimates,
         units={k: UNITS[k] for k in estimates},
+        definitions={k: DEFINITIONS[k] for k in estimates},
+        stand_in=stand_in,
         samples=np.column_stack(columns),
         sample_params=tuple(names),
         converged=converged,
@@ -503,7 +528,7 @@ def calibrate_dark(
         )),
         inputs=((tags_sha256(tags), "raw-tags"),),
         backend=backend,
-        conditions={"gaps": float(n), **(conditions or {})},
+        conditions={"gaps": float(n), **ess_condition, **(conditions or {})},
         unidentified=unidentified,
         notes=tuple(notes),
     )

@@ -38,7 +38,11 @@ METHOD = "arrhenius-wls"
 METHOD_VERSION = "1"
 MIN_TEMPERATURES = 3
 
-UNITS = {"dcr_ref_cps": "1/s", "activation_energy_ev": "eV"}
+UNITS = {"dcr_ref_cps": "s-1", "activation_energy_ev": "eV"}
+DEFINITIONS = {
+    "dcr_ref_cps": "dark count rate at the reference temperature (Arrhenius fit)",
+    "activation_energy_ev": "Arrhenius activation energy of the dark count rate",
+}
 
 
 def calibrate_dcr_temperature(
@@ -129,6 +133,7 @@ def calibrate_dcr_temperature(
             "activation_energy_ev": laplace.interval(1, lambda v: v),
         },
         units=dict(UNITS),
+        definitions=dict(DEFINITIONS),
         samples=np.column_stack([np.exp(draws[:, 0]), draws[:, 1]]),
         sample_params=("dcr_ref_cps", "activation_energy_ev"),
         converged=True,

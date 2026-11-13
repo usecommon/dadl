@@ -64,6 +64,28 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
 
 
+def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None:
+    ratio = counts["duration_dip_s"] / counts["duration_reference_s"] if counts["duration_reference_s"] else 1.0
+    if abs(ratio - 1) > 0.01:
+        print(
+            f"  Exposure: dip {counts['duration_dip_s']:.4g} s, reference {counts['duration_reference_s']:.4g} s; "
+            "V compares rates."
+        )
+    if result.corrected is not None:
+        print(
+            f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
+            f"V = {result.corrected}  (secondary; not an indistinguishability claim)"
+        )
+    elif counts["accidentals"] > 0:
+        print(f"  Accidentals not subtracted (estimate {counts['accidentals']:.3g}); see the labels.")
+    ref = abs(setup.reference_delay_ps or 0)
+    if ref > 0.1 * setup.window.width_ps:
+        print(
+            f"  warning: the reference delay ({ref:g} ps) is not small against the {setup.window.width_ps} ps window: "
+            "the fixed grid loses part of the split peak at +-delay, and V reads low."
+        )
+
+
 def _quickstart_hom(path: Path, setup: Setup) -> int:
     from dadl.analysis.hom import hom_from_tags
 
@@ -85,13 +107,7 @@ def _quickstart_hom(path: Path, setup: Setup) -> int:
     print()
     print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
     _print_result(result, "V")
-    if not counts["subtracted"]:
-        print(f"  Accidentals not subtracted: the estimate ({counts['accidentals']:.3g}) exceeds C_min.")
-    if result.corrected is not None:
-        print(
-            f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
-            f"V = {result.corrected}"
-        )
+    _print_hom_extras(result, counts, setup)
     expected = hom_visibility_expected(src.visibility, setup.reference_delay_ps, src.coherence_time_ps)
     print(f"  Closed-form expectation (no accidentals, dead time or window losses): V = {expected:.4f}")
     print()
@@ -140,7 +156,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
             visibility=setup.source.visibility,
             settings_deg=setup.settings_deg,
         )
-        print(f"  Closed-form expectation (ignores dead time and afterpulsing): S = {expected:.4f}")
+        print(f"  Closed-form expectation (ignores dead time, which can raise S, and afterpulsing): S = {expected:.4f}")
     print()
     print("  Edit a copy of this setup with `dadl init`, then `dadl quickstart setup.yaml`.")
     print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
@@ -191,7 +207,72 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write_checked(cal, out: str, accept_misfit: bool) -> str:
+def _add_record_options(p: argparse.ArgumentParser) -> None:
+    """Options that complete the artifact as a record (calibration-lab review, cycle 3)."""
+    p.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",
+                   help="a numeric condition to record, e.g. temperature_K=233.1 or bias_V=24.5 (repeatable)")
+    p.add_argument("--acquired", help="when the data were taken (ISO 8601); default: from the PTU header, if any")
+    p.add_argument("--created", help="record creation time (ISO 8601), to reproduce an artifact; default now")
+    p.add_argument("--valid-until", help="end of the intended validity (ISO 8601); recorded, not enforced")
+    p.add_argument("--supersedes", help="ID of the artifact this one replaces (must exist in --out)")
+
+
+def _when(text: str | None, name: str):
+    import datetime as dt
+
+    if text is None:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DadlError(f"--{name}: not an ISO 8601 time: {text!r}") from exc
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+
+
+def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str, float], tuple]:
+    """Write options, extra conditions and extra inputs for this run's artifacts."""
+    import datetime as dt
+    import hashlib
+
+    conditions: dict[str, float] = {}
+    for item in args.condition:
+        key, sep, value = item.partition("=")
+        try:
+            conditions[key.strip()] = float(value)
+        except ValueError:
+            sep = ""
+        if not sep or not key.strip():
+            raise DadlError(f"--condition needs KEY=NUMBER, got {item!r}")
+    conditions.update(tagger_settings(args.tags))
+    tags_path = Path(args.tags)
+    files = sorted(tags_path.glob("setting*.ptu")) if tags_path.is_dir() else [tags_path]
+    inputs = tuple((hashlib.sha256(f.read_bytes()).hexdigest(), "raw-file") for f in files if f.is_file())
+    if setup_path.is_file():
+        inputs += ((hashlib.sha256(setup_path.read_bytes()).hexdigest(), "config"),)
+    acquired, instrument = _when(args.acquired, "acquired"), {}
+    if tags_path.is_dir() and files:
+        from dadl.adapters.ptu import PtuFile
+
+        header = PtuFile(files[0]).header
+        instrument = {"model": header.get("HW_Type"), "serial": header.get("HW_SerialNo"),
+                      "firmware": header.get("HW_Version")}
+        stamp = header.get("File_CreatingTime")
+        if acquired is None and isinstance(stamp, float) and stamp > 0:
+            acquired = dt.datetime(1899, 12, 30, tzinfo=dt.timezone.utc) + dt.timedelta(days=stamp)
+    supersedes = args.supersedes
+    if supersedes and not (Path(args.out) / f"{supersedes}.json").exists():
+        raise DadlError(f"--supersedes: no artifact {supersedes} in {args.out}")
+    write = {
+        "created": _when(args.created, "created"),
+        "acquired": acquired,
+        "valid_until": _when(args.valid_until, "valid-until"),
+        "supersedes": supersedes,
+        "instrument": {k: str(v) for k, v in instrument.items() if v not in (None, "")},
+    }
+    return write, conditions, inputs
+
+
+def _write_checked(cal, out: str, accept_misfit: bool, **write) -> str:
     """Write the artifact, refusing a misfit unless the user accepts it (it is then marked misfit)."""
     from dadl.artifact import write_artifact
 
@@ -201,7 +282,7 @@ def _write_checked(cal, out: str, accept_misfit: bool) -> str:
             f"(predictive check p = {cal.ppc_pvalue:.3g}). No artifact written. Inspect the data (drift, latching, "
             "a timing tail, afterpulse structure, a pulsed source), or pass --accept-misfit to keep it marked misfit."
         )
-    return str(write_artifact(cal, out))
+    return str(write_artifact(cal, out, **write))
 
 
 def _backend(setup, tags_path: str) -> str:
@@ -232,6 +313,27 @@ def _backend(setup, tags_path: str) -> str:
                 f"hardware.tagger: {setup.tagger}"
             )
     return "hardware"
+
+
+def _check_time_units(runs: dict, setup) -> None:
+    """Refuse tags whose gaps are impossible in picoseconds for the declared dead times.
+
+    Teaching-lab review, cycle 4: tags exported in ns and read as ps gave S = 2.23 +- 0.01 with a
+    window really 1000x wider; 43% of the gaps were shorter than the declared dead time.
+    """
+    for key, tags in runs.items():
+        for name, arr in tags.items():
+            det = setup.detectors.get(name)
+            arr = np.asarray(arr)
+            if det is None or det.dead_time_ps <= 0 or arr.size < 100:
+                continue
+            short = float(np.mean(np.diff(arr) < det.dead_time_ps / 2))
+            if short > 0.05:
+                raise DadlError(
+                    f"{name} in acquisition {key}: {short:.0%} of the gaps between tags are shorter than half the "
+                    f"declared dead time ({det.dead_time_ps} ps). Are the timestamps in picoseconds (not ns)? "
+                    "If they are, correct dead_time_ps in setup.yaml."
+                )
 
 
 def _refuse_source_on(tags: dict, setup) -> None:
@@ -276,12 +378,17 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     if unknown:
         raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
     backend = _backend(setup, args.tags)
+    _check_time_units(runs, setup)
     _refuse_source_on(tags, setup)
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
+    write, extra, inputs = _record(args, _resolve(args.setup))
     for name in wanted:
-        cal = calibrate_dark(
-            tags[name], setup.channel_id(name), backend=backend, seed=setup.seed, conditions=tagger_settings(args.tags)
-        )
+        arr = tags[name]
+        run = {"setting": float(args.setting)}
+        if arr.size > 1:
+            run["duration_s"] = (int(arr[-1]) - int(arr[0])) / 1e12
+        cal = calibrate_dark(arr, setup.channel_id(name), backend=backend, seed=setup.seed, conditions={**run, **extra})
+        cal = dataclasses.replace(cal, inputs=cal.inputs + inputs)
         print()
         print(cal)
         declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
@@ -291,7 +398,7 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
                 f"  warning: the dark rate is more than 10x the setup's declared {declared:g} cps. Check that the "
                 "source was off and the detector shielded from light."
             )
-        path = _write_checked(cal, args.out, args.accept_misfit)
+        path = _write_checked(cal, args.out, args.accept_misfit, **write)
         print(f"  artifact: {path}")
     return 0
 
@@ -315,6 +422,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     keys = setup.setting_keys
     if not 0 <= args.setting < len(keys):
         raise DadlError(f"--setting must be 0..{len(keys) - 1}")
+    _check_time_units(runs, setup)
     tags = runs[keys[args.setting]]
     if setup.analysis_type in ("chsh", "hom") and not args.no_analysers:
         raise DadlError(
@@ -342,8 +450,10 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
         "rate_herald_cps": a.size / span_s if span_s else 0.0,
         "rate_signal_cps": b.size / span_s if span_s else 0.0,
         "analysers_in_path": 0.0,
-        **tagger_settings(args.tags),
+        "setting": float(args.setting),
     }
+    write, extra, inputs = _record(args, _resolve(args.setup))
+    run_conditions.update(extra)
     common = {"backend": backend, "seed": setup.seed, "conditions": run_conditions}
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
     print(f"  Window {window.width_ps} ps and delays {d_a}/{d_b} ps as declared in the setup.")
@@ -379,7 +489,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             print("  not written: the declared delay does not put pairs in the declared slot; declare the fitted delay")
             continue
         try:
-            path = _write_checked(cal, args.out, args.accept_misfit)
+            path = _write_checked(dataclasses.replace(cal, inputs=cal.inputs + inputs), args.out, args.accept_misfit, **write)
         except DadlError as exc:
             refused.append(cal.kind)
             print(f"  not written: {exc}")
@@ -411,6 +521,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
 def cmd_analyze(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
+    _check_time_units(runs, setup)
     print(f"DADL {__version__} analyze: {setup.name}, tags from {args.tags}")
     if setup.analysis_type == "hom":
         from dadl.analysis.hom import hom_from_tags
@@ -420,10 +531,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print()
         print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
         _print_result(result, "V")
-        if not counts["subtracted"]:
-            print(f"  Accidentals not subtracted: the estimate ({counts['accidentals']:.3g}) exceeds C_min.")
-        if result.corrected is not None:
-            print(f"  Accidentals subtracted ({counts['accidentals']:.3g}, off-peak): V = {result.corrected}")
+        _print_hom_extras(result, counts, setup)
         return 0
     result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
     print("  Phase 1 trusts the tags as given and reports raw S only.")
@@ -499,6 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--accept-misfit", action="store_true",
         help="write artifacts whose predictive check fails (p < 0.001), marked misfit; refused otherwise",
     )
+    _add_record_options(dark)
     dark.set_defaults(func=cmd_calibrate_dark)
 
     pairs = cal_sub.add_parser(
@@ -526,6 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-analysers", action="store_true",
         help="confirm the acquisition had no analysers or beamsplitter in the path (required for CHSH and HOM setups)",
     )
+    _add_record_options(pairs)
     pairs.set_defaults(func=cmd_calibrate_pairs)
 
     ver = sub.add_parser("version", help="print the version")

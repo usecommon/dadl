@@ -39,6 +39,14 @@ SINGLE_BASIS = (
     "mutually unbiased bases"
 )
 WINDOW_UNDECLARED = "coincidence window not given: the counts are trusted as given"
+ACCIDENTALS_SUBTRACTED = (
+    "corrected value: accidentals subtracted (off-peak estimate); secondary, not an indistinguishability or "
+    "Bell claim"
+)
+DEAD_TIME_SELECTION = (
+    "dead-time selection: coincidence rate x shortest gap exceeds 1%; a recorded click makes the partner arm's "
+    "dead state depend on the outcome, which can raise |E| and S"
+)
 CORRECTION_NOT_COMPUTED = (
     "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
     "exact interval"

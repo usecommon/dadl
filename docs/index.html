@@ -311,7 +311,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
       <rect class="f-box" x="572" y="288" width="148" height="44"/>
       <text x="646" y="102" class="tx" text-anchor="middle">Raw and corrected values</text>
       <text x="646" y="155" class="tx" text-anchor="middle">Full uncertainty</text>
-      <text x="646" y="208" class="tx" text-anchor="middle">Signed calibration records</text>
+      <text x="646" y="208" class="tx" text-anchor="middle">Calibration records</text>
       <text x="646" y="261" class="tx" text-anchor="middle">Health alerts</text>
       <text x="646" y="314" class="tx" text-anchor="middle">Attribution of drift</text>
       <g class="f-line">
@@ -329,7 +329,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
 <div class="eq"><span><i>S</i> = <i>E</i>(<i>a</i>, <i>b</i>) − <i>E</i>(<i>a</i>, <i>b</i>′) + <i>E</i>(<i>a</i>′, <i>b</i>) + <i>E</i>(<i>a</i>′, <i>b</i>′),&nbsp;&nbsp; <i>E</i> = (<i>N</i><sub>++</sub> + <i>N</i><sub>−−</sub> − <i>N</i><sub>+−</sub> − <i>N</i><sub>−+</sub>) / <i>N</i>,</span><span class="n">(1)</span></div>
 <p>and uniform accidental coincidences <i>A</i> dilute every correlator equally, so that for a Werner-like state of visibility <i>V</i> with <i>C</i> true coincidences</p>
 <div class="eq"><span><i>S</i><sub>raw</sub> = 2√2 <i>V</i> · <i>C</i> / (<i>C</i> + <i>A</i>).</span><span class="n">(2)</span></div>
-<p>Equation (2) is one of the closed-form results against which the DADL simulator and analyses are tested; with the parameters of the bundled example it predicts <i>S</i> = 2.686, and the simulation returns 2.689 ± 0.011 (Listing 2).</p>
+<p>Equation (2) is one of the closed-form results against which the DADL simulator and analyses are tested; with the parameters of the bundled example it predicts <i>S</i> = 2.686, and the simulation returns 2.694 ± 0.011 (Listing 2).</p>
 
 <!-- ========== 5 ========== -->
 <h2 id="workflow"><span class="num">5</span>Use in an experiment</h2>
@@ -374,7 +374,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
       <text x="206" y="240" class="tx-i" text-anchor="end">read</text>
     </svg>
   </div>
-  <figcaption><span class="lab">Figure 4.</span> The measurement loop. Solid arrows give the order of operations in each run; dashed arrows show calibration writing new records to the registry and the analysis reading them. A health monitor (not shown) compares every run with the current model and flags drift, latching and blinding signatures.</figcaption>
+  <figcaption><span class="lab">Figure 4.</span> The measurement loop. Solid arrows give the order of operations in each run; dashed arrows show calibration writing new records to the registry and the analysis reading them. A planned health monitor (not shown, not yet built) would compare every run with the current model and flag drift and latching. Today DADL flags interruptions such as a latch within an acquisition.</figcaption>
 </figure>
 
 <p>In practice a measurement proceeds as follows. The status of each step in the current release is given in italics.</p>
@@ -382,7 +382,7 @@ footer { margin-top: 3em; border-top: 0.8px solid var(--rule-light); padding-top
   <li><b>Describe the setup.</b> A single configuration file names the source, each detector channel and its family, the time tagger and the analysis (Listing 1). <span class="avail">Available: <code>dadl init</code> copies the example and <code>dadl quickstart setup.yaml</code> runs the edited copy.</span></li>
   <li><b>Declare the analysis before acquisition.</b> The coincidence window, sample size and any data-exclusion rules are fixed in advance. For Bell-type analyses a window derived from the data is rejected, since this is the mechanism of the coincidence-time loophole <span class="cite">[7]</span>. <span class="avail">Window rule available; the declared window is recorded but cannot be verified until signed analysis plans (planned).</span></li>
   <li><b>Acquire.</b> Time tags are read from a tagger, a recorded file or the built-in simulator. Configuration changes, buffer overflows and dropped data are logged as events. <span class="avail">Simulator, generic tag files (<code>dadl analyze</code>) and PicoQuant PTU files (T2 mode, on the main branch) available; other vendor adapters planned.</span></li>
-  <li><b>Calibrate.</b> Dark counts and afterpulsing are fitted jointly from dark inter-arrival data; delays and timing response from the cross-correlation peak; system efficiency from the heralding ratio. Each fit is stored with its posterior uncertainty, and a new record supersedes but never overwrites the previous one. <span class="avail">Dark counts, afterpulsing, dead time, DCR(T), delay and timing response, off-peak accidentals and heralding efficiency available on the main branch (<code>dadl calibrate dark</code>, <code>dadl calibrate pairs</code>), with content-addressed records.</span></li>
+  <li><b>Calibrate.</b> Dark counts and afterpulsing are fitted jointly from dark inter-arrival data; delays and timing response from the cross-correlation peak; system efficiency from the heralding ratio. Each fit is stored with its posterior uncertainty, and a new record never overwrites the previous one. <span class="avail">Dark counts, afterpulsing, dead time, DCR(T), delay and timing response, off-peak accidentals and heralding efficiency available on the main branch (<code>dadl calibrate dark</code>, <code>dadl calibrate pairs</code>), with content-addressed records; supersession and validity are recorded, not yet enforced.</span></li>
   <li><b>Correct and fit.</b> CHSH, HOM visibility and tomography are computed through the forward model, with calibration uncertainty propagated by joint Monte Carlo sampling. Every result returns its raw value first, its corrected value where permitted, and its labels (Listing 2). <span class="avail">Raw CHSH and visibility available; corrected values planned.</span></li>
   <li><b>Explain.</b> When a result changes between runs, the analysis is recomputed with each identifiable cause held at its earlier value (Section 7). <span class="avail">Planned.</span></li>
   <li><b>Archive.</b> Time tags from calibration windows and declared runs are stored in Photon-HDF5 <span class="cite">[9]</span> with a calibration group (under <code>/user</code> until a <code>/calibration</code> group is accepted upstream) recording which records were applied, in what order, and with which software versions. <span class="avail">Schema available; export planned.</span></li>
@@ -400,12 +400,14 @@ analysis:
 </div>
 
 <div class="listing">
-  <div class="lcap"><b>Listing 2.</b> Excerpt of the output of the bundled example on simulated data (version 0.0.3).</div>
+  <div class="lcap"><b>Listing 2.</b> Excerpt of the output of the bundled example on simulated data (main branch).</div>
 <pre>$ dadl quickstart chsh-spad
-  Raw S = 2.6890 ± 0.0105   (statistical only (Gaussian, 1 sigma))
-  Labels: fair sampling assumed (post-selected on coincidences)
+  Raw S = 2.6941 ± 0.0105   (statistical only (Gaussian, 1 sigma))
+  Labels: fair sampling and fair coincidence assumed (post-selected on coincidences);
+    static settings: locality, freedom-of-choice and memory loopholes open; not a loophole-free test
+  Coincidences per singles (what post-selection kept): a,b 0.396, a,b' 0.392, a',b 0.387, a',b' 0.392
   Window: 2000 ps, delays none, source 'plan' (declared, not verified)
-  Closed-form expectation (ignores dead time and afterpulsing): S = 2.6863</pre>
+  Closed-form expectation (ignores dead time, which can raise S, and afterpulsing): S = 2.6863</pre>
 </div>
 
 <!-- ========== 6 ========== -->
@@ -518,11 +520,11 @@ analysis:
 </table>
 </div>
 
-<p>The benefits differ by user. For <b>quantum network testbeds</b>, where availability is the figure of merit, a continuous health monitor tracks each channel, flags latching and blinding, and exports metrics to an orchestrator, with each alert linked to its evidence. For <b>research laboratories</b> running Bell, HOM and tomography experiments, the gains are honest uncertainties, protection against loophole-prone procedures, and less time spent rebuilding calibration scripts. For <b>quantum key distribution developers</b>, DADL offers detector characterization along the lines of ETSI GS QKD 011 <span class="cite">[10]</span> and signed monitoring records for each key session; it never alters data in the security path, and its records document what was observed rather than prove security. For <b>teaching laboratories</b>, the simulator injects known imperfections, so that the effect of a dark count, an afterpulse or a dead-time loss on a Bell parameter can be observed and checked against closed-form results such as Eq. (2).</p>
+<p>The benefits differ by user. For <b>quantum network testbeds</b>, where availability is the figure of merit, a planned continuous health monitor would track each channel, flag latching and export metrics to an orchestrator, with each alert linked to its evidence. For <b>research laboratories</b> running Bell, HOM and tomography experiments, the gains are honest uncertainties, protection against loophole-prone procedures, and less time spent rebuilding calibration scripts. For <b>quantum key distribution developers</b>, detector characterization along the lines of ETSI GS QKD 011 <span class="cite">[10]</span> and signed monitoring records for each key session are planned; gated detectors, efficiency mismatch and side-channel characterization (blinding, after-gate, time-shift and dead-time attacks) are not supported today, and nothing DADL produces belongs in a QKD security argument. For <b>teaching laboratories</b>, the simulator injects known imperfections, so that the effect of a dark count or of accidentals on a Bell parameter can be observed and checked against closed-form results such as Eq. (2); dead time and afterpulsing are simulated but not in that closed form, and dead time can raise S.</p>
 
 <!-- ========== 9 ========== -->
 <h2 id="limits"><span class="num">9</span>Limitations</h2>
-<p>Software cannot recover lost efficiency or timing resolution; DADL makes the imperfections of an inexpensive detector known, bounded and auditable, which is not the same as making it equivalent to a better one. Correcting for efficiency is equivalent to assuming fair sampling, so DADL cannot close the detection loophole: a loophole-free CHSH test requires a detection efficiency of about 82.84% <span class="cite">[11]</span>, or about 2/3 with Eberhard's inequality, non-maximally entangled states and near-zero background <span class="cite">[12]</span>. In a QKD security path DADL monitors and records only. Finally, all review of the design to date has been internal; published results are therefore encoded as automated tests, so that the guardrails are checked against an external reference on every change.</p>
+<p>Software cannot recover lost efficiency or timing resolution; DADL makes the imperfections of an inexpensive detector known, bounded and auditable, which is not the same as making it equivalent to a better one. Correcting for efficiency is equivalent to assuming fair sampling, so DADL cannot close the detection loophole: a loophole-free CHSH test requires a detection efficiency of about 82.84% <span class="cite">[11]</span>, or about 2/3 with Eberhard's inequality, non-maximally entangled states and near-zero background <span class="cite">[12]</span>. In a QKD security path DADL would only monitor and record; it has no side-channel detection today. Finally, all review of the design to date has been internal; published results are therefore encoded as automated tests, so that the guardrails are checked against an external reference on every change.</p>
 
 <!-- ========== 10 ========== -->
 <h2 id="status"><span class="num">10</span>Status and roadmap</h2>

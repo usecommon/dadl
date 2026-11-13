@@ -12,7 +12,7 @@ The positioning is "known, bounded, auditable imperfections", not "cheap detecto
 
 **What works today (v0.0.3).** Everything else in this doc is design, not code.
 
-- A seeded time-tag simulator with injected efficiency, dark counts, non-paralyzable dead time, jitter, delay and one generation of afterpulsing.
+- A seeded time-tag simulator with injected efficiency, dark counts, non-paralyzable dead time, jitter, delay and cascading afterpulsing.
 - `setup.yaml` drives it: `dadl quickstart`, `dadl init`, `dadl simulate` and `dadl analyze` (raw CHSH S from your own tags in a generic `.npz`/`.csv` format).
 - Raw CHSH S from fixed-grid coincidences with a declared window; Bell fringe and HOM dip visibility, with accidental subtraction where the policy allows it.
 - Guardrail refusals, policy fingerprints recorded on every result, and threshold labels.
@@ -441,7 +441,7 @@ Here ⋆ is cross-correlation (IRF\_b convolved with IRF\_a reversed), d\_ab the
 
 An artifact is a small JSON manifest plus a posterior sample table, addressed by the SHA-256 of its canonical manifest. It is stored under `/calibration/artifacts/<id>` and can also live as a standalone file.
 
-The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until every phase 2 calibration writes artifacts; `dadl calibrate dark` already does):
+The example below is `schema/examples/calibration-dark-afterpulse-deadtime.json`, which CI validates against the schema (`calibration/1`, a draft until every phase 2 calibration writes artifacts; `dadl calibrate dark` already does). It illustrates the format, including fields phase 2 does not yet write (a method name and version from the planned engine, `valid_for.conditions`); what `dadl calibrate` writes today is described in the README under "Records, not certificates":
 
 ```json
 {
@@ -615,7 +615,7 @@ Proposed sequence. Each phase gates the next, and each gate is a named CI job wi
 
 | Phase | Delivers | Gate (CI job) | Status |
 | --- | --- | --- | --- |
-| 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): afterpulse closed-form test and crosstalk simulation outstanding |
+| 1. Simulator and starter kit | Simulator; YAML-driven quickstart; own-data `analyze`; guardrails with recorded provenance; Rust core held to shared vectors | `pytest` closed-form tests (CHSH with accidentals, dead time, exact series dead time) and the 200-seed pull test (pull SD in [0.85, 1.15], mean within 0.25) | Partial (v0.0.3): crosstalk simulation outstanding (the afterpulse closed-form test arrived in phase 2) |
 | 2. Calibration engine and data model | Dataset/TagSet and ChannelId types; DetectorModel protocol; six calibrations on simulated data and PTU files; PyO3 bindings crate; `setup-1` JSON Schema; adapter template; hom-snspd example; Wilson/Beta intervals; SeedSequence streams | `coverage`: 1,000 replicates per calibration and regime (dark: Si SPAD, CMOS SPAD; pairs: CW SPAD, sparse SNSPD, broad IRF; DCR(T)); each parameter's 95% interval coverage within the binomial band that a correct method fails with probability 0.1% per calibration, on a seed fixed in advance (Bonferroni across its parameters: 92.6–97.1% for one parameter, 92.3–97.3% for four; where counts are too low for an exact 95%, declared in advance, coverage of at least the lower bound) | Done on `main` (unreleased): data types, intervals, artifacts, setup schema; six calibrations (dark/afterpulse/dead time, DCR(T), delay/jitter, off-peak accidentals, heralding efficiency) passing the gate; PTU T2 adapter, adapter template, hom-snspd example; PyO3 bindings (`dadl-quantum-core`, NumPy arrays; Arrow C Stream still planned). Limits: PTU T3 and replay files from real hardware outstanding |
 | 3. Inference and plans | Forward model, joint Monte Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n) coincidences | `guardrails`: every regression case refuses, including window shopping under a signed plan | Not started |
 | 4. Explain (v0.2+) | Attribution with family-wise-adjusted 95% intervals and a misfit interval | `explain`: N named scenarios, correct top attribution in ≥ 90% | Seeking contributors |

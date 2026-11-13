@@ -21,9 +21,21 @@ import numpy as np
 MIN_GAPS = 20
 
 
-def interruption_pvalue(tags: np.ndarray) -> tuple[float, float]:
-    """(p, longest gap in ps): p that the longest gap is this long in an uninterrupted stream."""
+def interruption_pvalue(
+    tags: np.ndarray, start: int | None = None, end: int | None = None
+) -> tuple[float, float]:
+    """(p, longest gap in ps): p that the longest gap is this long in an uninterrupted stream.
+
+    `start` and `end` bound the acquisition (e.g. the earliest and latest tag over all its
+    channels): the gaps from `start` to the first tag and from the last tag to `end` count too, so
+    a channel that comes up late or goes dark early is caught (QKD review, cycle 4: a trailing 30%
+    latch read heralding 0.457 for 0.653 with status ok).
+    """
     tags = np.asarray(tags)
+    if tags.size and start is not None and start < int(tags[0]):
+        tags = np.concatenate([[start], tags])
+    if tags.size and end is not None and end > int(tags[-1]):
+        tags = np.concatenate([tags, [end]])
     if tags.size < MIN_GAPS + 1:
         return 1.0, 0.0
     gaps = np.diff(tags).astype(np.float64)
@@ -42,14 +54,28 @@ def interruption_pvalue(tags: np.ndarray) -> tuple[float, float]:
 
 
 def channels_pvalue(*streams: np.ndarray) -> tuple[float, float]:
-    """Bonferroni-combined p over several channels, and the longest gap seen (ps)."""
-    results = [interruption_pvalue(s) for s in streams]
+    """Bonferroni-combined p over several channels, and the longest gap seen (ps).
+
+    The streams are taken as one acquisition: its bounds are the earliest and latest tag of all.
+    """
+    nonempty = [np.asarray(s) for s in streams if np.asarray(s).size]
+    start = min((int(s[0]) for s in nonempty), default=None)
+    end = max((int(s[-1]) for s in nonempty), default=None)
+    results = [interruption_pvalue(s, start, end) for s in streams]
     if not results:
         return 1.0, 0.0
     p = min(1.0, len(results) * min(r[0] for r in results))
     return p, max(r[1] for r in results)
 
 
-def interrupted(*streams: np.ndarray, alpha: float = 0.001) -> bool:
-    """True when any stream fails the interruption test (Bonferroni over streams at `alpha`)."""
-    return channels_pvalue(*streams)[0] < alpha
+def interrupted(*acquisitions: list[np.ndarray], alpha: float = 0.001) -> bool:
+    """True when any channel of any acquisition fails the interruption test.
+
+    Each acquisition is a list of its channels' tag arrays, bounded by its own earliest and latest
+    tag; Bonferroni over all channels at `alpha`.
+    """
+    n = sum(len(acq) for acq in acquisitions)
+    if n == 0:
+        return False
+    worst = min(channels_pvalue(*acq)[0] / max(len(acq), 1) for acq in acquisitions if len(acq))
+    return min(1.0, n * worst) < alpha

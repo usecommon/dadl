@@ -131,8 +131,14 @@
               "histogram",
               "telemetry",
               "config",
-              "previous-artifact"
-            ]
+              "previous-artifact",
+              "raw-file"
+            ],
+            "description": "raw-tags: hash of one channel's int64 tag array (little-endian); raw-file: hash of an input file's bytes; config: hash of the setup file."
+          },
+          "name": {
+            "type": "string",
+            "description": "File name or channel the hash refers to."
           }
         }
       }
@@ -175,6 +181,13 @@
             "type": "string"
           },
           "minItems": 1
+        },
+        "stand_in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Draw columns that are conservative stand-ins (e.g. uniform below an upper limit), not posterior draws; not to be propagated as a posterior."
         }
       }
     },
@@ -182,10 +195,23 @@
       "description": "What the intervals include and leave out. DADL intervals are statistical (counting) only.",
       "type": "object",
       "properties": {
-        "kind": {"type": "string"},
-        "level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
-        "validation": {"type": "string"},
-        "not_included": {"type": "array", "items": {"type": "string"}}
+        "kind": {
+          "type": "string"
+        },
+        "level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "validation": {
+          "type": "string"
+        },
+        "not_included": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "checks": {
@@ -205,7 +231,10 @@
         },
         "status": {
           "description": "ok, or misfit when the posterior predictive check fails (p below 0.001): the model does not describe the data and the intervals must not be used.",
-          "enum": ["ok", "misfit"]
+          "enum": [
+            "ok",
+            "misfit"
+          ]
         },
         "prior_dominated_params": {
           "type": "array",
@@ -256,6 +285,15 @@
             },
             "additionalProperties": false
           }
+        },
+        "numpy": {
+          "type": "string"
+        },
+        "scipy": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -295,7 +333,11 @@
         ],
         "properties": {
           "value": {
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Point estimate; null for a parameter reported only as a bound."
           },
           "low": {
             "type": "number"
@@ -309,7 +351,18 @@
             "exclusiveMaximum": 1
           },
           "unit": {
-            "type": "string"
+            "type": "string",
+            "description": "UCUM unit (ps, s-1, 1, eV, {count})."
+          },
+          "bound": {
+            "enum": [
+              "upper"
+            ],
+            "description": "Present when only an upper limit is reported: the interval is [low, high] = [0, limit]."
+          },
+          "definition": {
+            "type": "string",
+            "description": "What the parameter is (the unit alone does not say)."
           }
         }
       }
@@ -327,6 +380,18 @@
       "items": {
         "type": "string"
       }
+    },
+    "acquired": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the data were acquired (from the tagger file, or declared). `created` is when the record was made."
+    },
+    "instrument": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Instrument identification as reported by the tagger file: model, serial, firmware."
     }
   }
 }

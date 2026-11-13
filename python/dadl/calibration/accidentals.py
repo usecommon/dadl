@@ -53,7 +53,10 @@ GUARD_PS = 10_000_000
 GUARD_TAUS = 10
 N_SIDE = 100
 
-UNITS = {"accidental_coincidences": "counts per acquisition"}
+UNITS = {"accidental_coincidences": "{count}"}
+DEFINITIONS = {
+    "accidental_coincidences": "expected accidental coincidences in the declared fixed-grid window over this acquisition"
+}
 
 
 def side_offsets(width_ps: int, *, rep_period_ps: int | None = None, n_side: int = N_SIDE, guard_ps: int = GUARD_PS) -> np.ndarray:
@@ -212,6 +215,7 @@ def calibrate_accidentals(
         channels=tuple(channels),
         estimates={"accidental_coincidences": est},
         units=dict(UNITS),
+        definitions=dict(DEFINITIONS),
         samples=draws[:, None],
         sample_params=("accidental_coincidences",),
         converged=True,

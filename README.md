@@ -84,7 +84,19 @@ limits, stated plainly:
   path (`--no-analysers`); on Bell data it measures the analyser projection.
 - **Bell results** assume fair sampling and fair coincidence, with static
   settings: they do not close detection, locality or freedom-of-choice
-  loopholes.
+  loopholes (nor the memory loophole, where a local model uses earlier
+  trials). "Coincidences per singles" is the fraction of one arm's clicks
+  that post-selection kept, about the other arm's efficiency times the window
+  capture; closing the detection loophole needs about 0.83 (CHSH) or 2/3
+  (Eberhard). CHSH needs both outputs of each analyser (A+, A−, B+, B−); the
+  two-detector, 16-measurement scheme with rotating polarisers is not
+  supported.
+- **Dead time can raise S.** A recorded click makes the partner arm's dead
+  state depend on the outcome, so |E| grows with η²Rτ: a V = 0.7 source
+  (S = 1.98) read S = 2.14 with a 1 µs dead time at 3·10⁶ pairs/s. Results
+  where coincidence rate × dead time exceeds 1% carry a "dead-time selection"
+  label; tags whose gaps are impossible for the declared dead time (often a
+  ns export read as ps) are refused.
 - **Coverage gates** run 1,000 simulated replicates per calibration at a few
   regimes and catch gross failures (coverage below about 93%), not small ones.
 - **Gaussian timing response.** The delay fit models a Gaussian IRF (with the
@@ -106,6 +118,13 @@ limits, stated plainly:
 - **Corrected visibility** is refused when the accidentals exceed the minimum
   count (or the corrected value would exceed 1), which removes the datasets
   nearest V = 1; report the raw value with its exact interval there.
+- **HOM** is two-fold and two-point: the visibility at the declared dip delay
+  against a reference delay, on a 50:50 beamsplitter, with detectors that do
+  not resolve photon number. Four-fold heralded HOM, delay-scan fits and
+  splitter imbalance (which caps V at 2RT/(R² + T²)) are not handled. The
+  reference delay must be small against the window. Acquisitions of different
+  length are compared as rates; singles cannot normalise drift (they fall at
+  the dip by design).
 - **Whole-file PTU reading.** A PTU file is decoded in memory at about 100
   bytes per record (215 with many markers): a 4 GB file needs about 100 GB.
   Chunked reading is planned. Unrecognised special records and a divided sync
@@ -116,8 +135,17 @@ limits, stated plainly:
 - **Double clicks** in CHSH (both outputs of one side in a slot) count in two
   outcome combinations, which pulls E toward 0.
 - **Reproducibility.** The same tags, setup and code give the same artifact
-  ID when `created` is fixed (set `SOURCE_DATE_EPOCH`); posterior draws are
-  seeded from the setup's `seed`, or from the input hashes without one.
+  ID when `created` is fixed (`--created`); posterior draws are seeded from
+  the setup's `seed` mixed with the input hashes.
+- **Records, not certificates.** An artifact names the tagger, input and
+  detector serial, the input file and setup hashes, the acquisition time
+  and the conditions you give (`--condition temperature_K=233`), but it is
+  not a calibration record in the ISO/IEC 17025 sense: uncertainty is
+  statistical only, and traceability, validity (`--valid-until`) and
+  supersession (`--supersedes`) are recorded, not enforced. The ID gives
+  integrity, not authenticity: signing is planned. Parameters reported only
+  as a bound have `value: null` and `bound: "upper"`, and draw columns that
+  are stand-ins rather than a posterior are listed in `posterior.stand_in`.
 - A failed predictive check marks the calibration `misfit`; the CLI refuses to
   write it unless `--accept-misfit` is given.
 
@@ -127,8 +155,10 @@ limits, stated plainly:
   be recovered in software.
 - Close the detection loophole in software. Efficiency correction is
   equivalent to assuming fair sampling.
-- Correct data in a QKD security path. There, DADL only keeps monitoring
-  records, which are not proof of security.
+- Correct data in a QKD security path, or detect attacks on detectors. DADL
+  has no blinding, after-gate, time-shift or efficiency-mismatch detection
+  and does not support gated detectors; nothing it produces belongs in a QKD
+  security argument.
 - Verify, in phase 1, that a window declared as planned really was fixed
   before acquisition, or that the tags you pass in are unfiltered. It records
   what you declare; signed analysis plans arrive in phase 3.
@@ -185,7 +215,7 @@ import numpy as np
 import dadl
 
 setup = dadl.load_setup("my-experiment/setup.yaml")
-runs = dadl.read_tags("tags.npz", setup.channels)   # or build the dict yourself:
+runs = dadl.read_tags("tags.npz", setup.channels, setup.setting_keys)   # or build the dict yourself:
 # runs[("a", "b")] = {"A+": np.int64 array of ps, "A-": ..., "B+": ..., "B-": ...}
 result = dadl.chsh(runs, setup.window, settings_deg=setup.settings_deg)  # the planned window and delays
 print(result)               # raw S, labels

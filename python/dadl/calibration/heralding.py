@@ -65,7 +65,11 @@ METHOD = "herald-ratio"
 METHOD_VERSION = "3"
 MIN_HERALDS = 100
 
-UNITS = {"heralding_efficiency": "1 (per herald slot)"}
+UNITS = {"heralding_efficiency": "1"}
+DEFINITIONS = {
+    "heralding_efficiency": "heralded detection probability per herald slot, as detected in the declared window "
+    "(detector x coupling x window capture x live fraction given a recorded herald)"
+}
 
 
 #: Quadrature points over the accidental probability p.
@@ -185,8 +189,11 @@ def calibrate_heralding(
         channels=tuple(channels),
         estimates={"heralding_efficiency": Interval(value, lo, hi)},
         units=dict(UNITS),
-        samples=draws[:, None],
-        sample_params=("heralding_efficiency",),
+        definitions=dict(DEFINITIONS),
+        # p is drawn jointly with eta (Bayesian review, cycle 3): propagating both from separate
+        # artifacts would lose their correlation, which dominates eta's spread at high p.
+        samples=np.column_stack([draws, p_draws]),
+        sample_params=("heralding_efficiency", "accidental_probability"),
         converged=True,
         ppc_pvalue=with_interruption_check(offpeak_pvalue(side, offsets), notes, herald, signal),
         inputs=((tags_sha256(herald), "raw-tags"), (tags_sha256(signal), "raw-tags")),

@@ -179,6 +179,9 @@ def _decode(records: np.ndarray, family: str, wrap: int) -> tuple[np.ndarray, np
         is_tag = ~sp | sync
         tag_input = np.where(sync, 0, ch + 1)
         marker_bits = ch
+    # A crafted file of maximal overflow records wrapped the int64 sum silently (QKD review, cycle 4).
+    if incr.size and float(np.sum(incr, dtype=np.float64)) + float(wrap) >= float(np.iinfo(np.int64).max):
+        raise AdapterError("PTU overflow records exceed the int64 tick range")
     offset = np.cumsum(incr, dtype=np.int64)
     time = offset + tt
     extra = {
@@ -306,6 +309,9 @@ class PtuFile:
             events.append(Event("unknown-special", value=extra["unknown"]))
         stop = self.header.get("TTResult_StopReason")
         incomplete = False
+        if stop is None:
+            # QKD review, cycle 4: without a stop reason, completeness is unknown, not assured.
+            events.append(Event("stop-reason", detail={"reason": "not recorded: completeness unknown"}))
         if stop is not None:
             stop = int(stop)
             if stop in COMPLETE_STOP_REASONS:

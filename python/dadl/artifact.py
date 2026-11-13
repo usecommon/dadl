@@ -24,7 +24,9 @@ import io
 import json
 import math
 import os
+import re
 import tempfile
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -32,7 +34,7 @@ from typing import Any
 import numpy as np
 
 from dadl import __version__
-from dadl.calibration.base import Calibration
+from dadl.calibration.base import MISFIT_ALPHA, Calibration
 from dadl.errors import DadlError
 
 SCHEMA = "calibration/1"
@@ -120,6 +122,38 @@ def _utc(ts: _dt.datetime) -> str:
     return ts.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _summary_entry(cal: Calibration, name: str, iv: Any) -> dict[str, Any]:
+    """Value, interval, unit and definition; a limit-only parameter has value null and a bound.
+
+    Calibration-lab review, cycle 3: an unidentified dead time was stored as a point value 2.5x
+    the truth, readable as a measurement.
+    """
+    limit_only = iv.low == 0 and (name in cal.unidentified or name in cal.stand_in)
+    entry: dict[str, Any] = {
+        "value": None if limit_only else iv.value,
+        "low": iv.low,
+        "high": iv.high,
+        "level": iv.level,
+        "unit": cal.units.get(name, ""),
+    }
+    if limit_only:
+        entry["bound"] = "upper"
+    if name in cal.definitions:
+        entry["definition"] = cal.definitions[name]
+    return entry
+
+
+def _software() -> dict[str, str]:
+    import platform
+
+    import scipy
+
+    return {"dadl": __version__, "numpy": np.__version__, "scipy": scipy.__version__, "python": platform.python_version()}
+
+
 def posterior_bytes(samples: np.ndarray) -> bytes:
     """The posterior table as .npy bytes (little-endian float64, C order)."""
     buf = io.BytesIO()
@@ -139,22 +173,20 @@ def build_manifest(
     created: _dt.datetime | None = None,
     valid_until: _dt.datetime | None = None,
     supersedes: str | None = None,
+    acquired: _dt.datetime | None = None,
+    instrument: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], bytes]:
     """Manifest and posterior bytes for a calibration.
 
-    `created` defaults to $SOURCE_DATE_EPOCH when set (reproducible builds), else now (UTC). With a
-    fixed `created` the same data and code give the same artifact ID: seeds default to a hash of
-    the inputs.
+    `created` (when the record was made) defaults to now (UTC); pass it explicitly to reproduce an
+    artifact: with a fixed `created` the same data and code give the same ID, since draw seeds come
+    from the inputs. `acquired` is when the data were taken (from the tagger file when known). A
+    $SOURCE_DATE_EPOCH in the environment is deliberately not read: packaging environments set it,
+    and it silently backdated records (calibration-lab review, cycle 3).
     """
-    if created is None:
-        epoch = os.environ.get("SOURCE_DATE_EPOCH")
-        if epoch:
-            try:
-                created = _dt.datetime.fromtimestamp(int(epoch), _dt.timezone.utc)
-            except ValueError as exc:
-                raise ArtifactError(f"SOURCE_DATE_EPOCH must be an integer, got {epoch!r}") from exc
-        else:
-            created = _dt.datetime.now(_dt.timezone.utc)
+    created = created or _dt.datetime.now(_dt.timezone.utc)
+    if supersedes is not None and not (isinstance(supersedes, str) and _SHA256.fullmatch(supersedes)):
+        raise ArtifactError(f"supersedes must be an artifact ID (64 hex digits), got {supersedes!r}")
     if cal.samples.ndim != 2 or cal.samples.shape[0] < 1:
         raise ArtifactError("an artifact needs at least one posterior draw")
     bad = sorted(k for k, v in cal.conditions.items() if isinstance(v, bool) or not isinstance(v, (int, float)))
@@ -176,16 +208,13 @@ def build_manifest(
             "sha256": posterior_sha256(cal.samples),
             "n_samples": int(cal.samples.shape[0]),
             "params": list(cal.sample_params),
+            "stand_in": [p for p in cal.sample_params if p in cal.stand_in],
         },
-        "summary": {
-            name: {"value": iv.value, "low": iv.low, "high": iv.high, "level": iv.level, "unit": cal.units.get(name, "")}
-            for name, iv in cal.estimates.items()
-        },
+        "summary": {name: _summary_entry(cal, name, iv) for name, iv in cal.estimates.items()},
         "checks": {
             "converged": cal.converged,
             "ppc_pvalue": cal.ppc_pvalue,
             "status": cal.status,
-            "prior_dominated_params": [],
         },
         "uncertainty": {
             "kind": "statistical (counting) only",
@@ -202,8 +231,12 @@ def build_manifest(
         "unidentified_params": list(cal.unidentified),
         "notes": list(cal.notes),
         "supersedes": supersedes,
-        "software": {"dadl": __version__},
+        "software": _software(),
     }
+    if acquired is not None:
+        manifest["acquired"] = _utc(acquired)
+    if instrument:
+        manifest["instrument"] = {k: str(v) for k, v in sorted(instrument.items()) if v not in (None, "")}
     if cal.conditions:
         manifest["conditions"] = dict(cal.conditions)
     if valid_until is not None:
@@ -276,6 +309,19 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
     # (software review, cycle 2).
     if raw != canonical_json(manifest):
         raise ArtifactError(f"{path}: the file is not in canonical (RFC 8785) form")
+    # Self-consistency, not authenticity: anyone who can write the file can mint a valid-looking
+    # record (QKD review, cycle 4). Status follows from the check; values lie in their intervals.
+    checks = manifest.get("checks", {})
+    p = checks.get("ppc_pvalue")
+    if isinstance(p, (int, float)) and "status" in checks:
+        if checks["status"] != ("misfit" if p < MISFIT_ALPHA else "ok"):
+            raise ArtifactError(f"{path}: checks.status contradicts checks.ppc_pvalue")
+    for name, entry in (manifest.get("summary") or {}).items():
+        v, lo, hi = entry.get("value"), entry.get("low"), entry.get("high")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and not lo <= hi:
+            raise ArtifactError(f"{path}: summary {name}: low exceeds high")
+        if isinstance(v, (int, float)) and isinstance(lo, (int, float)) and not lo <= v <= hi:
+            raise ArtifactError(f"{path}: summary {name}: value lies outside its interval")
     ppath = path.with_name(f"{aid}.posterior.npy")
     try:
         post = ppath.read_bytes()

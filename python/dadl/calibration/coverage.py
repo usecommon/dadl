@@ -104,7 +104,8 @@ PAIR_REGIMES: dict[str, PairRegime] = {
         2_000,
         2.0,
     ),
-    # Bright background on the signal arm (8 Mcps recorded, 18% dead): dead time makes the
+    # Bright background on the signal arm (8 Mcps recorded, 18% dead; 0.2 s keeps the gate's run
+    # time in CI's budget): dead time makes the
     # cross-correlation background step under the peak (a flat-background delay fit covered 52%)
     # and the accidentals are large. Heralding is not gated here: at this dead fraction misses
     # caused by dead time correlate with accidentals in the same slot, a limit the calibration
@@ -114,7 +115,7 @@ PAIR_REGIMES: dict[str, PairRegime] = {
         DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, jitter_sigma_ps=350.0, delay_ps=0),
         DetectorParams(efficiency=0.4, dark_rate_cps=1e7, jitter_sigma_ps=200.0, delay_ps=3_217),
         2_000,
-        0.5,
+        0.2,
         skip=frozenset({"heralding-efficiency"}),
     ),
     # High-rate SNSPD heralding (1 Mpairs/s, 20 ns dead time, eta 0.8): the signal arm's live

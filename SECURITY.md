@@ -31,6 +31,9 @@ In scope for the code that exists today:
 Approval tokens, artifact signing, the audit log, plugin loading and the MCP
 server are designed but not built; they will join this scope when they ship.
 
-QKD monitoring records are evidence of what the monitor observed. They are not
-proof of security, and reports that they cannot detect an unknown attack are
+DADL has no QKD monitor today: no blinding, after-gate, time-shift, dead-time
+attack or efficiency-mismatch detection, and no QKD monitoring record. Nothing
+it produces belongs in a QKD security argument. When monitoring records
+arrive, they will be evidence of what the monitor observed, not proof of
+security, and reports that they cannot detect an unknown attack will be
 expected behaviour, not vulnerabilities.

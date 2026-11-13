@@ -65,7 +65,7 @@ def test_round_trip(cal, tmp_path):
     assert path.name == f"{artifact_id(build_manifest(cal, created=CREATED)[0])}.json"
     manifest, samples = read_artifact(path)
     np.testing.assert_array_equal(samples, cal.samples)
-    assert manifest["summary"]["dark_rate_cps"]["unit"] == "1/s"
+    assert manifest["summary"]["dark_rate_cps"]["unit"] == "s-1"
     assert manifest["channels"] == [{"device": "SPCM-0001", "input": 3}]
     # Writing the same artifact again is a no-op, never an overwrite.
     assert write_artifact(cal, tmp_path, created=CREATED) == path

@@ -84,11 +84,20 @@ def gamma_posterior(
     )
 
 
-def numerical_hessian(grad: Callable[[np.ndarray], np.ndarray], x: np.ndarray, rel_step: float = 1e-4) -> np.ndarray:
-    """Symmetrized central-difference Hessian from an analytic gradient."""
+def numerical_hessian(
+    grad: Callable[[np.ndarray], np.ndarray],
+    x: np.ndarray,
+    rel_step: float = 1e-4,
+    steps: np.ndarray | None = None,
+) -> np.ndarray:
+    """Symmetrized central-difference Hessian from an analytic gradient.
+
+    `steps` gives absolute steps per coordinate where a relative step would be wrong (a delay of
+    microseconds has a peak picoseconds wide; numerical review, cycle 4).
+    """
     x = np.asarray(x, dtype=float)
     k = x.size
-    h = rel_step * np.maximum(1.0, np.abs(x))
+    h = rel_step * np.maximum(1.0, np.abs(x)) if steps is None else np.asarray(steps, dtype=float)
     hess = np.empty((k, k))
     for i in range(k):
         e = np.zeros(k)

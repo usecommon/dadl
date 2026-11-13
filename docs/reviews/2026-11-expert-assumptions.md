@@ -57,7 +57,7 @@ list of fixes, with the limits stated publicly.
 | Q2 | Hard-edge non-paralyzable dead time for SNSPDs and passive-quench SPADs | Physicist | Soft recovery: estimate is neither onset nor effective dead time, narrow interval; rate corrections −1.4% to −4.1% at Mcps | Restrict to actively quenched modules or fit recovery |
 | Q3 | Multi-pair emission and pulsed sources | Quantum optics, metrologist | η 0.470 at μ = 0.1, 0.414 at μ = 0.3 (true 0.5), tight intervals; grid not locked to the laser: η 0.25 with pulses on slot edges | Pulsed source simulator, sync-locked slots, pump-power extrapolation |
 | Q4 | Fixed-grid Bell analysis closes the coincidence-time loophole | Quantum optics | A local model with every photon recorded reaches S = 2.825 under the default policy, labelled only "fair sampling assumed"; delays can be fitted from the analysed data | Report singles and C/singles with S; "fair coincidence assumed"; refuse delays calibrated on the analysed tags; state static settings and open locality loopholes |
-| Q5 | Two-point HOM visibility at the declared delay | Quantum optics | Dip off by 0.3 ps: V 0.882 against 0.919; ±5% pump drift: ±3σ | Scan fit, or label as visibility at the declared delay; normalise by singles |
+| Q5 | Two-point HOM visibility at the declared delay | Quantum optics | Dip off by 0.3 ps: V 0.882 against 0.919; ±5% pump drift: ±3σ | Scan fit, or label as visibility at the declared delay; normalise for drift (not by the two detectors' singles, which fall at the dip by design: review cycle 3) |
 | Q6 | Tick from the GCD of tags | Time-tagging engineer | A non-tick offset collapses it (−5 ps delay bias); 80 ps ticks fail the delay fit's own check | Take the tick from the adapter; GCD as cross-check only |
 | Q7 | τa interval and detection switch | Statistician | τa covers 84–92% conditional on detection near the threshold, even at 20,000 gaps | Key the profile switch on afterpulse count; unified interval or stated conditional coverage |
 | Q8 | DCR(T): exact temperatures, constant bias, Arrhenius only, any detector family | Physicist, metrologist, statistician | Narrow scans extrapolate about 3x low at 243 K; 0.5 K sensor offset ≈ 5%; inputs near the 20-gap minimum cover only 70–73% | Record T range, bias and sensor; refuse extrapolation and SNSPDs; warn near the minimum |
@@ -115,7 +115,7 @@ Accepted on condition the limit is stated publicly (several are not yet):
 | Q2 | Stated limit | README; design.md says the series model is phase 3 |
 | Q3 | Partly fixed | CW only enforced; pulsed sources and multi-pair stated as limits |
 | Q4 | Partly fixed | Fair-coincidence, static-settings and loophole labels; coincidences per singles printed. Refusing delays calibrated on the analysed tags is open |
-| Q5 | Labelled | Two-point label; singles recorded with the counts. Scan fit open |
+| Q5 | Labelled | Two-point label; singles recorded (not usable for drift normalisation, review cycle 3); exposure normalised by acquisition span. Scan fit open |
 | Q6 | Fixed | Tick from the adapter; GCD as cross-check |
 | Q7 | Partly fixed | Profile switch keyed on afterpulse count; conditional coverage stated |
 | Q8 | Partly fixed | Bias mismatch refused; temperature range recorded; SPAD-only and few-gap notes. Extrapolation is not refused |

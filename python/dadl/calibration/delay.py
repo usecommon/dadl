@@ -60,7 +60,7 @@ from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check,
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.histogram import cross_correlation
-from dadl.stats import Laplace, numerical_hessian
+from dadl.stats import Interval, Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
@@ -72,6 +72,10 @@ WINDOW_SIGMAS = 25
 MIN_EXPECTED = 5.0
 
 UNITS = {"delay_ps": "ps", "jitter_sigma_ps": "ps"}
+DEFINITIONS = {
+    "delay_ps": "relative delay of channel b after channel a, in the tagger's frame",
+    "jitter_sigma_ps": "combined Gaussian timing jitter of both channels (sigma), without the tick's quantization",
+}
 
 _SQRT2PI = math.sqrt(2 * math.pi)
 
@@ -271,26 +275,54 @@ def calibrate_delay(
         (math.log(1e-6 / float(widths.sum())), math.log(10 * total / bin_width_ps)),  # background per ps
         (0.0, math.log(10 * total)),  # peak area
         (lo_e, hi_e),  # delay
-        (math.log(max(tick / 4, 0.1)), math.log(hi_e - lo_e)),  # sigma
+        (math.log(max(tick / 100, 0.01)), math.log(hi_e - lo_e)),  # sigma (Bayesian review, cycle 3: tick/4 pinned it)
         (math.log(1e-6 / float(widths.sum())), math.log(10 * total / bin_width_ps)),  # background right
     ]
     x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        res = optimize.minimize(model.nll, x0, jac=model.grad, method="L-BFGS-B", bounds=bounds,
-                                options={"ftol": 1e-15, "gtol": 1e-8, "maxiter": 5000})
+    # Several starting jitters: against a coarse tick the likelihood has a second optimum at
+    # sigma -> 0 (the bare tick triangle), which a single start can fall into.
+    res = None
+    for log_s in sorted({float(x0[3]), math.log(max(tick / 2, 1.0)), math.log(max(tick / 8, 0.5))}):
+        start = x0.copy()
+        start[3] = min(max(log_s, bounds[3][0]), bounds[3][1])
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            r = optimize.minimize(model.nll, start, jac=model.grad, method="L-BFGS-B", bounds=bounds,
+                                  options={"ftol": 1e-15, "gtol": 1e-8, "maxiter": 5000})
+        if res is None or (np.isfinite(r.fun) and r.fun < res.fun - 1e-9):
+            res = r
     theta = res.x
-    hess = numerical_hessian(model.grad, theta)
+    # Absolute steps: the delay's in ps scaled to the jitter, not to |d| (a 1e-4 relative step was
+    # 100 ps at a 1 us delay, wider than the peak).
+    steps = np.full(5, 1e-4)
+    steps[2] = 1e-3 * max(math.exp(theta[3]), 0.01)
+    hess = numerical_hessian(model.grad, theta, steps=steps)
+    sigma_held = False
     try:
         laplace = Laplace.from_hessian(theta, hess)
     except ValueError:
-        # No background to speak of: its rate runs to the lower bound and is not identified.
-        # Condition on it (it barely affects the peak) and keep the peak parameters' posterior.
-        keep = [1, 2, 3]
-        inner = Laplace.from_hessian(theta[keep], hess[np.ix_(keep, keep)])
-        cov = np.zeros((5, 5))
-        cov[np.ix_(keep, keep)] = inner.cov
-        laplace = Laplace(theta, cov)
-        notes.append("the background is not identified (it fits to zero); the delay and jitter are conditional on it")
+        # Condition on what the data do not identify, in turn: the background (no background to
+        # speak of; it barely affects the peak), then the jitter (far below the tick, the peak is
+        # the tick's triangle and sigma has no curvature; Bayesian review, cycle 3).
+        laplace = None
+        for keep, held in (([1, 2, 3], "background"), ([0, 1, 2, 4], "jitter"), ([1, 2], "both")):
+            try:
+                inner = Laplace.from_hessian(theta[keep], hess[np.ix_(keep, keep)])
+            except ValueError:
+                continue
+            cov = np.zeros((5, 5))
+            cov[np.ix_(keep, keep)] = inner.cov
+            laplace = Laplace(theta, cov)
+            sigma_held = held in ("jitter", "both")
+            if held in ("background", "both"):
+                notes.append(
+                    "the background is not identified (it fits to zero); the delay and jitter are conditional on it"
+                )
+            break
+        if laplace is None:
+            raise InsufficientCounts("the delay fit is not identified by these data (no curvature in the delay)")
+    at_floor = theta[3] - bounds[3][0] < 1e-3
+    # A log-jitter spread above 1 (a factor e) is a flat direction, not a measurement.
+    sigma_held = sigma_held or at_floor or float(laplace.cov[3, 3]) > 1.0
     n_peak = math.exp(theta[1])
     converged = bool(res.success) or float(np.max(np.abs(model.grad(theta)))) < 1e-3 * math.sqrt(n_peak)
     sigma = math.exp(theta[3])
@@ -314,11 +346,32 @@ def calibrate_delay(
         )
 
     rng = draws_rng(seed, a, b)
-    draws = laplace.draws(rng, n_draws)
-    estimates = {
-        "delay_ps": laplace.interval(2, lambda x: x),
-        "jitter_sigma_ps": laplace.interval(3, math.exp),
-    }
+    unidentified: tuple[str, ...] = ()
+    if sigma_held:
+        # The jitter is far below the tick: report a profile-likelihood upper limit, condition the
+        # delay on the fitted jitter, and draw the jitter uniformly below the limit.
+        if not at_floor:
+            cov = laplace.cov.copy()
+            cov[3, :] = cov[:, 3] = 0.0
+            laplace = Laplace(theta, cov)
+        upper = _sigma_upper_limit(model, theta, bounds)
+        draws = laplace.draws(rng, n_draws)
+        draws[:, 3] = np.log(rng.uniform(math.exp(bounds[3][0]), upper, n_draws))
+        estimates = {
+            "delay_ps": laplace.interval(2, lambda x: x),
+            "jitter_sigma_ps": Interval(upper, 0.0, upper),
+        }
+        unidentified = ("jitter_sigma_ps",)
+        notes.append(
+            f"the jitter is not resolved against the {tick} ps tick: 95% upper limit {upper:.3g} ps (profile "
+            "likelihood); the delay is conditional on the fitted jitter, and jitter draws are uniform below the limit"
+        )
+    else:
+        draws = laplace.draws(rng, n_draws)
+        estimates = {
+            "delay_ps": laplace.interval(2, lambda x: x),
+            "jitter_sigma_ps": laplace.interval(3, math.exp),
+        }
     notes.append(
         f"peak {n_peak:.4g} coincidences on a background of {math.exp(theta[0]) * bin_width_ps:.3g} (left) and "
         f"{math.exp(theta[4]) * bin_width_ps:.3g} (right) per "
@@ -331,6 +384,7 @@ def calibrate_delay(
         channels=tuple(channels),
         estimates=estimates,
         units=dict(UNITS),
+        definitions=dict(DEFINITIONS),
         samples=np.column_stack([draws[:, 2], np.exp(draws[:, 3])]),
         sample_params=("delay_ps", "jitter_sigma_ps"),
         converged=converged,
@@ -338,8 +392,51 @@ def calibrate_delay(
         inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
         backend=backend,
         conditions={"tick_ps": float(tick), **(conditions or {})},
+        unidentified=unidentified,
+        stand_in=unidentified,
         notes=tuple(notes),
     )
+
+
+def _sigma_upper_limit(model: _PeakModel, theta: np.ndarray, bounds: list) -> float:
+    """One-sided 95% upper limit on sigma (ps): where the profile negative log-likelihood rises by
+    1.35 (chi-square(1) at 90%, halved); 1.92 would be a 97.5% limit."""
+    best = model.nll(theta)
+    free = [0, 1, 2, 4]
+    x = theta[free].copy()
+
+    def profile(log_s: float) -> float:
+        nonlocal x
+
+        def f(y: np.ndarray) -> float:
+            t = theta.copy()
+            t[free] = y
+            t[3] = log_s
+            return model.nll(t)
+
+        def g(y: np.ndarray) -> np.ndarray:
+            t = theta.copy()
+            t[free] = y
+            t[3] = log_s
+            return model.grad(t)[free]
+
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            r = optimize.minimize(f, x, jac=g, method="L-BFGS-B", bounds=[bounds[i] for i in free])
+        x = r.x
+        return float(r.fun) - best
+
+    lo = float(theta[3])
+    hi = lo
+    step = math.log(1.5)
+    while profile(hi) < 1.35 and hi < bounds[3][1]:
+        lo, hi = hi, hi + step
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        if profile(mid) < 1.35:
+            lo = mid
+        else:
+            hi = mid
+    return math.exp(hi)
 
 
 __all__ = ["KIND", "calibrate_delay"]

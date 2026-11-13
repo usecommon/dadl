@@ -12,6 +12,7 @@ __version__ = "0.0.3"
 
 from dadl._backend import name as backend  # noqa: E402
 from dadl.analysis.chsh import Window, chsh  # noqa: E402
+from dadl.analysis.hom import hom_from_tags  # noqa: E402
 from dadl.analysis.visibility import bell_visibility, hom_visibility  # noqa: E402
 from dadl.config import Setup, load_setup  # noqa: E402
 from dadl.data import ChannelId, Dataset, TagSet  # noqa: E402
@@ -37,6 +38,7 @@ __all__ = [
     "backend",
     "bell_visibility",
     "chsh",
+    "hom_from_tags",
     "hom_visibility",
     "load_setup",
     "read_tags",

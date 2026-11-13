@@ -20,21 +20,23 @@ MISFIT_ALPHA = 0.001
 
 
 def draws_rng(seed: int | None, *inputs: object) -> np.random.Generator:
-    """The generator for posterior draws: `seed`, or one derived from the inputs when it is None.
+    """The generator for posterior draws: `seed` mixed with a hash of the inputs.
 
-    Software review, cycle 2: with seed=None the same data gave a different artifact ID on every
-    run. Deriving the seed from the input hashes makes a calibration a function of its data.
+    Software review (cycle 2): with seed=None the same data gave a different artifact ID on every
+    run, so the inputs always enter. Bayesian review (cycle 3): with only the shared setup seed,
+    two channels' artifacts had draws correlated at 0.93-1.00 (the spread of a difference 180x too
+    small), so the inputs enter even when a seed is given.
     """
-    if seed is None:
-        import hashlib
+    import hashlib
 
-        from dadl.data import tags_sha256
+    from dadl.data import tags_sha256
 
-        h = hashlib.sha256()
-        for x in inputs:
-            h.update((tags_sha256(x) if isinstance(x, np.ndarray) else repr(x)).encode())
-        seed = int.from_bytes(h.digest()[:8], "little")
-    return np.random.default_rng(seed)
+    h = hashlib.sha256()
+    for x in inputs:
+        h.update((tags_sha256(x) if isinstance(x, np.ndarray) else repr(x)).encode())
+    words = [int.from_bytes(h.digest()[i : i + 4], "little") for i in range(0, 16, 4)]
+    entropy = words if seed is None else [int(seed) & 0xFFFFFFFF, int(seed) >> 32 & 0xFFFFFFFF, *words]
+    return np.random.default_rng(np.random.SeedSequence(entropy))
 
 
 def with_interruption_check(ppc: float, notes: list[str], *streams: np.ndarray) -> float:
@@ -76,6 +78,11 @@ class Calibration:
     conditions: Mapping[str, float] = field(default_factory=dict)
     #: Parameters the data could not identify (reported as limits or not at all).
     unidentified: tuple[str, ...] = ()
+    #: Draw columns that are conservative stand-ins (e.g. uniform below an upper limit), not a
+    #: posterior: phase 3 must not propagate them as one (Bayesian review, cycle 3).
+    stand_in: tuple[str, ...] = ()
+    #: What each parameter is, beside its unit (calibration-lab review, cycle 3: units were prose).
+    definitions: Mapping[str, str] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:

@@ -95,7 +95,15 @@ class Setup:
                 f"{self.name}: calibrations of hardware data need hardware.tagger (the tagger's serial) in "
                 "setup.yaml, so the record identifies the physical device, not just the channel name"
             )
-        return ChannelId(device, number[name], role=name, detector=self.detector_serials.get(name))
+        detector = self.detector_serials.get(name)
+        if self.backend != "sim" and not detector:
+            # Calibration-lab review, cycle 3: the tagger port was identified but not the detector
+            # being calibrated.
+            raise ConfigError(
+                f"{self.name}: calibrations of hardware data need the detector's serial for channel {name!r} "
+                f"under hardware.detectors in setup.yaml, so the record identifies the calibrated item"
+            )
+        return ChannelId(device, number[name], role=name, detector=detector)
 
     @property
     def channel_names(self) -> tuple[str, ...]:

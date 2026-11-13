@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from dadl import _checks
 from dadl.stats import clopper_pearson
 from dadl.guardrails import (
+    ACCIDENTALS_SUBTRACTED,
     CORRECTION_NOT_COMPUTED,
     LOW_COUNTS,
     SINGLE_BASIS,
@@ -81,16 +82,20 @@ def fringe_visibility_corrected(m: float, n: float, a: float, var_a: float) -> E
     return Estimate(v, math.sqrt(var))
 
 
-def hom_visibility_corrected(c_max: float, c_min: float, a: float, var_a: float) -> Estimate:
+def hom_visibility_corrected(
+    c_max: float, c_min: float, a: float, var_a: float, var_c_min: float | None = None
+) -> Estimate:
     """(C_max - C_min) / (C_max - A) with first-order error.
 
     dV/dC_max = (C_min - A)/(C_max - A)^2, dV/dC_min = -1/(C_max - A), dV/dA = (C_max - C_min)/(C_max - A)^2.
+    `var_c_min` defaults to C_min (Poisson); it differs when C_min was rescaled to the reference exposure.
     """
     d = c_max - a
     if d <= 0:
         raise ValueError("accidentals leave no signal")
     v = (c_max - c_min) / d
-    var = ((c_min - a) / d**2) ** 2 * c_max + (1.0 / d) ** 2 * c_min + ((c_max - c_min) / d**2) ** 2 * var_a
+    var_m = c_min if var_c_min is None else var_c_min
+    var = ((c_min - a) / d**2) ** 2 * c_max + (1.0 / d) ** 2 * var_m + ((c_max - c_min) / d**2) ** 2 * var_a
     return Estimate(v, math.sqrt(var))
 
 
@@ -106,17 +111,17 @@ def _exact_bell(n_max: float, n_min: float) -> tuple[float, float]:
     return 1.0 - 2.0 * ci.high, 1.0 - 2.0 * ci.low
 
 
-def _exact_hom(c_max: float, c_min: float) -> tuple[float, float]:
-    """Exact 95% interval for V = 1 - rho, rho = mu_min / mu_max: given m + M, m is binomial in rho / (1 + rho).
+def _exact_hom(c_max: float, c_min: float, exposure_ratio: float = 1.0) -> tuple[float, float]:
+    """Exact 95% interval for V = 1 - rho, rho = rate_min / rate_max.
 
-    Assumes C_max and C_min are integer counts over equal exposure (rounded otherwise); a C_max
-    averaged over several reference bins or acquired for longer needs rescaling first.
+    With exposures T_dip = r T_ref, given m + M the dip count m is binomial in r rho / (1 + r rho).
+    C_max and C_min are integer counts.
     """
     n, m = int(round(c_max + c_min)), int(round(c_min))
     ci = clopper_pearson(m, n)
 
     def rho(p: float) -> float:
-        return math.inf if p >= 1.0 else p / (1.0 - p)
+        return math.inf if p >= 1.0 else p / ((1.0 - p) * exposure_ratio)
 
     return 1.0 - rho(ci.high), 1.0 - rho(ci.low)
 
@@ -134,6 +139,9 @@ def _finish(
         labels += (LOW_COUNTS,)
     if not_computed:
         labels += (CORRECTION_NOT_COMPUTED,)
+    if corrected is not None:
+        # Teaching-lab review, cycle 4: the record said nothing about what the corrected value was.
+        labels += (ACCIDENTALS_SUBTRACTED,)
     return LabelledValue(analysis=analysis, raw=raw, corrected=corrected, labels=labels, **policy.provenance())
 
 
@@ -195,15 +203,25 @@ def hom_visibility(
     accidentals: float | None = None,
     accidentals_stderr: float | None = None,
     policy: Policy | None = None,
+    exposure_ratio: float = 1.0,
 ) -> LabelledValue:
-    """HOM dip visibility V = (C_max - C_min) / C_max, optionally with accidentals subtracted."""
+    """HOM dip visibility V = 1 - (C_min / T_dip) / (C_max / T_ref), optionally with accidentals subtracted.
+
+    `exposure_ratio` is T_dip / T_ref (1 for equal acquisitions). The HOM review (cycle 3) found a
+    dip run half as long as the reference read V = 0.960 for a true 0.92 (50 sigma) with no label.
+    `accidentals` are counted in the dip acquisition.
+    """
     policy = policy or Policy.default()
     c_max, c_min = _counts(c_max, c_min)
     if c_max <= 0:
         raise ValueError("c_max must be positive")
-    # V = 1 - m/M: var = (m/M^2)^2 M + (1/M)^2 m
-    low, high = _exact_hom(c_max, c_min)
-    raw = Estimate((c_max - c_min) / c_max, math.sqrt(c_min**2 / c_max**3 + c_min / c_max**2), low, high)
+    r = _checks.finite(exposure_ratio, "exposure_ratio")
+    if not r > 0:
+        raise ValueError("exposure_ratio must be positive")
+    # In reference-exposure units: m' = m / r, var(m') = m / r^2. V = 1 - m'/M.
+    m_ref = c_min / r
+    low, high = _exact_hom(c_max, c_min, r)
+    raw = Estimate(1.0 - m_ref / c_max, math.sqrt(m_ref**2 / c_max**3 + c_min / (r * r * c_max**2)), low, high)
     corrected = None
     not_computed = False
     min_count = c_min
@@ -213,9 +231,9 @@ def hom_visibility(
         # Statistician review (cycle 1): refusing when A > the minimum count dropped 26-35% of
         # true high-visibility datasets, the best ones. The raw value (exact interval) is kept and
         # the corrected value is left out, labelled; the low-count label keys on the signal.
-        if a > c_min or a >= c_max:
+        if a > c_min or a / r >= c_max:
             not_computed = True
         else:
-            corrected = hom_visibility_corrected(c_max, c_min, a, var_a)
+            corrected = hom_visibility_corrected(c_max, m_ref, a / r, var_a / (r * r), var_c_min=c_min / (r * r))
         min_count = c_min - a
     return _finish("hom_visibility", raw, corrected, policy, min_count, not_computed)

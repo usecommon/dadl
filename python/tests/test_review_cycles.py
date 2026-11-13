@@ -285,3 +285,187 @@ def test_conditional_laplace_draws_do_not_need_a_definite_covariance():
     cov[1:, 1:] = [[1.0, 0.2], [0.2, 2.0]]
     d = Laplace(np.zeros(3), cov).draws(np.random.default_rng(0), 500)
     assert d.shape == (500, 3) and np.all(d[:, 0] == 0)
+
+
+# --- Cycle 3 -----------------------------------------------------------------------------------
+
+
+def test_artifacts_from_different_data_under_one_seed_have_independent_draws():
+    from dadl.calibration import calibrate_dark
+    from dadl.sim import simulate_dark
+
+    det = DetectorParams(dark_rate_cps=2000.0, dead_time_ps=22_000)
+    a = calibrate_dark(simulate_dark(det, 5.0, np.random.default_rng(1)), CHS[0], seed=2026)
+    b = calibrate_dark(simulate_dark(det, 5.0, np.random.default_rng(2)), CHS[1], seed=2026)
+    r = np.corrcoef(a.samples[:, 0], b.samples[:, 0])[0, 1]
+    assert abs(r) < 0.1
+
+
+def test_jitter_far_below_the_tick_is_an_upper_limit_and_the_delay_still_covers():
+    from dadl.calibration import calibrate_delay
+
+    rng = np.random.default_rng(11)
+    covered = 0
+    for _ in range(15):
+        t = np.sort(rng.uniform(0, 1e12, 20_000))
+        off = int(rng.integers(0, 80))
+        a = (np.floor((t + off + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64)
+        b = (np.floor((t + off + 1013 + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64)
+        cal = calibrate_delay(np.sort(a), np.sort(b), CHS, bin_width_ps=80, tick_ps=80, n_draws=50)
+        assert "jitter_sigma_ps" in cal.unidentified and cal.estimates["jitter_sigma_ps"].low == 0
+        assert "jitter_sigma_ps" in cal.stand_in
+        covered += cal.estimates["delay_ps"].contains(1013.0)
+    assert covered >= 12
+
+
+def test_hom_compares_rates_when_the_acquisitions_differ_in_length():
+    from dadl.analysis.chsh import Window
+    from dadl.analysis.hom import hom_from_tags
+    from dadl.sim import PairSource, simulate_hom
+
+    src = PairSource(pair_rate_per_s=2e5, visibility=0.92, coherence_time_ps=1.5)
+    rng = np.random.default_rng(5)
+    dip = simulate_hom(src, SNSPD_A, SNSPD_A, 0.0, 0.5, rng)
+    ref = simulate_hom(src, SNSPD_A, SNSPD_A, 15.0, 1.0, rng)
+    result, counts = hom_from_tags({"dip": dip, "reference": ref}, Window(width_ps=200, source="plan"))
+    assert abs(counts["duration_dip_s"] / counts["duration_reference_s"] - 0.5) < 0.01
+    assert result.raw.low < 0.925 and result.raw.high > 0.91
+
+
+def test_hom_from_tags_keeps_the_not_computed_label():
+    from dadl.analysis.chsh import Window
+    from dadl.analysis.hom import hom_from_tags
+    from dadl.guardrails import CORRECTION_NOT_COMPUTED
+
+    rng = np.random.default_rng(6)
+    span = 10**12
+    background = lambda n: np.sort(rng.integers(0, span, n)).astype(np.int64)  # noqa: E731
+    runs = {k: {"A": background(400_000), "B": background(400_000)} for k in ("dip", "reference")}
+    result, counts = hom_from_tags(runs, Window(width_ps=2000, source="plan"))
+    assert counts["subtracted"] == 0.0 and CORRECTION_NOT_COMPUTED in result.labels
+
+
+def test_limit_only_parameters_are_null_with_a_bound_in_the_record(tmp_path):
+    import datetime as dt
+
+    from dadl.artifact import build_manifest
+    from dadl.calibration import calibrate_dark
+    from dadl.sim import simulate_dark
+
+    tags = simulate_dark(DetectorParams(dark_rate_cps=500.0, dead_time_ps=22_000), 2.0, np.random.default_rng(3))
+    cal = calibrate_dark(tags, CHS[0])
+    manifest, _ = build_manifest(cal, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
+    p = manifest["summary"]["afterpulse_prob"]
+    assert p["value"] is None and p["bound"] == "upper" and p["unit"] == "1" and "definition" in p
+    assert "afterpulse_prob" in manifest["posterior"]["stand_in"]
+    assert "prior_dominated_params" not in manifest["checks"]
+    assert {"numpy", "scipy", "python"} <= set(manifest["software"])
+
+
+def test_hardware_calibrations_need_the_detector_serial_and_record_the_run(tmp_path, capsys):
+    from dadl.artifact import read_artifact
+
+    tags = tmp_path / "dark.npz"
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(tags)]) == 0
+    from dadl.cli import example_path
+
+    base = example_path("chsh-spad").read_text(encoding="utf-8").replace("backend: sim", "backend: file")
+    if "backend: file" not in base:
+        base = base.replace("seed:", "backend: file\nseed:", 1)
+    hw = tmp_path / "hw.yaml"
+    hw.write_text(base + "hardware:\n  tagger: HydraHarp-1\n", encoding="utf-8")
+    capsys.readouterr()
+    argv = ["calibrate", "dark", str(hw), "--tags", str(tags), "--channel", "A+", "--out", str(tmp_path / "a")]
+    assert main(argv) == 1 and "detector's serial" in capsys.readouterr().err
+    hw.write_text(base + "hardware:\n  tagger: HydraHarp-1\n  detectors: {A+: SPCM-7}\n", encoding="utf-8")
+    assert main(argv + ["--condition", "temperature_K=233.5", "--acquired", "2026-11-01T10:00:00Z"]) == 0
+    (path,) = (tmp_path / "a").glob("*[0-9a-f].json")
+    m = read_artifact(path)[0]
+    assert m["conditions"]["temperature_K"] == 233.5 and m["conditions"]["duration_s"] > 1.5
+    assert m["acquired"] == "2026-11-01T10:00:00Z"
+    assert {i["role"] for i in m["inputs"]} == {"raw-tags", "raw-file", "config"}
+    assert main(argv + ["--supersedes", "0" * 64]) == 1
+
+
+# --- Cycle 4 -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("start", [0.0, 0.7])
+def test_a_latch_at_the_start_or_end_of_a_run_is_caught(start):
+    # QKD review: a trailing or leading latch left no internal gap and read status ok.
+    from dadl.calibration import calibrate_heralding
+
+    a, b = simulate_pairs(5e4, SNSPD_A, SNSPD_B, 0.5, np.random.default_rng(8))
+    b = latch(b, start, 0.3)
+    her = calibrate_heralding(a, b, CHS, width_ps=200, delay_signal_ps=500, n_draws=10)
+    assert her.status == "misfit"
+
+
+def test_dead_time_selection_is_labelled_and_ns_tags_are_refused(tmp_path, capsys):
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import DEAD_TIME_SELECTION
+    from dadl.sim import PairSource, simulate_chsh
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=0.0, dead_time_ps=1_000_000, jitter_sigma_ps=350.0)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=1e6, visibility=0.7), {k: det for k in ("A+", "A-", "B+", "B-")},
+                         0.05, np.random.default_rng(1))
+    assert DEAD_TIME_SELECTION in chsh(runs, Window(width_ps=2000, source="plan")).labels
+
+    from dadl.tagfile import read_tags, write_tags
+    from dadl.config import load_setup
+    from dadl.cli import example_path
+
+    tags = tmp_path / "t.npz"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    setup = load_setup(example_path("chsh-spad"))
+    ns = {k: {c: v // 1000 for c, v in r.items()} for k, r in read_tags(tags, setup.channels).items()}
+    path = write_tags(tmp_path / "ns.npz", ns, setup.channels, simulated=True)
+    capsys.readouterr()
+    assert main(["analyze", "chsh-spad", "--tags", str(path)]) == 1
+    assert "picoseconds" in capsys.readouterr().err
+
+
+def test_corrected_values_carry_a_label_and_tampered_records_are_refused(tmp_path):
+    import datetime as dt
+    import json
+
+    from dadl.artifact import ArtifactError, artifact_id, canonical_json, read_artifact, write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.guardrails import ACCIDENTALS_SUBTRACTED
+    from dadl.sim import simulate_dark
+
+    assert ACCIDENTALS_SUBTRACTED in hom_visibility_labels()
+    tags = simulate_dark(DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000), 2.0, np.random.default_rng(1))
+    path = write_artifact(calibrate_dark(tags, CHS[0]), tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
+    m = json.loads(path.read_text())
+    m["checks"]["status"] = "misfit"
+    raw = canonical_json(m)
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    new = bad / f"{artifact_id(m)}.json"
+    new.write_bytes(raw)
+    (bad / f"{artifact_id(m)}.posterior.npy").write_bytes(path.with_name(path.stem + ".posterior.npy").read_bytes())
+    with pytest.raises(ArtifactError, match="status"):
+        read_artifact(new)
+
+
+def hom_visibility_labels():
+    from dadl.analysis.visibility import hom_visibility
+
+    return hom_visibility(1000.0, 120.0, accidentals=40.0).labels
+
+
+def test_long_delays_fit_like_short_ones():
+    # Numerical review, cycle 4: a relative Hessian step of 100 ps at a 1 us delay inflated the
+    # interval 2-40x or refused the fit.
+    from dadl.calibration import calibrate_delay
+
+    widths = []
+    for d in (1_000, 2_000_000):
+        A = DetectorParams(efficiency=0.5, dark_rate_cps=200.0, jitter_sigma_ps=3.5, delay_ps=0)
+        B = DetectorParams(efficiency=0.5, dark_rate_cps=200.0, jitter_sigma_ps=3.5, delay_ps=d)
+        a, b = simulate_pairs(2e4, A, B, 0.5, np.random.default_rng(3))
+        e = calibrate_delay(a, b, CHS, range_ps=d + 20_000, n_draws=10).estimates["delay_ps"]
+        assert e.contains(d)
+        widths.append(e.high - e.low)
+    assert widths[1] == pytest.approx(widths[0], rel=0.05)
