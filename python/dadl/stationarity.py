@@ -42,14 +42,15 @@ def interruption_pvalue(
     med = float(np.median(gaps))
     excess = gaps[gaps > med] - med
     longest = float(gaps.max())
-    if excess.size < MIN_GAPS // 2 or float(excess.mean()) <= 0:
+    total = float(excess.sum())
+    if excess.size < MIN_GAPS // 2 or total <= 0:
         return 1.0, longest
-    # Rate from the excesses without the largest one, so a latch does not dilute its own test.
-    rest = np.sort(excess)[:-1]
-    rate = 1.0 / float(rest.mean())
+    # Scale-free statistic with an exact null: for m exponential excesses, x = max / sum has
+    # P(X >= x) <= m (1 - x)^(m - 1) (Fisher). A plug-in rate was anticonservative at low counts
+    # (1.7% false alarms at nominal 0.1% with 21 gaps; point-process review, cycle 5).
     m = int(excess.size)
-    g = longest - med
-    p = float(-np.expm1(m * np.log1p(-math.exp(-rate * g)))) if g > 0 else 1.0
+    x = float(excess.max()) / total
+    p = float(m * math.exp((m - 1) * math.log1p(-x))) if x < 1 else 0.0
     return min(1.0, max(p, 0.0)), longest
 
 

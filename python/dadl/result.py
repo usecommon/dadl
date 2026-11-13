@@ -58,6 +58,8 @@ class LabelledValue:
     #: The counts behind the value (e.g. singles, coincidences and their ratio per setting), so a
     #: reader can judge what post-selection kept.
     counts: dict[str, object] | None = None
+    #: SHA-256 of the inputs (setup file, tag files), so a result can be tied to what it read.
+    inputs: dict[str, str] | None = None
 
     def __float__(self) -> float:
         raise TypeError(
@@ -91,4 +93,5 @@ class LabelledValue:
             "window_delays_ps": window.get("delays_ps"),
             "window_source": window.get("source"),
             "counts": None if self.counts is None else str(self.counts),
+            "inputs": None if self.inputs is None else str(self.inputs),
         }

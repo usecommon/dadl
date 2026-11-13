@@ -47,10 +47,14 @@ def with_interruption_check(ppc: float, notes: list[str], *streams: np.ndarray) 
     from dadl.stationarity import channels_pvalue
 
     p_int, longest = channels_pvalue(*streams)
-    if p_int < MISFIT_ALPHA:
+    if 2.0 * p_int < MISFIT_ALPHA:
+        # Same threshold as the status below (point-process review, cycle 5: the note fired at
+        # p < 0.001 while the status needed p < 0.0005). A strongly modulated source (+-50%) can
+        # also trip this test.
         notes.append(
             f"a channel has a {longest / 1e12:.3g} s gap, far longer than its count rate allows (p = {p_int:.2g}): "
-            "a latch, overload shutdown or lost data; the rates and ratios below include the dead stretch"
+            "the rate was not stationary or the acquisition was interrupted (latch, overload shutdown, lost "
+            "data); the rates and ratios include the dead stretch"
         )
     return min(1.0, 2.0 * min(ppc, p_int))
 

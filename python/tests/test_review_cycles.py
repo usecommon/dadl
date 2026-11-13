@@ -115,7 +115,7 @@ def test_sim_backend_with_unmarked_tags_is_refused(tmp_path, capsys):
     sim = tmp_path / "dark.npz"
     assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(sim)]) == 0
     setup = load_setup(example_path("chsh-spad"))
-    plain = write_tags(tmp_path / "recorded.npz", read_tags(sim, setup.channels, setup.setting_keys), setup.channels)
+    plain = write_tags(tmp_path / "recorded.npz", read_tags(sim, setup.channels, setup.setting_keys), setup.channels, simulated=False)
     capsys.readouterr()
     assert main(["calibrate", "dark", "chsh-spad", "--tags", str(plain), "--channel", "A+", "--out", str(tmp_path / "a")]) == 1
     assert "backend: file" in capsys.readouterr().err
@@ -469,3 +469,82 @@ def test_long_delays_fit_like_short_ones():
         assert e.contains(d)
         widths.append(e.high - e.low)
     assert widths[1] == pytest.approx(widths[0], rel=0.05)
+
+
+# --- Cycle 5 -----------------------------------------------------------------------------------
+
+
+def test_duplicate_tags_are_refused_and_do_not_hide_dead_time_selection(tmp_path, capsys):
+    from dadl.analysis.chsh import dead_time_selection
+
+    runs = {("a", "b"): {ch: np.arange(0, 10**10, 10**6, dtype=np.int64) for ch in ("A+", "A-", "B+", "B-")}}
+    with_dup = {k: {c: np.sort(np.append(v, v[0])) for c, v in r.items()} for k, r in runs.items()}
+    counts = {("a", "b"): 1_000_000}
+    assert dead_time_selection(with_dup, counts) == pytest.approx(dead_time_selection(runs, counts))
+    tags = tmp_path / "t.csv"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    lines = tags.read_text().splitlines()
+    tags.write_text("\n".join(lines + [lines[2]]) + "\n")
+    capsys.readouterr()
+    assert main(["analyze", "chsh-spad", "--tags", str(tags)]) == 1
+    assert "duplicate" in capsys.readouterr().err
+
+
+def test_simulated_csv_stays_marked_and_analyze_labels_it(tmp_path, capsys):
+    from dadl.guardrails import SIMULATED_INPUT
+    from dadl.tagfile import tags_are_simulated
+
+    tags = tmp_path / "t.csv"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    assert tags_are_simulated(tags)
+    capsys.readouterr()
+    assert main(["analyze", "chsh-spad", "--tags", str(tags)]) == 0
+    out = capsys.readouterr().out
+    assert SIMULATED_INPUT in out and "Inputs:" in out
+
+
+def test_policy_rule_subclasses_are_refused():
+    from dadl.guardrails import DEFAULT_RULES, AnalysisRule, Policy
+
+    class Lax(AnalysisRule):
+        def is_at_least_as_strict_as(self, other):
+            return True
+
+    rules = dict(DEFAULT_RULES)
+    rules["bell_visibility"] = Lax(frozenset({"accidental_subtraction"}), frozenset({"plan"}))
+    with pytest.raises(TypeError):
+        Policy(rules=rules)
+
+
+def test_mismatched_dead_times_still_get_the_selection_label():
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import DEAD_TIME_SELECTION
+    from dadl.sim import PairSource, simulate_chsh
+
+    slow = DetectorParams(efficiency=0.5, dark_rate_cps=0.0, dead_time_ps=1_000_000, jitter_sigma_ps=350.0)
+    fast = DetectorParams(efficiency=0.5, dark_rate_cps=0.0, dead_time_ps=20_000, jitter_sigma_ps=350.0)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=1e6, visibility=0.7),
+                         {"A+": slow, "A-": fast, "B+": slow, "B-": fast}, 0.05, np.random.default_rng(2))
+    assert DEAD_TIME_SELECTION in chsh(runs, Window(width_ps=2000, source="plan")).labels
+
+
+def test_interruption_test_holds_its_level_at_low_counts():
+    from dadl.stationarity import interruption_pvalue
+
+    rng = np.random.default_rng(0)
+    ps = np.array([interruption_pvalue(np.cumsum(rng.exponential(1e6, 22)).astype(np.int64))[0] for _ in range(5000)])
+    assert np.mean(ps < 0.01) < 0.02
+
+
+def test_percent_level_dark_drift_is_tolerated_and_recorded():
+    from dadl.calibration.dark import _stationarity
+
+    rng = np.random.default_rng(1)
+    t = np.sort(rng.uniform(0, 1e12, 1_000_000))
+    keep = rng.random(t.size) < 1.0 - 0.01 * (t / 1e12)  # 1% drift end to end
+    tags = t[keep].astype(np.int64)
+    st = _stationarity(tags, tags.size / 1e12, tags.size - 1, float(np.diff(tags).max()))
+    assert st["p_drift"] > 0.01 and 0.98 < st["drift_ratio"] < 1.0
+    keep = rng.random(t.size) < 1.0 - 0.2 * (t / 1e12)  # 20% drift
+    tags = t[keep].astype(np.int64)
+    assert _stationarity(tags, tags.size / 1e12, tags.size - 1, float(np.diff(tags).max()))["p_drift"] < 1e-6

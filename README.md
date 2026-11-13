@@ -108,7 +108,9 @@ limits, stated plainly:
   identify an SNSPD's dead time (reported as an upper limit, marked
   unidentified); DCR(T) refuses current-biased detectors. A latch or other
   interruption in any acquisition is detected (longest gap against the count
-  rate) and marks calibrations `misfit` and analyses "interrupted".
+  rate) and marks calibrations `misfit` and analyses "interrupted"; a source
+  modulated by ±50% or more can trip the same test. Dark-rate drift within
+  ±2% between the halves of a run is tolerated and recorded.
 - **Heralding efficiency is grid-specific.** It counts pairs in the same fixed
   slot, so it includes the window capture (about 1 − E|Δt|/W) and the signal
   arm's live fraction given a recorded herald. `calibrate pairs` prints the

@@ -135,7 +135,7 @@ def test_tag_file_round_trip_and_channel_map(tmp_path):
     runs = {k: {ch: np.array([1, 5, 9], dtype=np.int64) * (i + 1) for i, ch in enumerate(("A+", "A-", "B+", "B-"))}
             for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
     cmap = {7: "A+", 3: "A-", 1: "B+", 0: "B-"}
-    path = write_tags(tmp_path / "t.csv", runs, cmap)
+    path = write_tags(tmp_path / "t.csv", runs, cmap, simulated=False)
     back = read_tags(path, cmap)
     for k in runs:
         for ch in runs[k]:

@@ -70,8 +70,9 @@ class Window:
 
 
 def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
-    """Largest coincidence rate x dead time over the settings, the dead time read as each run's
-    shortest gap on any channel (an upper bound on the effective dead time).
+    """Largest coincidence rate x dead time over the settings, the dead time read per channel as a
+    low gap quantile and the longest taken (the bare minimum let one duplicated tag remove the
+    label: red-team review, cycle 5; the minimum over channels missed mismatched dead times).
 
     Teaching-lab review, cycle 4: with a 1 us dead time at 3e6 pairs/s a V = 0.7 source (S = 1.98)
     read S = 2.14 +- 0.004; the shift grows with eta^2 R tau (about 0.1 eta^2 R tau in |E|).
@@ -81,7 +82,10 @@ def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
         arrays = [np.asarray(tags[ch]) for ch in CHANNELS if np.asarray(tags[ch]).size > 1]
         if not arrays:
             continue
-        tau = min(float(np.min(np.diff(a))) for a in arrays)
+        # Each channel's dead time as a low gap quantile (robust to a few duplicates or double
+        # triggers), and the longest of them: the bias comes from the slow channel, and a mismatch
+        # between channels hid it when the minimum was used (point-process review, cycle 5).
+        tau = max(float(np.quantile(np.diff(a), 0.001 if a.size > 5000 else 0.01)) for a in arrays)
         span = max(float(a[-1]) for a in arrays) - min(float(a[0]) for a in arrays)
         if span <= 0:
             continue

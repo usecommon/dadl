@@ -6,6 +6,7 @@
 [package]
 name = "dadl-core-python"
 version = "0.0.3"
+description = "Python bindings to the DADL core (dadl-quantum-core)"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.74"

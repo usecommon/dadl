@@ -58,12 +58,16 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
         elif path.suffix == ".csv":
             # utf-8-sig: Excel's "CSV UTF-8" starts with a byte-order mark.
             with path.open(encoding="utf-8-sig") as fh:
-                header = [h.strip() for h in fh.readline().split(",")]
+                first = fh.readline()
+                skip = 1
+                if first.strip() == SIMULATED_CSV_MARK:
+                    first, skip = fh.readline(), 2
+                header = [h.strip() for h in first.split(",")]
             if header != list(COLUMNS):
                 raise ConfigError(f"{path}: header must be {','.join(COLUMNS)}, got {','.join(header)}")
             # Read as text and check every cell is an integer: some NumPy versions
             # silently truncate "1.5" when asked for int64 directly.
-            text = np.loadtxt(path, delimiter=",", skiprows=1, dtype=str, ndmin=2, encoding="utf-8-sig")
+            text = np.loadtxt(path, delimiter=",", skiprows=skip, dtype=str, ndmin=2, encoding="utf-8-sig")
             if text.size:
                 text = np.char.strip(text)
                 digits = np.char.isdigit(np.char.lstrip(text, "+-"))
@@ -107,15 +111,23 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
     return runs
 
 
+#: First line of a CSV tag file written from a simulation.
+SIMULATED_CSV_MARK = "# dadl-simulated"
+
+
 def write_tags(
     path: str | Path,
     runs: Runs,
     channels: dict[int, str] | None = None,
     settings: Sequence = SETTING_PAIRS,
     *,
-    simulated: bool = False,
+    simulated: bool,
 ) -> Path:
-    """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`)."""
+    """Write `runs` to a .npz or .csv tag file (the inverse of `read_tags`).
+
+    `simulated` is required: a read-trim-write round trip must not drop the marking (red-team
+    review, cycle 5). Simulated CSV files start with the line `# dadl-simulated`.
+    """
     path = Path(path)
     channels = channels or dict(enumerate(CHANNELS))
     number = {name: num for num, name in channels.items()}
@@ -130,7 +142,8 @@ def write_tags(
         extra = {"dadl_simulated": np.array(True)} if simulated else {}
         np.savez_compressed(path, **{c: table[:, i] for i, c in enumerate(COLUMNS)}, **extra)
     elif path.suffix == ".csv":
-        np.savetxt(path, table, fmt="%d", delimiter=",", header=",".join(COLUMNS), comments="")
+        header = (SIMULATED_CSV_MARK + "\n" if simulated else "") + ",".join(COLUMNS)
+        np.savetxt(path, table, fmt="%d", delimiter=",", header=header, comments="")
     else:
         raise ConfigError(f"{path}: tag files must be .npz or .csv")
     return path
@@ -278,6 +291,9 @@ def tags_are_simulated(path: str | Path) -> bool:
     if path.suffix == ".npz" and path.is_file():
         with np.load(path, allow_pickle=False) as npz:
             return "dadl_simulated" in npz.files and bool(npz["dadl_simulated"])
+    if path.suffix == ".csv" and path.is_file():
+        with path.open(encoding="utf-8-sig") as fh:
+            return fh.readline().strip() == SIMULATED_CSV_MARK
     if not path.is_dir():
         return False
     from dadl.adapters.ptu import PtuFile

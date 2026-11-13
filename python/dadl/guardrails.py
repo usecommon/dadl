@@ -47,6 +47,7 @@ DEAD_TIME_SELECTION = (
     "dead-time selection: coincidence rate x shortest gap exceeds 1%; a recorded click makes the partner arm's "
     "dead state depend on the outcome, which can raise |E| and S"
 )
+SIMULATED_INPUT = "simulated data: the input tags were written by DADL's simulator, not recorded"
 CORRECTION_NOT_COMPUTED = (
     "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
     "exact interval"
@@ -129,10 +130,22 @@ class Policy:
     overrides: tuple[Override, ...] = ()
 
     def __post_init__(self) -> None:
-        rules = MappingProxyType(dict(self.rules))
+        # Rules are rebuilt from their raw fields: a subclass overriding to_json or the strictness
+        # test made a loosened policy fingerprint as the default (red-team review, cycle 5).
+        clean: dict[str, AnalysisRule] = {}
+        for name, rule in dict(self.rules).items():
+            if type(rule) is not AnalysisRule:
+                raise TypeError(f"policy rule for {name!r} must be an AnalysisRule, not {type(rule).__name__}")
+            clean[str(name)] = AnalysisRule(
+                frozenset(str(c) for c in rule.allowed_corrections), frozenset(str(w) for w in rule.window_sources)
+            )
+        rules = MappingProxyType(clean)
         for name, rule in rules.items():
             baseline = DEFAULT_RULES.get(name, STRICTEST)
-            if not rule.is_at_least_as_strict_as(baseline):
+            if not (
+                rule.allowed_corrections <= baseline.allowed_corrections
+                and rule.window_sources <= baseline.window_sources
+            ):
                 raise ValueError(
                     f"Policy rules for '{name}' are looser than the default. "
                     "Loosen a rule with Policy.allow(analysis, correction, reason), so the reason is recorded."

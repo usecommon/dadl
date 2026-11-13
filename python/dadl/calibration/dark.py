@@ -54,7 +54,7 @@ from scipy import optimize
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration, draws_rng
+from dadl.calibration.base import MISFIT_ALPHA, N_DRAWS, Calibration, draws_rng
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.models import DarkAfterpulseModel
@@ -128,23 +128,36 @@ def _fit(s: np.ndarray, r0: float) -> optimize.OptimizeResult | None:
     return best
 
 
-def _stationarity_pvalue(tags: np.ndarray, r_per_ps: float, n_gaps: int, longest_gap: float) -> float:
-    """Two checks of one uninterrupted, stationary acquisition, combined (smaller p doubled):
+#: Rate change between the two halves of a dark run below which drift is tolerated: a percent of
+#: drift over a long run is normal and the fitted rate is still useful (point-process review,
+#: cycle 5: an exact test with no tolerance marked 94% of 1e6-count runs with 1% drift misfit).
+DRIFT_TOLERANCE = 0.02
 
-    - drift: the count in the first half of the span against the second (binomial, two-sided);
-    - an interruption: the longest gap against the largest of n exponential gaps at rate r
-      (a latch or overload shutdown leaves one gap far longer than the rest).
 
-    The detector physicist's review found a +-20% drift flagged in 20% of runs and a 6 s latch
-    written as a normal calibration.
+def _stationarity(tags: np.ndarray, r_per_ps: float, n_gaps: int, longest_gap: float) -> dict[str, float]:
+    """Drift and interruption checks of one dark acquisition.
+
+    - drift: the second half's rate over the first's, tested against the band 1 +- DRIFT_TOLERANCE
+      (binomial on the first half's share, at the nearer edge of the band);
+    - an interruption: the longest gap against the largest of n exponential gaps at rate r (a latch
+      or overload shutdown leaves one gap far longer than the rest).
     """
     mid = 0.5 * (float(tags[0]) + float(tags[-1]))
     first = int(np.searchsorted(tags, mid))
     n = int(tags.size)
-    p_drift = float(min(1.0, 2 * min(_st.binom.cdf(first, n, 0.5), _st.binom.sf(first - 1, n, 0.5))))
+    second = n - first
+    ratio = second / first if first else float(second)
+    lo_share, hi_share = 1.0 / (2.0 + DRIFT_TOLERANCE), 1.0 / (2.0 - DRIFT_TOLERANCE)
+    share = first / n
+    if lo_share <= share <= hi_share:
+        p_drift = 1.0
+    elif share < lo_share:
+        p_drift = float(min(1.0, 2 * _st.binom.cdf(first, n, lo_share)))
+    else:
+        p_drift = float(min(1.0, 2 * _st.binom.sf(first - 1, n, hi_share)))
     # P(max of n_gaps exponential gaps >= longest) = 1 - (1 - exp(-r g))^n
     p_gap = float(-np.expm1(n_gaps * np.log1p(-math.exp(-r_per_ps * longest_gap)))) if longest_gap > 0 else 1.0
-    return min(1.0, 2.0 * min(p_drift, p_gap))
+    return {"drift_ratio": ratio, "p_drift": p_drift, "p_gap": p_gap}
 
 
 def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
@@ -378,6 +391,14 @@ def calibrate_dark(
         )
     gaps = np.delete(gaps, order[:dropped])
     m = int(gaps.min())
+    if int(np.sum(gaps < 1.5 * m)) < 3:
+        # Red-team review, cycle 5: at low dark rates one spurious double trigger a few ns under the
+        # dead time sets the estimate (14 ns for 22 ns, interval excluding the truth); from dark
+        # data alone it cannot be told from a shorter dead time.
+        notes.append(
+            f"the dead time rests on few gaps near the shortest ({m} ps): a single spurious double trigger shorter "
+            "than the true dead time would set it; compare with the detector's specified dead time"
+        )
     # The shortest gap defines m; it sits at s = 0 by construction, so it is left
     # out of the shape fit (otherwise it reads as a spurious, very fast afterpulse).
     s = np.delete(gaps, int(np.argmin(gaps))).astype(float) - m
@@ -511,6 +532,18 @@ def calibrate_dark(
     columns.append(tau_draws)
     names.append("dead_time_ps")
 
+    # The three parts of the check are recorded, and a failure is named (point-process review, cycle 5).
+    st = _stationarity(tags, float(np.exp(theta[0])), n, float(s.max()))
+    p_shape = _ppc_pvalue(s, theta)
+    ppc = min(1.0, 3.0 * min(p_shape, st["p_drift"], st["p_gap"]))
+    if ppc < MISFIT_ALPHA:
+        failing = [name for name, p in (("the shape of the gap distribution", p_shape),
+                                        (f"drift (second half / first half = {st['drift_ratio']:.4f})", st["p_drift"]),
+                                        ("an interruption (one gap far longer than the rate allows)", st["p_gap"]))
+                   if 3.0 * p < MISFIT_ALPHA]
+        notes.append("the check fails on " + "; ".join(failing))
+    check_conditions = {"drift_ratio": st["drift_ratio"], "p_shape": p_shape, "p_drift": st["p_drift"],
+                        "p_gap": st["p_gap"]}
     return Calibration(
         kind=KIND,
         method=METHOD,
@@ -523,12 +556,10 @@ def calibrate_dark(
         samples=np.column_stack(columns),
         sample_params=tuple(names),
         converged=converged,
-        ppc_pvalue=min(1.0, 2.0 * min(
-            _ppc_pvalue(s, theta), _stationarity_pvalue(tags, float(np.exp(theta[0])), n, float(s.max()))
-        )),
+        ppc_pvalue=ppc,
         inputs=((tags_sha256(tags), "raw-tags"),),
         backend=backend,
-        conditions={"gaps": float(n), **ess_condition, **(conditions or {})},
+        conditions={"gaps": float(n), **ess_condition, **check_conditions, **(conditions or {})},
         unidentified=unidentified,
         notes=tuple(notes),
     )

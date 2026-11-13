@@ -137,7 +137,7 @@ def test_times_agree_with_ptufile(tmp_path, rtype):
 @pytest.mark.parametrize("code, lost", [(0, False), (1, False), (2, False), (3, True), (-2, True), (-13, True), (-99, True)])
 def test_stop_reason_marks_data_loss(tmp_path, code, lost):
     # Expert review W5: a FIFO overrun or lost clock ended the acquisition early with data lost;
-    # v0.1 pre-release read such files as complete.
+    # before that review, such files were read as complete.
     path = write_ptu(tmp_path / "f.ptu", ptu.HYDRAHARP2_T2, [(10, "tag", 1), (20, "tag", 1)],
                      acquisition_ms=360_000_000.0, extra=[("TTResult_StopReason", "int", code)])
     reader = PtuFile(path)

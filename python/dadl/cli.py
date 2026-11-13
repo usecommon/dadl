@@ -23,7 +23,7 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.guardrails import POLICY_MODIFIED
+from dadl.guardrails import POLICY_MODIFIED, SIMULATED_INPUT
 from dadl.closed_form import chsh_expected_grid, chsh_ideal, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
@@ -62,6 +62,29 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
+
+
+def _warn_angles(setup: Setup) -> None:
+    ideal = chsh_ideal(1.0, setup.settings_deg)
+    if ideal < 2.0:
+        print(
+            f"  warning: with the fixed signs S = E(a,b) - E(a,b') + E(a',b) + E(a',b'), the declared angles give at "
+            f"most S = {ideal:.3f} for a perfect Phi+ state (2.828 is optimal). Relabelling runs after looking at "
+            "the data is a choice outside the plan; set settings_deg to match the sign convention instead."
+        )
+
+
+def _input_hashes(setup_path: Path, tags: str) -> dict[str, str]:
+    import hashlib
+
+    out = {}
+    if setup_path.is_file():
+        out[setup_path.name] = hashlib.sha256(setup_path.read_bytes()).hexdigest()
+    path = Path(tags)
+    for f in sorted(path.glob("setting*.ptu")) if path.is_dir() else [path]:
+        if f.is_file():
+            out[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
 
 
 def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None:
@@ -136,13 +159,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
         f"dead time {det.dead_time_ps / 1000:g} ns, jitter {det.jitter_sigma_ps:.0f} ps, "
         f"afterpulsing {det.afterpulse_prob:.1%}"
     )
-    ideal = chsh_ideal(1.0, setup.settings_deg)
-    if ideal < 2.0:
-        print(
-            f"  warning: with the fixed signs S = E(a,b) - E(a,b') + E(a',b) + E(a',b'), the declared angles give at "
-            f"most S = {ideal:.3f} for a perfect Phi+ state (2.828 is optimal). Relabelling runs after looking at "
-            "the data is a choice outside the plan; set settings_deg to match the sign convention instead."
-        )
+    _warn_angles(setup)
     print()
     _print_result(result)
     if same:
@@ -325,6 +342,12 @@ def _check_time_units(runs: dict, setup) -> None:
         for name, arr in tags.items():
             det = setup.detectors.get(name)
             arr = np.asarray(arr)
+            if arr.size > 1 and np.any(np.diff(arr) == 0):
+                # Red-team review, cycle 5: a duplicated row hid the dead-time-selection label.
+                raise DadlError(
+                    f"{name} in acquisition {key}: duplicate timestamps on one channel (a detector cannot click "
+                    "twice at once); check how the file was spliced or exported"
+                )
             if det is None or det.dead_time_ps <= 0 or arr.size < 100:
                 continue
             short = float(np.mean(np.diff(arr) < det.dead_time_ps / 2))
@@ -391,6 +414,13 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
         cal = dataclasses.replace(cal, inputs=cal.inputs + inputs)
         print()
         print(cal)
+        dead_declared = setup.detectors[name].dead_time_ps if name in setup.detectors else 0
+        dead_high = cal.estimates["dead_time_ps"].high
+        if dead_declared > 0 and dead_high < 0.8 * dead_declared:
+            print(
+                f"  warning: the dead time (at most {dead_high:.0f} ps) is well below the setup's declared "
+                f"{dead_declared} ps. A spurious double trigger or reflection can set it; check the shortest gaps."
+            )
         declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
         fitted = cal.estimates["dark_rate_cps"].low
         if declared > 0 and fitted > 10 * declared:
@@ -523,10 +553,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
     _check_time_units(runs, setup)
     print(f"DADL {__version__} analyze: {setup.name}, tags from {args.tags}")
+    # Red-team review, cycle 5: simulated tags gave an unmarked headline, and nothing tied the result
+    # to the setup and tags it read.
+    extra = {"inputs": _input_hashes(_resolve(args.setup), args.tags)}
+    simulated = tags_are_simulated(args.tags)
     if setup.analysis_type == "hom":
         from dadl.analysis.hom import hom_from_tags
 
         result, counts = hom_from_tags(runs, setup.window)
+        result = dataclasses.replace(
+            result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra
+        )
         print("  The tags are trusted as given.")
         print()
         print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
@@ -534,9 +571,16 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         _print_hom_extras(result, counts, setup)
         return 0
     result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
-    print("  Phase 1 trusts the tags as given and reports raw S only.")
+    result = dataclasses.replace(result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra)
+    _warn_angles(setup)
+    print("  The tags are trusted as given; raw S only.")
     print()
     _print_result(result)
+    print("  Inputs: " + ", ".join(f"{k} {v[:12]}" for k, v in result.inputs.items()))
+    print(
+        "  Choosing the window, delays or run after seeing the data inflates false violations (best of 72 "
+        "window and delay choices: 8% at a true S of 2); declare them before acquisition."
+    )
     return 0
 
 

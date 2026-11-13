@@ -112,3 +112,25 @@ evidence or a stated limit), **minor** (documentation, polish).
 CI: the coverage gate exceeded its 30-minute limit on GitHub runners after cycle 1 added regimes. The
 bright-background regime (45% of the run time) now acquires 0.2 s instead of 0.5 s and the limit is
 50 minutes; all 34 checks pass locally.
+
+## Cycle 5: red-team reviewer, release engineer, point-process statistician
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 5.1 | Wrong | Four duplicated rows removed the dead-time-selection label from S = 2.14 (true 1.98) | Fixed: the proxy uses the 1st-percentile gap; duplicate timestamps on a channel are refused |
+| 5.2 | Wrong | One spurious double trigger 15 ns after a dark count set the dead time to 14 ns (truth 22 ns), status ok | Not separable from a shorter dead time with dark data alone: a note when the estimate rests on few gaps, and a CLI warning when it undercuts the declared dead time; stated |
+| 5.3 | Wrong | Simulated CSV became a "hardware" artifact; `analyze` did not mark simulated input; `write_tags` dropped the marking by default | Fixed: simulated CSV starts with `# dadl-simulated` and is honoured; `analyze` labels simulated input; `write_tags(simulated=...)` is required |
+| 5.4 | Questionable | Best of 72 window and delay choices gave an unlabelled S > 2 in 8% of runs at a true S of 2 | Stated; `analyze` prints the selection caveat and records input hashes; binding windows to a calibration or signed plan is open |
+| 5.5 | Minor | A rule subclass forged the default policy fingerprint | Fixed: rules rebuilt from raw fields, subclasses refused |
+| 5.6 | Minor | `analyze` skipped the angle check and recorded no setup hash | Fixed |
+| 5.7 | Questionable | SciPy floor 1.10 untested; 1.10–1.12 report converged: False | Floor raised to 1.13; CI job on the minimum pins |
+| 5.8 | Questionable | Release could publish partly (crate and PyPI before every build passed); lock files unchecked | Fixed: every publish job needs every build; `cargo metadata --locked` in the check |
+| 5.9 | Questionable | Lock files and versions must be bumped together; dadl-quantum-core has never been published | For the release; owner step: PyPI pending publisher for dadl-quantum-core |
+| 5.10 | Minor | No extra installs a matching core | `dadl-quantum[core]`, its pin checked against the tag |
+| 5.11 | Minor | Stale PyPI description; spurious Accelerate warnings on Python 3.10; classifiers; bindings description; a test comment | Fixed |
+| 5.12 | Wrong | The dead-time proxy took the shortest channel's dead time: two slow and two fast detectors gave S = 2.11 (true 1.98), unlabelled; one double trigger also hid it | Fixed: per-channel low gap quantile, longest channel; test with mismatched dead times |
+| 5.13 | Questionable | The interruption p-value was anticonservative at low counts (1.7% at nominal 0.1% with 21 gaps) | Fixed: exact max/sum bound; 0.13–0.15% from 21 to 1,000 gaps, power unchanged |
+| 5.14 | Questionable | The dark drift test had no tolerance: 1% drift marked 94% of 1e6-count runs misfit | Fixed: tested against a ±2% band; drift ratio and each check's p recorded in `conditions`; a misfit names the failing check |
+| 5.15 | Questionable | A ±50% slow modulation trips the interruption test (17–19%), refusing calibrations that are drift-robust | Note reworded ("not stationary or interrupted"); stated as a limit |
+| 5.16 | Minor | Interruption note and misfit status used different thresholds | Fixed |
+| 5.17 | Minor | Accidentals docstring said dispersion catches drift | Corrected: slow drift is invisible to it and does not bias the estimate |

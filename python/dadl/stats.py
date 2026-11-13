@@ -132,10 +132,17 @@ class Laplace:
     def draws(self, rng: np.random.Generator, n_draws: int) -> np.ndarray:
         try:
             np.linalg.cholesky(self.cov)
+            method = "cholesky"
         except np.linalg.LinAlgError:
             # A conditional posterior (a parameter held fixed) has zero rows: semi-definite.
-            return rng.multivariate_normal(self.mean, self.cov, size=n_draws, method="eigh")
-        return rng.multivariate_normal(self.mean, self.cov, size=n_draws, method="cholesky")
+            method = "eigh"
+        # macOS Accelerate with NumPy 2.2 warns spuriously inside the matmul (release review,
+        # cycle 5); the draws are checked instead.
+        with np.errstate(all="ignore"):
+            out = rng.multivariate_normal(self.mean, self.cov, size=n_draws, method=method)
+        if not np.all(np.isfinite(out)):
+            raise FloatingPointError("Laplace draws are not finite")
+        return out
 
 
 def coverage_band(n_replicates: int, level: float = LEVEL, confidence: float = 0.99) -> tuple[float, float]:

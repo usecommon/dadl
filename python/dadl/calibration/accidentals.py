@@ -28,9 +28,12 @@ posterior. R1 * R2 * width * duration is reported only as a cross-check in
 the notes, since it assumes stationary, uncorrelated streams.
 
 The predictive check combines two tests of the M shifted counts (the smaller
-p-value, doubled): dispersion (structure such as drift or a periodic
-background missed by a CW setting) and a trend test, nearer windows against
-farther ones, which catches a smooth afterpulse tail that dispersion misses.
+p-value, doubled): dispersion (structure on the scale of the offsets, such
+as a periodic background missed by a CW setting) and a trend test, nearer
+windows against farther ones, which catches a smooth afterpulse tail that
+dispersion misses. Drift on scales much longer than the offsets is invisible
+to both and does not bias the estimate: every shifted window sees the same
+drift as the on-peak window.
 """
 
 from __future__ import annotations
