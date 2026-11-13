@@ -61,6 +61,12 @@ DARK_REGIMES: dict[str, tuple[DetectorParams, float]] = {
         DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000, afterpulse_prob=0.2, afterpulse_tau_ps=20_000.0),
         20.0,
     ),
+    # The bundled chsh-spad detector over 60 s: weak afterpulsing (0.5%, about 150 afterpulses per
+    # run), the regime the quickstart points users to (referee review, cycle 8: 92% in 250 runs).
+    "example-spad": (
+        DetectorParams(dark_rate_cps=500.0, dead_time_ps=22_000, afterpulse_prob=0.005, afterpulse_tau_ps=50_000.0),
+        60.0,
+    ),
     # Free-running InGaAs/InP: 10 us hold-off, 5% afterpulsing at 20 us (a 10 us cap on the time
     # constant made these read "not detected"; applications review, cycle 6).
     "ingaas-free-running": (

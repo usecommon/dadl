@@ -21,6 +21,7 @@ exporting to one of these.
 
 from __future__ import annotations
 
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,11 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
             text = np.loadtxt(path, delimiter=",", skiprows=skip, dtype=str, ndmin=2, encoding="utf-8-sig")
             if text.size:
                 text = np.char.strip(text)
+                # ASCII only: str.isdigit and int() accept full-width digits (archivist review).
+                try:
+                    text.astype(np.bytes_)
+                except UnicodeEncodeError as exc:
+                    raise ConfigError(f"{path}: non-ASCII characters in the tag columns") from exc
                 digits = np.char.isdigit(np.char.lstrip(text, "+-"))
                 if not digits.all():
                     row, col = map(int, np.argwhere(~digits)[0])
@@ -84,6 +90,8 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
             raise ConfigError(f"{path}: tag files must be .npz or .csv")
     except FileNotFoundError as exc:
         raise ConfigError(f"tag file not found: {path}") from exc
+    except (zipfile.BadZipFile, EOFError) as exc:
+        raise ConfigError(f"{path}: not a readable .npz file (truncated or corrupt): {exc}") from exc
     except (ValueError, OverflowError) as exc:
         raise ConfigError(f"{path}: cannot parse as integer columns: {exc}") from exc
 
@@ -105,9 +113,20 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
     runs: Runs = {}
     for i, pair in enumerate(settings):
         in_setting = setting == i
-        runs[pair] = {
-            name: np.sort(stamps[in_setting & (channel == num)]) for num, name in channels.items()
-        }
+        runs[pair] = {}
+        for num, name in channels.items():
+            arr = stamps[in_setting & (channel == num)]
+            # Each channel's tags must already be in time order in the file: sorting them hid a
+            # tagger clock reset, which read as one overlapping run at twice the rate (operator
+            # review, cycle 8).
+            back = np.flatnonzero(np.diff(arr) < 0)
+            if back.size:
+                raise ConfigError(
+                    f"{path}: channel {name} of acquisition {pair}: timestamps go back in time "
+                    f"({int(arr[back[0]])} then {int(arr[back[0] + 1])} ps). A tagger clock reset, or files "
+                    "joined out of order? Split the acquisition at the reset; DADL does not sort tags."
+                )
+            runs[pair][name] = arr
     return runs
 
 

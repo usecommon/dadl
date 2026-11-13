@@ -183,3 +183,28 @@ since analyses refuse duplicate timestamps.
 | 7.16 | Questionable | The gate did not pass dead time and τa as the CLI does (accidentals +2.2% in InGaAs pairs without them) | Fixed: the gate passes the declared values |
 | 7.17 | Minor | Stored draws not gated; the at-least rule cannot fail on wide intervals | Open |
 | 7.18 | Minor | All regimes shared replicate streams | Fixed: the regime enters the seed key; all 38 checks pass on the new streams, and on three further seeds (reviewer) |
+
+## Cycle 8: journal referee, research-data archivist, network testbed operator
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 8.1 | Wrong | The technical report said the heralding ratio yields "system efficiency" (the example reads 0.397 for η = 0.5) | Corrected in both places (7.1 had reached the README and CLI only) |
+| 8.2 | Wrong | The report is stale for 0.1.0 (version, abstract, Table 2, Availability) | For the release commit |
+| 8.3 | Questionable | Figure 3, Table 1 and the architecture text describe unbuilt components in the present tense | Marked as design, with status in Table 2 |
+| 8.4 | Questionable | "No tool connects..." without a related-work comparison | Narrowed; comparison noted as in preparation |
+| 8.5 | Questionable | The dark afterpulse interval covered 92% in the bundled example's own weak-afterpulse regime (250 runs) | Gate regime `example-spad` (60 s) added |
+| 8.6 | Minor | "Checked against an external reference" for synthetic counts; citation details; inconsistent review wording | Wording fixed ("AI-agent role-play reviews; no independent human review yet" everywhere); citation corrections to verify before journal submission |
+| 8.7 | Questionable | NumPy float conditions crashed the writer | Fixed |
+| 8.8 | Questionable | Input hashes had no names | Fixed: channel, file and setup names recorded |
+| 8.9 | Questionable | PTU local file time stored as UTC; `--acquired` without offset taken as UTC | Fixed: offset required; the PTU time is kept as local in `instrument.file_created_local` |
+| 8.10 | Questionable | Method versions not bumped while methods changed | Bumped (accidentals 3, dark 6, dcr 2, delay 6, heralding 4); a test pins each module's source hash to its version |
+| 8.11 | Questionable | The schema would ship as a mutable draft | For the release commit: freeze `calibration/1` |
+| 8.12 | Minor | `as_record` labels split ambiguously; Python repr cells | Fixed: JSON cells; `dadl_version` and `simulated` columns |
+| 8.13 | Minor | Docs promised Photon-HDF5 output, manifest-ID vectors and `dadl verify` | Marked planned |
+| 8.14 | Minor | User conditions could overwrite fit diagnostics | Refused |
+| 8.15 | Minor | Full-width digits accepted in CSV | Refused |
+| 8.16 | Wrong | A tagger clock reset was sorted into one run at twice the dark rate | Fixed: tags must be in time order per channel in the file |
+| 8.17 | Wrong | A stale declared delay gave heralding η ≈ 0, status ok, in the library | Fixed: a neighbouring slot holding more coincidences marks the calibration misfit |
+| 8.18 | Questionable | An 8-input tagger needs two setups; no JSON output; no history or latest-artifact lookup; reruns add records | Stated in README ("interactive use, not unattended operation yet"); open |
+| 8.19 | Questionable | `calibrate dark` stopped at the first bad channel; errors did not name it | Fixed: per-channel handling and a summary |
+| 8.20 | Minor | Memory figures beyond PTU undocumented; truncated npz traceback; `ppc_pvalue` unhelpful as a trend | Documented; npz errors refused cleanly |

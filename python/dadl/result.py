@@ -85,10 +85,24 @@ class LabelledValue:
         return "  ".join(parts)
 
     def as_record(self) -> dict[str, object]:
-        """Flat record for CSV or DataFrame export. Labels are a mandatory column."""
+        """Flat record for CSV or DataFrame export. Labels are a mandatory column.
+
+        List and dict cells are JSON (labels contain "; " themselves, and Python repr did not
+        survive a CSV round trip: archivist review, cycle 8).
+        """
+        import json
+
+        from dadl import __version__
+        from dadl.guardrails import SIMULATED_INPUT
+
+        def js(v: object) -> str | None:
+            return None if v is None else json.dumps(v, sort_keys=True, default=str)
+
         window = self.window or {}
         return {
+            "dadl_version": __version__,
             "analysis": self.analysis,
+            "simulated": SIMULATED_INPUT in self.labels,
             "raw_value": self.raw.value,
             "raw_stderr": self.raw.stderr,
             "raw_low": self.raw.low,
@@ -98,14 +112,14 @@ class LabelledValue:
             "corrected_low": None if self.corrected is None else self.corrected.low,
             "corrected_high": None if self.corrected is None else self.corrected.high,
             "uncertainty": UNCERTAINTY_KIND,
-            "labels": "; ".join(self.labels),
-            "artifact_ids": "; ".join(self.artifact_ids),
+            "labels": js(list(self.labels)),
+            "artifact_ids": js(list(self.artifact_ids)),
             "policy_fingerprint": self.policy_fingerprint,
-            "overrides": "; ".join(self.overrides),
+            "overrides": js(list(self.overrides)),
             "window_width_ps": window.get("width_ps"),
-            "window_delays_ps": window.get("delays_ps"),
+            "window_delays_ps": js(dict(window["delays_ps"])) if window.get("delays_ps") is not None else None,
             "window_source": window.get("source"),
             "window_grid_origin_ps": window.get("grid_origin_ps"),
-            "counts": None if self.counts is None else str(self.counts),
-            "inputs": None if self.inputs is None else str(self.inputs),
+            "counts": js(self.counts),
+            "inputs": js(self.inputs),
         }

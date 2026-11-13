@@ -62,7 +62,7 @@ from dadl.stats import Interval, Laplace, expit, gamma_posterior, numerical_hess
 
 KIND = "dark-afterpulse-deadtime"
 METHOD = "interarrival-mle"
-METHOD_VERSION = "5"
+METHOD_VERSION = "6"
 MIN_GAPS = 20
 #: Below this many expected afterpulses (n p) the profile intervals are used even with many gaps
 #: (statistician review: tau_a covered 87% at 20,000 gaps with about 10 afterpulses).
@@ -166,6 +166,15 @@ def _stationarity(tags: np.ndarray, r_per_ps: float, n_gaps: int, longest_gap: f
     # P(max of n_gaps exponential gaps >= longest) = 1 - (1 - exp(-r g))^n
     p_gap = float(-np.expm1(n_gaps * np.log1p(-math.exp(-r_per_ps * longest_gap)))) if longest_gap > 0 else 1.0
     return {"drift_ratio": ratio, "p_drift": p_drift, "p_gap": p_gap}
+
+
+def _merge_conditions(diagnostics: dict[str, float], given: dict[str, float] | None) -> dict[str, float]:
+    """The caller's conditions beside the fit's diagnostics; a clash is refused, not overwritten
+    (archivist review, cycle 8: a user `gaps` replaced the fitted value)."""
+    clash = sorted(set(diagnostics) & set(given or {}))
+    if clash:
+        raise ValueError(f"conditions {clash} are names the fit records itself; rename them")
+    return {**diagnostics, **(given or {})}
 
 
 def _ppc_pvalue(s: np.ndarray, theta: np.ndarray) -> float:
@@ -592,9 +601,9 @@ def calibrate_dark(
         sample_params=tuple(names),
         converged=converged,
         ppc_pvalue=ppc,
-        inputs=((tags_sha256(tags), "raw-tags"),),
+        inputs=((tags_sha256(tags), "raw-tags", str(channel)),),
         backend=backend,
-        conditions={"gaps": float(n), **ess_condition, **check_conditions, **(conditions or {})},
+        conditions=_merge_conditions({"gaps": float(n), **ess_condition, **check_conditions}, conditions),
         unidentified=unidentified,
         notes=tuple(notes),
     )

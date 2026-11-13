@@ -50,7 +50,7 @@ from dadl.stats import gamma_posterior
 
 KIND = "accidentals"
 METHOD = "offpeak-grid"
-METHOD_VERSION = "2"
+METHOD_VERSION = "3"
 GUARD_PS = 10_000_000
 #: Afterpulse time constants the guard keeps clear of.
 GUARD_TAUS = 10
@@ -223,7 +223,7 @@ def calibrate_accidentals(
         sample_params=("accidental_coincidences",),
         converged=True,
         ppc_pvalue=with_interruption_check(offpeak_pvalue(counts, offsets), notes, a, b),
-        inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
+        inputs=((tags_sha256(a), "raw-tags", str(channels[0])), (tags_sha256(b), "raw-tags", str(channels[1]))),
         backend=backend,
         conditions={"width_ps": float(width_ps), "guard_ps": float(guard), **(conditions or {})},
         notes=tuple(notes),

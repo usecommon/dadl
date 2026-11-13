@@ -88,10 +88,12 @@ def canonical_json(obj: Any) -> bytes:
             return "true"
         if v is False:
             return "false"
-        if isinstance(v, (int, float)):
-            return _jcs_number(v)
+        # NumPy scalars first: np.float64 is a float subclass whose repr is "np.float64(...)" under
+        # NumPy 2 (archivist review, cycle 8: a NumPy temperature crashed the writer).
         if isinstance(v, (np.integer, np.floating)):
             return _jcs_number(v.item())
+        if isinstance(v, (int, float)):
+            return _jcs_number(v)
         if isinstance(v, str):
             return json.dumps(v, ensure_ascii=False)
         if isinstance(v, (list, tuple)):
@@ -202,7 +204,10 @@ def build_manifest(
         "method": {"name": cal.method, "version": cal.method_version},
         "created": _utc(created),
         "backend": cal.backend,
-        "inputs": [{"sha256": sha, "role": role} for sha, role in cal.inputs],
+        "inputs": [
+            {"sha256": item[0], "role": item[1], **({"name": item[2]} if len(item) > 2 and item[2] else {})}
+            for item in cal.inputs
+        ],
         "posterior": {
             "format": "npy",
             "sha256": posterior_sha256(cal.samples),
@@ -304,7 +309,7 @@ def load_calibration(path: str | Path) -> Calibration:
         sample_params=tuple(manifest["posterior"]["params"]),
         converged=manifest["checks"]["converged"],
         ppc_pvalue=manifest["checks"]["ppc_pvalue"],
-        inputs=tuple((i["sha256"], i["role"]) for i in manifest["inputs"]),
+        inputs=tuple((i["sha256"], i["role"], i.get("name", "")) for i in manifest["inputs"]),
         backend=manifest["backend"],
         conditions=dict(manifest.get("conditions", {})),
         unidentified=tuple(manifest.get("unidentified_params", ())),

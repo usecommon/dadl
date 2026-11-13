@@ -243,7 +243,10 @@ def _when(text: str | None, name: str):
         t = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise DadlError(f"--{name}: not an ISO 8601 time: {text!r}") from exc
-    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+    if t.tzinfo is None:
+        # Archivist review, cycle 8: a local time stored as UTC breaks matching with other logs.
+        raise DadlError(f"--{name}: give a UTC offset (e.g. {text}Z or {text}+01:00)")
+    return t
 
 
 def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str, float], tuple]:
@@ -263,9 +266,9 @@ def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str,
     conditions.update(tagger_settings(args.tags))
     tags_path = Path(args.tags)
     files = sorted(tags_path.glob("setting*.ptu")) if tags_path.is_dir() else [tags_path]
-    inputs = tuple((hashlib.sha256(f.read_bytes()).hexdigest(), "raw-file") for f in files if f.is_file())
+    inputs = tuple((hashlib.sha256(f.read_bytes()).hexdigest(), "raw-file", f.name) for f in files if f.is_file())
     if setup_path.is_file():
-        inputs += ((hashlib.sha256(setup_path.read_bytes()).hexdigest(), "config"),)
+        inputs += ((hashlib.sha256(setup_path.read_bytes()).hexdigest(), "config", setup_path.name),)
     acquired, instrument = _when(args.acquired, "acquired"), {}
     if tags_path.is_dir() and files:
         from dadl.adapters.ptu import PtuFile
@@ -274,8 +277,10 @@ def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str,
         instrument = {"model": header.get("HW_Type"), "serial": header.get("HW_SerialNo"),
                       "firmware": header.get("HW_Version")}
         stamp = header.get("File_CreatingTime")
-        if acquired is None and isinstance(stamp, float) and stamp > 0:
-            acquired = dt.datetime(1899, 12, 30, tzinfo=dt.timezone.utc) + dt.timedelta(days=stamp)
+        if isinstance(stamp, float) and stamp > 0:
+            # The acquisition PC's local clock, zone unknown: recorded as such, not as UTC.
+            local = dt.datetime(1899, 12, 30) + dt.timedelta(days=stamp)
+            instrument["file_created_local"] = local.strftime("%Y-%m-%dT%H:%M:%S") + " (local time, zone unknown)"
     supersedes = args.supersedes
     if supersedes and not (Path(args.out) / f"{supersedes}.json").exists():
         raise DadlError(f"--supersedes: no artifact {supersedes} in {args.out}")
@@ -405,12 +410,22 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     _refuse_source_on(tags, setup)
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     write, extra, inputs = _record(args, _resolve(args.setup))
+    # Each channel is calibrated and refused on its own, and a failure names its channel (operator
+    # review, cycle 8: the first bad channel stopped the rest).
+    failed: list[str] = []
     for name in wanted:
         arr = tags[name]
         run = {"setting": float(args.setting)}
         if arr.size > 1:
             run["duration_s"] = (int(arr[-1]) - int(arr[0])) / 1e12
-        cal = calibrate_dark(arr, setup.channel_id(name), backend=backend, seed=setup.seed, conditions={**run, **extra})
+        channel = setup.channel_id(name)  # a setup error stops the command
+        try:
+            cal = calibrate_dark(arr, channel, backend=backend, seed=setup.seed, conditions={**run, **extra})
+        except (DadlError, ValueError) as exc:
+            print()
+            print(f"  {name}: not calibrated: {exc}")
+            failed.append(name)
+            continue
         cal = dataclasses.replace(cal, inputs=cal.inputs + inputs)
         print()
         print(cal)
@@ -428,8 +443,15 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
                 f"  warning: the dark rate is more than 10x the setup's declared {declared:g} cps. Check that the "
                 "source was off and the detector shielded from light."
             )
-        path = _write_checked(cal, args.out, args.accept_misfit, **write)
-        print(f"  artifact: {path}")
+        try:
+            path = _write_checked(cal, args.out, args.accept_misfit, **write)
+        except DadlError as exc:
+            print(f"  not written: {exc}")
+            failed.append(name)
+        else:
+            print(f"  artifact: {path}")
+    if failed:
+        raise DadlError(f"{len(failed)} of {len(wanted)} channels not calibrated or not written: {', '.join(failed)}")
     return 0
 
 

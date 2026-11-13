@@ -60,9 +60,11 @@ included (tagger timebase, temperature sensor, connectors, declared delays).
 
 ### Known limits
 
-The calibrations were reviewed by outside-expert reviewers (AI agents, not
-yet people; [register](docs/reviews/2026-11-expert-assumptions.md)). Their
-limits, stated plainly:
+The calibrations went through AI-agent role-play reviews by simulated outside
+experts; there has been no independent human review yet
+([assumptions register](docs/reviews/2026-11-expert-assumptions.md),
+[review cycles](docs/reviews/2026-11-review-cycles.md)). Their limits, stated
+plainly:
 
 - **CW sources only.** `source.type` must be `spdc-cw`. Pulsed sources and
   pulsed or thermal pair statistics are not modelled. Independent CW
@@ -167,6 +169,17 @@ limits, stated plainly:
   integrity, not authenticity: signing is planned. Parameters reported only
   as a bound have `value: null` and `bound: "upper"`, and draw columns that
   are stand-ins rather than a posterior are listed in `posterior.stand_in`.
+- **Interactive use, not unattended operation yet.** Setups have exactly the
+  four CHSH roles (or two HOM ones), so an 8-input tagger is calibrated as two
+  setups; output is text, with no `--json`; nothing compares a calibration
+  with earlier ones, finds the latest artifact for a detector, or skips
+  rewriting an identical record (pass `--created` to reproduce one). Long dark
+  runs with more than ±2% drift are refused as misfits and need splitting.
+  CSV tag files take about 500 bytes per row in memory; a low-count dark fit
+  peaks at about 0.5–0.75 GB. For trends, use the `p_shape`, `p_drift` and
+  `p_gap` conditions rather than the combined `ppc_pvalue`. Tags must be in
+  time order per channel in the file: a tagger clock reset is refused, not
+  sorted.
 - A failed predictive check marks the calibration `misfit`; the CLI refuses to
   write it unless `--accept-misfit` is given.
 

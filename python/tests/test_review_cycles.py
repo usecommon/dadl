@@ -704,3 +704,62 @@ def test_estimates_format_like_numbers():
     from dadl.result import Estimate
 
     assert f"{Estimate(2.69412, 0.01049):.3f}" == "2.694 ± 0.010"
+
+
+# --- Cycle 8 -----------------------------------------------------------------------------------
+
+
+def test_numpy_conditions_and_named_inputs_are_written(tmp_path):
+    import datetime as dt
+
+    from dadl.artifact import read_artifact, write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.sim import simulate_dark
+
+    tags = simulate_dark(DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000), 2.0, np.random.default_rng(1))
+    cal = calibrate_dark(tags, CHS[0], conditions={"temperature_K": np.mean([249.0, 251.0])})
+    m = read_artifact(write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc)))[0]
+    assert m["conditions"]["temperature_K"] == 250.0
+    assert m["inputs"][0]["name"] == "sim:0"
+    with pytest.raises(ValueError, match="gaps"):
+        calibrate_dark(tags, CHS[0], conditions={"gaps": 1.0})
+
+
+def test_clock_resets_and_broken_npz_are_refused(tmp_path):
+    from dadl.tagfile import read_tags
+
+    p = tmp_path / "t.csv"
+    p.write_text("setting,channel,timestamp_ps\n0,0,100\n0,0,200\n0,0,50\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="back in time"):
+        read_tags(p)
+    z = tmp_path / "t.npz"
+    z.write_bytes(b"PK\x03\x04broken")
+    with pytest.raises(ConfigError, match="npz"):
+        read_tags(z)
+
+
+def test_stale_declared_delay_marks_heralding_misfit_in_the_library():
+    from dadl.calibration import calibrate_heralding
+
+    a_det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, jitter_sigma_ps=350.0, delay_ps=0)
+    b_det = DetectorParams(efficiency=0.4, dark_rate_cps=500.0, jitter_sigma_ps=350.0, delay_ps=3000)
+    a, b = simulate_pairs(2e4, a_det, b_det, 1.0, np.random.default_rng(0))
+    assert calibrate_heralding(a, b, CHS, width_ps=2000, delay_signal_ps=3000, n_draws=10).status == "ok"
+    stale = calibrate_heralding(a, b, CHS, width_ps=2000, delay_signal_ps=0, n_draws=10)
+    assert stale.status == "misfit" and any("pair peak" in n for n in stale.notes)
+
+
+def test_acquired_needs_an_offset_and_records_are_json(tmp_path, capsys):
+    import json
+
+    from dadl.analysis.visibility import bell_visibility
+
+    rec = bell_visibility(9000, 1000).as_record()
+    labels = json.loads(rec["labels"])
+    assert len(labels) == 3 and rec["simulated"] is False and rec["dadl_version"]
+    tags = tmp_path / "dark.npz"
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(tags)]) == 0
+    capsys.readouterr()
+    argv = ["calibrate", "dark", "chsh-spad", "--tags", str(tags), "--channel", "A+", "--out", str(tmp_path / "a")]
+    assert main(argv + ["--acquired", "2026-11-01T09:00"]) == 1
+    assert "UTC offset" in capsys.readouterr().err

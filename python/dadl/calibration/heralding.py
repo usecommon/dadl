@@ -66,7 +66,7 @@ from dadl.stats import LEVEL, Interval
 
 KIND = "heralding-efficiency"
 METHOD = "herald-ratio"
-METHOD_VERSION = "3"
+METHOD_VERSION = "4"
 MIN_HERALDS = 100
 
 UNITS = {"heralding_efficiency": "1"}
@@ -79,6 +79,28 @@ DEFINITIONS = {
 
 #: Quadrature points over the accidental probability p.
 P_POINTS = 200
+
+
+#: Neighbouring slots checked for the pair peak, on each side of the declared one.
+PEAK_SEARCH_SLOTS = 10
+
+
+def _peak_placement_pvalue(
+    herald: np.ndarray, signal: np.ndarray, width_ps: int, d_h: int, d_s: int, c: int, notes: list[str]
+) -> float:
+    """0 when a neighbouring slot holds more coincidences than the declared one: the declared delay
+    misses the pair peak (operator review, cycle 8: a 3 ns cable change read eta 0.0005, status ok).
+    """
+    shifts = np.array([k * width_ps for k in range(-PEAK_SEARCH_SLOTS, PEAK_SEARCH_SLOTS + 1) if k], dtype=np.int64)
+    near = shifted_coincidences(herald, signal, width_ps, d_h, d_s, shifts)
+    best = int(np.argmax(near))
+    if near[best] > max(c, 10) and near[best] - c > 5.0 * np.sqrt(near[best] + c):
+        notes.append(
+            f"the pair peak is {int(shifts[best])} ps from the declared slot ({int(near[best])} coincidences there "
+            f"against {c}): the declared delays are stale; recalibrate the delay and declare it"
+        )
+        return 0.0
+    return 1.0
 
 
 def _p_nodes(side_total: int, n_windows: float, slots: int) -> np.ndarray:
@@ -201,8 +223,12 @@ def calibrate_heralding(
         samples=np.column_stack([draws, p_draws]),
         sample_params=("heralding_efficiency", "accidental_probability"),
         converged=True,
-        ppc_pvalue=with_interruption_check(offpeak_pvalue(side, offsets), notes, herald, signal),
-        inputs=((tags_sha256(herald), "raw-tags"), (tags_sha256(signal), "raw-tags")),
+        ppc_pvalue=with_interruption_check(
+            min(offpeak_pvalue(side, offsets), _peak_placement_pvalue(herald, signal, width_ps, delay_herald_ps,
+                                                                     delay_signal_ps, c, notes)),
+            notes, herald, signal,
+        ),
+        inputs=((tags_sha256(herald), "raw-tags", str(channels[0])), (tags_sha256(signal), "raw-tags", str(channels[1]))),
         backend=backend,
         conditions={"width_ps": float(width_ps), **(conditions or {})},
         notes=tuple(notes),

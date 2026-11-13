@@ -183,7 +183,8 @@ jobs:
       fail-fast: false
       matrix:
         part:
-          - {name: dark, args: "dark"}
+          - {name: dark 1, args: "dark --regimes si-spad cmos-spad ingaas-free-running"}
+          - {name: dark 2, args: "dark --regimes example-spad"}
           - {name: dcr, args: "dcr"}
           - {name: pairs 1, args: "pairs --regimes cw-spad sparse-snspd afterpulsing-spad high-rate-snspd"}
           - {name: pairs 2, args: "pairs --regimes bright-background"}

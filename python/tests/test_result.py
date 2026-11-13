@@ -31,8 +31,8 @@ def test_string_puts_raw_first_and_keeps_labels():
 def test_export_record_has_mandatory_label_and_provenance_columns():
     record = make().as_record()
     assert record["raw_value"] == 0.45
-    assert record["labels"] == "policy modified"
+    assert record["labels"] == '["policy modified"]'
     assert record["policy_fingerprint"] == "ab" * 32
-    assert record["overrides"] == "hom_visibility: afterpulse (test)"
+    assert record["overrides"] == '["hom_visibility: afterpulse (test)"]'
     assert record["window_width_ps"] == 1000
     assert record["uncertainty"] == UNCERTAINTY_KIND

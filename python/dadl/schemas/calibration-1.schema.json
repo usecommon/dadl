@@ -384,7 +384,8 @@
     "acquired": {
       "type": "string",
       "format": "date-time",
-      "description": "When the data were acquired (from the tagger file, or declared). `created` is when the record was made."
+      "description": "When the data were acquired, in UTC (declared with --acquired, which needs an offset). A tagger file's local creation time goes in instrument.file_created_local.",
+      "pattern": "Z$"
     },
     "instrument": {
       "type": "object",

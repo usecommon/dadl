@@ -76,8 +76,8 @@ class Calibration:
     converged: bool
     #: Posterior predictive p-value of the fit (small values flag misfit).
     ppc_pvalue: float
-    #: (sha256, role) of every input.
-    inputs: tuple[tuple[str, str], ...]
+    #: (sha256, role) or (sha256, role, name) of every input.
+    inputs: tuple[tuple[str, ...], ...]
     backend: str = "hardware"
     conditions: Mapping[str, float] = field(default_factory=dict)
     #: Parameters the data could not identify (reported as limits or not at all).

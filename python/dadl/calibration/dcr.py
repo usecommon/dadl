@@ -35,7 +35,7 @@ from dadl.stats import LEVEL, Laplace
 
 KIND = "dcr-temperature"
 METHOD = "arrhenius-wls"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 MIN_TEMPERATURES = 3
 
 UNITS = {"dcr_ref_cps": "s-1", "activation_energy_ev": "eV"}
@@ -133,7 +133,7 @@ def calibrate_dcr_temperature(
             f"{len(few)} input(s) had fewer than 100 dark gaps: near the 20-gap minimum, runs that pass are biased "
             "upward (and re-acquiring until one passes biases more); prefer longer cold acquisitions"
         )
-    rng = draws_rng(seed, *(sha for d in darks for sha, _ in d.inputs))
+    rng = draws_rng(seed, *(i[0] for d in darks for i in d.inputs))
     draws = laplace.draws(rng, n_draws)
     inputs = tuple(dict.fromkeys(i for d in darks for i in d.inputs))
     return Calibration(

@@ -317,7 +317,7 @@ Safety design:
 
 ## Data model, storage and provenance
 
-Photon-HDF5 is the interchange container. DADL writes its calibration data under `/user/dadl_calibration`, the spec's extension point, and proposes a `/calibration` group upstream instead of inventing a new format; paths below are relative to that group. It also fills the native point-value fields under `/setup/detectors` with posterior medians in SI units, and sets `timestamps_unit` = 1e-12 s for its int64 ps tags. All three are to be checked against the spec and phconvert's validator in phase 2. Raw tags stay on-prem; the project runs no hosted service.
+Photon-HDF5 is the planned interchange container (no HDF5 code exists yet). DADL is to write its calibration data under `/user/dadl_calibration`, the spec's extension point, and proposes a `/calibration` group upstream instead of inventing a new format; paths below are relative to that group. It also fills the native point-value fields under `/setup/detectors` with posterior medians in SI units, and sets `timestamps_unit` = 1e-12 s for its int64 ps tags. All three are to be checked against the spec and phconvert's validator in phase 2. Raw tags stay on-prem; the project runs no hosted service.
 
 ```
 /photon_data      timestamps (typically int64), timestamps_specs/timestamps_unit, detector IDs   [existing]
@@ -518,7 +518,7 @@ Size: 2,000 samples × \~20 parameters × 8 bytes is about 320 kB per artifact, 
 
 **Schema versions.** The kit reads every past schema version indefinitely. Upgrades create new artifacts that link back to the old ones, so existing hashes and signatures stay valid.
 
-**Content addressing (phase 2–3).** The ID is the SHA-256 of the manifest canonicalized with RFC 8785 (JCS). Cross-language test vectors (manifest, JCS bytes, ID) ship with the schema. The posterior hash covers a canonical layout (little-endian float64 columns in `params` order), not Arrow file bytes; input hashes cover datasets, not container files, so writing calibration into the same HDF5 file does not change them. `dadl verify` checks that a recomputed artifact agrees statistically, since MCMC output is not bit-reproducible.
+**Content addressing (phase 2–3).** The ID is the SHA-256 of the manifest canonicalized with RFC 8785 (JCS). Cross-language test vectors ship with the schema (JCS numbers and objects today; manifest-to-ID vectors are planned). The posterior hash covers a canonical layout (little-endian float64 columns in `params` order), not Arrow file bytes; `raw-tags` input hashes cover datasets, not container files, so writing calibration into the same HDF5 file does not change them (the CLI also records container hashes, role `raw-file`). A planned `dadl verify` checks that a recomputed artifact agrees statistically, since MCMC output is not bit-reproducible.
 
 **Signing (deferred to v0.2+).** Until a user needs attestation, artifacts are content-addressed only. The planned design: the signed payload is `"dadl-calibration-v1\0"` followed by the JCS bytes; `sig` is base64url; `key_id` is the SHA-256 of the public key; a per-chain `seq` counter rejects rollback; and small labs can sign with minisign or SSH signatures against an `allowed_signers`-style trust file instead of a keystore or HSM. Each site holds its own key; the project never holds lab keys. Key custody for QKD attestation stays an open question.
 

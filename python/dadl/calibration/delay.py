@@ -64,7 +64,7 @@ from dadl.stats import Interval, Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "5"
+METHOD_VERSION = "6"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -389,7 +389,7 @@ def calibrate_delay(
         sample_params=("delay_ps", "jitter_sigma_ps"),
         converged=converged,
         ppc_pvalue=with_interruption_check(_grouped_pearson(model.n, model.mu(theta), 5), notes, a, b),
-        inputs=((tags_sha256(a), "raw-tags"), (tags_sha256(b), "raw-tags")),
+        inputs=((tags_sha256(a), "raw-tags", str(channels[0])), (tags_sha256(b), "raw-tags", str(channels[1]))),
         backend=backend,
         conditions={"tick_ps": float(tick), **(conditions or {})},
         unidentified=unidentified,
