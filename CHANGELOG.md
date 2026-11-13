@@ -28,7 +28,7 @@ from the packages.
   `closed_form.dark_afterpulse_rate`. Simulated tags for a given seed differ
   from 0.0.3; the quickstart prints S = 2.6941 instead of 2.6890.
 - CI: a coverage job runs the 1,000-replicate gate on every pull request.
-- New dependency: SciPy (>= 1.10).
+- New dependency: SciPy (>= 1.13).
 
 ### Phase 2, milestone 2: delay, jitter, accidentals, heralding, DCR(T)
 
@@ -142,7 +142,8 @@ from the packages.
   source, a sparse low-rate SNSPD source and a broad (about 1.8 ns) IRF:
   12 gates, run in parallel (`--jobs`) in the existing CI check. In the sparse
   regime about 0.2 off-peak counts are expected in all, so the accidentals
-  gate there requires coverage of at least 95% (declared before the first run).
+  gate there requires coverage of at least the band's lower edge, 92.6% (declared
+  before the first run).
 - Fix found by the broad-IRF regime: the delay fit crashed on broad peaks
   (overflow, or a singular Hessian) because its starting width came from a
   fixed +-50 bins. The start now widens until it holds +-4 sigma, the fit is
@@ -199,7 +200,7 @@ questionable. Changes:
   `--accept-misfit` is given.
 - **PTU data loss**: non-complete `TTResult_StopReason` codes become
   `data-loss` events and `incomplete` metadata, refused by the CLI; the
-  duration comes from the data; PicoHarp inputs above 3 are refused; the
+  duration comes from the data; PicoHarp channel values above 4 (sync 0, router inputs 1-4) are refused; the
   sync divider is reported.
 - **Channel identity**: artifacts record the tagger serial and input, with the
   role and detector serial alongside; hardware setups need `hardware.tagger`.

@@ -55,6 +55,13 @@ DARK_REGIMES: dict[str, tuple[DetectorParams, float]] = {
         DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000, afterpulse_prob=0.2, afterpulse_tau_ps=20_000.0),
         20.0,
     ),
+    # Free-running InGaAs/InP: 10 us hold-off, 5% afterpulsing at 20 us (a 10 us cap on the time
+    # constant made these read "not detected"; applications review, cycle 6).
+    "ingaas-free-running": (
+        DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000_000, afterpulse_prob=0.05,
+                       afterpulse_tau_ps=20_000_000.0),
+        20.0,
+    ),
 }
 
 #: Pair source for the delay, accidentals and heralding gates: a CW SPDC
@@ -338,7 +345,11 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
                 calibrate_dark(tags, channel, backend="sim", seed=int(fit_seed.generate_state(1)[0]), n_draws=10,
                                conditions={"temperature_K": t_k})
             )
-        cal = calibrate_dcr_temperature(darks, reference_k=DCR_REF_K, seed=int(streams[-1].generate_state(1)[0]), n_draws=10)
+        # Every replicate counts, chance misfits among the inputs included (about 0.1% each).
+        cal = calibrate_dcr_temperature(
+            darks, reference_k=DCR_REF_K, seed=int(streams[-1].generate_state(1)[0]), n_draws=10,
+            accept_misfit_inputs=True,
+        )
         _covered(cal, truth, covered)
     return CoverageResult("dcr-temperature [five-temperatures]", replicates, covered, gate(replicates, len(truth)))
 

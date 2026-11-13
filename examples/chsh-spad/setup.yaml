@@ -26,7 +26,7 @@ detectors:
     efficiency: 0.5
     dark_rate_cps: 500
     dead_time_ps: 22000
-    jitter_sigma_ps: 350
+    jitter_sigma_ps: 350   # Gaussian sigma (a datasheet FWHM is 2.355 sigma)
     afterpulse_prob: 0.005
     afterpulse_tau_ps: 50000
     delay_ps: 0

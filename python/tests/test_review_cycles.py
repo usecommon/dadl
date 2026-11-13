@@ -548,3 +548,78 @@ def test_percent_level_dark_drift_is_tolerated_and_recorded():
     keep = rng.random(t.size) < 1.0 - 0.2 * (t / 1e12)  # 20% drift
     tags = t[keep].astype(np.int64)
     assert _stationarity(tags, tags.size / 1e12, tags.size - 1, float(np.diff(tags).max()))["p_drift"] < 1e-6
+
+
+# --- Cycle 6 -----------------------------------------------------------------------------------
+
+
+def test_free_running_ingaas_afterpulsing_is_fitted():
+    from dadl.calibration import calibrate_dark
+    from dadl.sim import simulate_dark
+
+    det = DetectorParams(dark_rate_cps=1000.0, dead_time_ps=10_000_000, afterpulse_prob=0.05,
+                         afterpulse_tau_ps=20_000_000.0)
+    cal = calibrate_dark(simulate_dark(det, 30.0, np.random.default_rng(4)), CHS[0], n_draws=50)
+    assert cal.status == "ok"
+    assert cal.estimates["afterpulse_prob"].contains(0.05) and cal.estimates["afterpulse_tau_ps"].contains(2e7)
+
+
+def test_dcr_refuses_misfit_inputs_unless_accepted():
+    import dataclasses
+
+    from dadl.calibration import calibrate_dark, calibrate_dcr_temperature
+    from dadl.sim import simulate_dark
+
+    darks = []
+    for i, t in enumerate((253.0, 263.0, 273.0)):
+        det = DetectorParams(dark_rate_cps=100.0 * 2**i, dead_time_ps=22_000)
+        darks.append(calibrate_dark(simulate_dark(det, 5.0, np.random.default_rng(i)), CHS[0],
+                                    conditions={"temperature_K": t}))
+    darks[0] = dataclasses.replace(darks[0], ppc_pvalue=0.0)
+    with pytest.raises(ValueError, match="misfit"):
+        calibrate_dcr_temperature(darks)
+    cal = calibrate_dcr_temperature(darks, accept_misfit_inputs=True)
+    assert any("misfit dark calibrations were accepted" in n for n in cal.notes)
+
+
+def test_oversized_histograms_are_refused_not_allocated():
+    from dadl.histogram import cross_correlation, interarrival
+
+    t = np.arange(10, dtype=np.int64)
+    with pytest.raises(ValueError, match="bins"):
+        interarrival(t, 10, 2**40)
+    with pytest.raises(ValueError, match="bins"):
+        cross_correlation(t, t, 1, 2**40)
+
+
+def test_records_keep_exact_intervals_and_the_grid_origin():
+    from dadl.analysis.chsh import Window
+    from dadl.analysis.visibility import bell_visibility
+
+    rec = bell_visibility(30, 3, window=Window(width_ps=2000, source="plan")).as_record()
+    assert rec["raw_low"] is not None and rec["raw_low"] < rec["raw_value"] < rec["raw_high"]
+    assert rec["window_grid_origin_ps"] == 0
+
+
+def test_short_runs_do_not_raise_the_dead_time_label():
+    from dadl.analysis.chsh import Window, chsh
+    from dadl.guardrails import DEAD_TIME_SELECTION
+    from dadl.sim import PairSource, simulate_chsh
+
+    det = DetectorParams(efficiency=0.9, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0)
+    labelled = 0
+    for s in range(10):
+        runs = simulate_chsh(PairSource(pair_rate_per_s=2e4, visibility=0.7),
+                             {k: det for k in ("A+", "A-", "B+", "B-")}, 0.2, np.random.default_rng(s))
+        labelled += DEAD_TIME_SELECTION in chsh(runs, Window(width_ps=2000, source="plan")).labels
+    assert labelled == 0
+
+
+def test_library_refuses_duplicate_timestamps():
+    from dadl.analysis.chsh import Window, chsh
+
+    t = np.arange(0, 10**9, 10**5, dtype=np.int64)
+    runs = {k: {ch: t for ch in ("A+", "A-", "B+", "B-")} for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
+    runs[("a", "b")]["A+"] = np.sort(np.append(t, t[5]))
+    with pytest.raises(ValueError, match="duplicate"):
+        chsh(runs, Window(width_ps=2000, source="plan"))

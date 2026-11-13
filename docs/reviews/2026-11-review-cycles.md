@@ -31,7 +31,7 @@ evidence or a stated limit), **minor** (documentation, polish).
 | 1.13 | Minor | Accidentals gate truth counted tags, the estimator counts occupied slots | Fixed: slot-occupancy truth |
 | 1.14 | Minor | HOM exact interval assumes equal exposure and integer counts | Stated in the docstring |
 | 1.15 | Wrong | A copied setup (`backend: sim`) labelled recorded data as simulated, device "sim" | Fixed: refused unless the tags are marked simulated; `backend: file` and `hardware.tagger` documented; tagger serial checked against PTU `HW_SerialNo` |
-| 1.16 | Wrong | `calibrate dark` on source-on tags wrote a confident dark rate (25,400 cps against 500) | Fixed: refused when channels share coincidences; warning above 10x the declared dark rate |
+| 1.16 | Wrong | `calibrate dark` on source-on tags wrote a confident dark rate (25,400 cps against 500) | Fixed in the CLI (it sees all channels): refused when channels share coincidences; warning above 10x the declared dark rate. `calibrate_dark` itself sees one channel and cannot tell |
 | 1.17 | Questionable | Heralding efficiency depends on the window (0.30–0.47 for 1–8 ns) | `calibrate pairs` prints the implied window capture and η / capture; README limit |
 | 1.18 | Questionable | The fixed grid's origin (t = 0 of the file) is unrecorded; shifting tags moves S by up to 1.7σ | Documented in README; recording a declared grid phase is open |
 | 1.19 | Questionable | PicoHarp 300 router channel 4 refused | Fixed: channels 0–4, as in PicoQuant's demo code |
@@ -54,7 +54,7 @@ evidence or a stated limit), **minor** (documentation, polish).
 | 2.10 | Questionable | About 100 bytes per record in memory; metadata checks read whole files 2–5 times | Header-only reads for metadata; memory stated in README; chunked reading open |
 | 2.11 | Minor | Doc drift (flat background, PicoHarp `describe` channels) | Fixed |
 | 2.12 | Questionable | `calibrate pairs` crashed (capture 0) after writing; with a 15 ns delay error it wrote η = 0, status ok | Fixed: guard; a delay mismatch notes the accidentals and refuses the heralding artifact |
-| 2.13 | Questionable | Artifacts with values ≥ 2^53 written but unreadable | Fixed: read back as floats |
+| 2.13 | Questionable | Artifacts with values ≥ 2^53 written but unreadable | Fixed: whole floats of 2^53 and above read back as floats; Python integers above 2^53 are refused at write |
 | 2.14 | Questionable | Verification checked parsed content, not bytes; duplicate keys accepted | Fixed: bytes must be canonical; duplicate keys refused |
 | 2.15 | Questionable | Same data gave a new artifact ID every run (`created` now, unseeded draws) | Fixed: seeds from input hashes; `SOURCE_DATE_EPOCH`; contract in README |
 | 2.16 | Minor | Bools accepted as integers | Fixed |
@@ -103,7 +103,7 @@ evidence or a stated limit), **minor** (documentation, polish).
 | 4.8 | Questionable | Importance reweighting built a 4000 × n array (2.6 GB at 40,000 gaps) | Fixed: computed in blocks |
 | 4.9 | Minor | The jitter upper limit used Δnll = 1.92 (97.5%) | Fixed: 1.35, a one-sided 95% limit |
 | 4.10 | Wrong | Dead time raised raw S above 2 with no label (S = 2.14 ± 0.004 from a V = 0.7 source at 1 µs, 3·10⁶ pairs/s) | Labelled when coincidence rate × shortest gap exceeds 1%; README limit; quickstart text |
-| 4.11 | Wrong | Tags in ns read as ps gave S = 2.23 ± 0.01 | Fixed: refused when gaps are impossible for the declared dead time, naming the likely unit error |
+| 4.11 | Wrong | Tags in ns read as ps gave S = 2.23 ± 0.01 | Fixed in the CLI, which knows the declared dead time: refused when gaps are impossible for it, naming the likely unit error. The library `chsh` has no declared dead time |
 | 4.12 | Questionable | Corrected HOM values carried no label in the record | Fixed: "accidentals subtracted ... secondary" label |
 | 4.13 | Minor | Stale site listing (S = 2.689, old label); teaching claim covered dead time and afterpulsing | Regenerated; claim narrowed |
 | 4.14 | Minor | Coincidences per singles and the memory loophole unexplained; narrow-window error message; 16-measurement CHSH unsupported | Explained in README; message names the window; scope stated |
@@ -117,7 +117,7 @@ bright-background regime (45% of the run time) now acquires 0.2 s instead of 0.5
 
 | # | Severity | Finding | Status |
 | --- | --- | --- | --- |
-| 5.1 | Wrong | Four duplicated rows removed the dead-time-selection label from S = 2.14 (true 1.98) | Fixed: the proxy uses the 1st-percentile gap; duplicate timestamps on a channel are refused |
+| 5.1 | Wrong | Four duplicated rows removed the dead-time-selection label from S = 2.14 (true 1.98) | Fixed: duplicate timestamps refused in the library (`chsh`, `hom_from_tags`) and the CLI; robust dead-time estimate (6.13) |
 | 5.2 | Wrong | One spurious double trigger 15 ns after a dark count set the dead time to 14 ns (truth 22 ns), status ok | Not separable from a shorter dead time with dark data alone: a note when the estimate rests on few gaps, and a CLI warning when it undercuts the declared dead time; stated |
 | 5.3 | Wrong | Simulated CSV became a "hardware" artifact; `analyze` did not mark simulated input; `write_tags` dropped the marking by default | Fixed: simulated CSV starts with `# dadl-simulated` and is honoured; `analyze` labels simulated input; `write_tags(simulated=...)` is required |
 | 5.4 | Questionable | Best of 72 window and delay choices gave an unlabelled S > 2 in 8% of runs at a true S of 2 | Stated; `analyze` prints the selection caveat and records input hashes; binding windows to a calibration or signed plan is open |
@@ -129,8 +129,34 @@ bright-background regime (45% of the run time) now acquires 0.2 s instead of 0.5
 | 5.10 | Minor | No extra installs a matching core | `dadl-quantum[core]`, its pin checked against the tag |
 | 5.11 | Minor | Stale PyPI description; spurious Accelerate warnings on Python 3.10; classifiers; bindings description; a test comment | Fixed |
 | 5.12 | Wrong | The dead-time proxy took the shortest channel's dead time: two slow and two fast detectors gave S = 2.11 (true 1.98), unlabelled; one double trigger also hid it | Fixed: per-channel low gap quantile, longest channel; test with mismatched dead times |
-| 5.13 | Questionable | The interruption p-value was anticonservative at low counts (1.7% at nominal 0.1% with 21 gaps) | Fixed: exact max/sum bound; 0.13–0.15% from 21 to 1,000 gaps, power unchanged |
+| 5.13 | Questionable | The interruption p-value was anticonservative at low counts (1.7% at nominal 0.1% with 21 gaps) | Fixed: exact max/sum bound; 0.07–0.15% at nominal 0.1% from 21 to 1,000 gaps (two independent measurements), power unchanged |
 | 5.14 | Questionable | The dark drift test had no tolerance: 1% drift marked 94% of 1e6-count runs misfit | Fixed: tested against a ±2% band; drift ratio and each check's p recorded in `conditions`; a misfit names the failing check |
 | 5.15 | Questionable | A ±50% slow modulation trips the interruption test (17–19%), refusing calibrations that are drift-robust | Note reworded ("not stationary or interrupted"); stated as a limit |
 | 5.16 | Minor | Interruption note and misfit status used different thresholds | Fixed |
 | 5.17 | Minor | Accidentals docstring said dispersion catches drift | Corrected: slow drift is invisible to it and does not bias the estimate |
+
+## Cycle 6: Rust and bindings engineer, detector applications engineer, claims auditor
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 6.1 | Wrong | Oversized histograms panicked in Rust (`PanicException`, not caught by `except Exception`) or exhausted memory in Python | Fixed: both backends refuse more than 2^28 bins with `ValueError`; shared vectors |
+| 6.2 | Questionable | On free-threaded Python the bindings would read borrowed NumPy buffers without the GIL | Fixed: `#[pymodule(gil_used = true)]` |
+| 6.3 | Questionable | "About 50x" did not hold for cross-correlation (5x) | Corrected per function |
+| 6.4 | Minor | Bindings declared MSRV 1.74; pyo3 and numpy need 1.85 | Fixed: 1.85 for the bindings (the core stays 1.74) |
+| 6.5 | Minor | Out-of-int64 arguments differ in exception type between backends; Rust messages lose the argument name | Open (0.1.x) |
+| 6.6 | Wrong | A 10 µs cap on the afterpulse time constant: free-running InGaAs (τa 20 µs, p 5%) read "no afterpulsing detected" at LR 2,400, dark rate +4.5% | Fixed: cap 1 ms (still at most a tenth of the mean gap); detection at the edge says so; upper limits for undetected afterpulsing still cover up to 10 µs (stated); InGaAs gate regime |
+| 6.7 | Wrong (docs) | README said multi-component kernels give the fast component's probability | Corrected: an effective value between fast component and total, covering neither |
+| 6.8 | Questionable | DCR(T) accepted misfit inputs (Ea 0.280 [0.278, 0.282] for 0.30) | Fixed: refused unless `accept_misfit_inputs`, then noted |
+| 6.9 | Minor | Crosstalk and twilight counts unstated (1% crosstalk: HOM V 0.919 → 0.896) | Stated |
+| 6.10 | Minor | `jitter_sigma_ps` easily confused with a datasheet FWHM | Schema and example comments say sigma, FWHM = 2.355 sigma |
+| 6.11 | Minor | Free-running InGaAs scope, afterpulse probability tied to hold-off | Stated |
+| 6.12 | Wrong | Items 1.16, 4.11 and 5.1 were fixed in the CLI only | Duplicates now refused in the library; 1.16 and 4.11 relabelled as CLI checks (the library lacks the information) |
+| 6.13 | Questionable | The dead-time proxy labelled every short run (40/40) and missed 2% double triggers | Fixed: gap quantile at 5% with the exponential part subtracted, as a 3-standard-error lower bound; 0/20 false labels in short runs, large cases still labelled with 2% double triggers |
+| 6.14 | Questionable | "Robust to up to three spurious short gaps" does not hold at typical dark rates | Restated: outliers are dropped only when far below all others; the few-gaps note now fires below five nearby gaps (5.2) |
+| 6.15 | Minor | `as_record` dropped the exact interval and grid origin | Fixed |
+| 6.16 | Minor | CHANGELOG said the sparse accidentals gate requires 95%; the code uses 92.6% | Corrected |
+| 6.17 | Minor | DCR "refuses current-biased detectors" overstated; `bias_mV` refused as a current | Reworded; mV and kV accepted as voltages |
+| 6.18 | Minor | Stale figures (SciPy floor, PicoHarp inputs, 50x, dead-time example efficiency, 0.1 η²Rτ, 5.13 rates, 2.13 wording) | Corrected |
+
+Simulator: an ideal detector (dead time 0) now merges arrivals rounded to the same picosecond,
+since analyses refuse duplicate timestamps.

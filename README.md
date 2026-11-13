@@ -46,8 +46,8 @@ experiment, its guardrails and its roadmap.
   simulated), and `SimulatedTagger` emulates a live tagger with buffer
   overflows, dropped batches and config changes. See `adapters/README.md`.
 - **Optional compiled core** (phase 2, on `main`): with `dadl-quantum-core`
-  installed, dead time, coincidences and histograms run in Rust (about 50x
-  faster); `dadl.backend()` says which is in use.
+  installed, dead time, coincidences and histograms run in Rust (about 40-60x
+  faster; about 5x for cross-correlation); `dadl.backend()` says which is in use.
 
 Not yet: calibration uncertainty in results, corrected CHSH, signing,
 the explain engine, MCP.
@@ -67,8 +67,20 @@ limits, stated plainly:
 - **CW sources only.** `source.type` must be `spdc-cw`. Pulsed sources and
   multi-pair emission are not modelled; heralding efficiency reads low when
   the mean pair number per slot is not small.
-- **Single-exponential afterpulsing.** Detectors with a multi-component
-  afterpulse kernel get the fast component's probability, not the total.
+- **Single-exponential afterpulsing.** Detectors with a multi-component or
+  power-law afterpulse kernel get an effective single-exponential value
+  between the fast component and the total, with an interval that covers
+  neither (an SPCM-like three-component kernel: 0.38–0.41% for a 0.30% fast
+  component and a 0.50% total), and the check does not catch it at typical
+  lengths. The afterpulse probability belongs to the hold-off setting it was
+  measured at. Free-running InGaAs/InP detectors (µs hold-off, time constants
+  of tens of µs) are fitted when the time constant is below a tenth of the
+  mean dark gap.
+- **No crosstalk or twilight counts** are modelled: 1% crosstalk between the
+  HOM detectors lowered V from 0.919 to 0.896 unlabelled. Crosstalk is
+  planned.
+- **Jitter is a Gaussian sigma.** Datasheets usually quote the FWHM
+  (2.355 sigma): convert before entering `jitter_sigma_ps`.
 - **Hard-edge, non-paralyzable dead time.** Valid for actively quenched SPAD
   modules. The reported value is the effective channel dead time: the longer
   of detector and tagger dead time, and afterpulses inside it are not seen.
@@ -93,7 +105,8 @@ limits, stated plainly:
   supported.
 - **Dead time can raise S.** A recorded click makes the partner arm's dead
   state depend on the outcome, so |E| grows with η²Rτ: a V = 0.7 source
-  (S = 1.98) read S = 2.14 with a 1 µs dead time at 3·10⁶ pairs/s. Results
+  (S = 1.98) read S = 2.14 with a 1 µs dead time at 3·10⁶ pairs/s and
+  η = 0.5 (2.35 at η = 0.8). Results
   where coincidence rate × dead time exceeds 1% carry a "dead-time selection"
   label; tags whose gaps are impossible for the declared dead time (often a
   ns export read as ps) are refused.
@@ -106,7 +119,8 @@ limits, stated plainly:
 - **SNSPDs.** `family` is a label only. Recovery, timing tails, bias-current
   dependence and latching signatures are not modelled; dark data cannot
   identify an SNSPD's dead time (reported as an upper limit, marked
-  unidentified); DCR(T) refuses current-biased detectors. A latch or other
+  unidentified); DCR(T) refuses runs whose bias condition is recorded as a
+  current (a `bias*` key not in volts). A latch or other
   interruption in any acquisition is detected (longest gap against the count
   rate) and marks calibrations `misfit` and analyses "interrupted"; a source
   modulated by ±50% or more can trip the same test. Dark-rate drift within
@@ -268,7 +282,8 @@ reference implementation; `bindings/python` (PyO3, built with maturin) puts
 the Rust core behind the same functions as the optional package
 `dadl-quantum-core`. Both backends are held to the shared cases in
 `tests/vectors/core.json`, and `python bindings/python/bench.py` compares
-their throughput (about 50x for dead time, coincidences and histograms).
+their throughput (about 40-60x for dead time, coincidences and inter-arrival
+histograms; about 5x for the cross-correlation the calibrations use).
 
 ## Repository layout
 

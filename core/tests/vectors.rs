@@ -15,6 +15,7 @@ fn error_name(e: DadlError) -> &'static str {
         DadlError::NegativeDeadTime => "NegativeDeadTime",
         DadlError::NonPositiveWidth => "NonPositiveWidth",
         DadlError::Overflow => "Overflow",
+        DadlError::TooManyBins { .. } => "TooManyBins",
     }
 }
 

@@ -51,9 +51,20 @@ def calibrate_dcr_temperature(
     reference_k: float | None = None,
     seed: int | None = None,
     n_draws: int = N_DRAWS,
+    accept_misfit_inputs: bool = False,
 ) -> Calibration:
-    """Fit DCR_ref (at `reference_k`) and the activation energy from dark calibrations at several temperatures."""
+    """Fit DCR_ref (at `reference_k`) and the activation energy from dark calibrations at several temperatures.
+
+    Misfit dark calibrations are refused unless `accept_misfit_inputs` (applications review, cycle
+    6: two misfit cold runs pulled Ea to 0.280 [0.278, 0.282] for a true 0.30).
+    """
     darks = list(darks)
+    bad = [f"{d.conditions.get('temperature_K', '?')} K" for d in darks if d.status == "misfit"]
+    if bad and not accept_misfit_inputs:
+        raise ValueError(
+            f"the dark calibrations at {', '.join(bad)} are misfits; their dark rates are not reliable. "
+            "Pass accept_misfit_inputs=True to fit them anyway."
+        )
     if len(darks) < MIN_TEMPERATURES:
         raise ValueError(f"need dark calibrations at {MIN_TEMPERATURES} or more temperatures, got {len(darks)}")
     for d in darks:
@@ -69,7 +80,7 @@ def calibrate_dcr_temperature(
         raise ValueError("cannot mix simulated and hardware calibrations")
 
     bias_keys = sorted({k for d in darks for k in d.conditions if k.startswith("bias")})
-    current = [k for k in bias_keys if not k.endswith("_V")]
+    current = [k for k in bias_keys if not k.endswith(("_V", "_mV", "_kV"))]
     if current:
         # SNSPD specialist review: SNSPDs are current-biased and their dark counts are not
         # thermally activated; an Arrhenius fit gave Ea = 0.0007 eV with a tight interval.
@@ -114,6 +125,8 @@ def calibrate_dcr_temperature(
         "tunnelling) can dominate and an Arrhenius extrapolation can be several times off",
         "an effective activation energy at constant bias, for SPADs; not meaningful for SNSPDs",
     ]
+    if bad:
+        notes.append(f"misfit dark calibrations were accepted as inputs ({', '.join(bad)})")
     few = [d.conditions.get("gaps") for d in darks if d.conditions.get("gaps") is not None and d.conditions["gaps"] < 100]
     if few:
         notes.append(

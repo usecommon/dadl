@@ -69,13 +69,38 @@ class Window:
         }
 
 
+#: Gap quantile behind the dead-time estimate: high enough that a few percent of double triggers
+#: or duplicates do not set it.
+DEAD_TIME_QUANTILE = 0.05
+
+
+def _dead_time_estimate(gaps: np.ndarray) -> float:
+    """Dead time from the gap distribution: the q-quantile of tau + Exp(R) gaps is
+    tau - ln(1 - q) / R, so the exponential part is subtracted (the bare low quantile read about
+    0.01 / R at low counts and labelled every short run; audit, cycle 6)."""
+    if gaps.size < 20:
+        return 0.0
+    p = DEAD_TIME_QUANTILE
+    q = float(np.quantile(gaps, p))
+    excess = float(gaps.mean()) - q
+    if excess <= 0:
+        return q
+    rate = 1.0 / excess
+    estimate = q + math.log1p(-p) / rate
+    # A lower bound, 3 standard errors of the quantile below: the label then needs the dead time to
+    # be established, not a fluctuation of a short run's quantile (maximised over 16 channels).
+    se = math.sqrt(p * (1 - p) / gaps.size) / ((1 - p) * rate)
+    return max(0.0, estimate - 3.0 * se)
+
+
 def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
-    """Largest coincidence rate x dead time over the settings, the dead time read per channel as a
-    low gap quantile and the longest taken (the bare minimum let one duplicated tag remove the
-    label: red-team review, cycle 5; the minimum over channels missed mismatched dead times).
+    """Largest coincidence rate x dead time over the settings, each channel's dead time estimated
+    from its gap distribution and the longest taken (the bare minimum let one duplicated tag remove
+    the label: red-team review, cycle 5; the minimum over channels missed mismatched dead times).
+    The shift in |E| is about 0.05-0.08 eta^2 R tau (audit, cycle 6).
 
     Teaching-lab review, cycle 4: with a 1 us dead time at 3e6 pairs/s a V = 0.7 source (S = 1.98)
-    read S = 2.14 +- 0.004; the shift grows with eta^2 R tau (about 0.1 eta^2 R tau in |E|).
+    read S = 2.14 +- 0.004; the shift grows with eta^2 R tau (about 0.05-0.08 eta^2 R tau in |E|).
     """
     worst = 0.0
     for key, tags in runs.items():
@@ -85,7 +110,7 @@ def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
         # Each channel's dead time as a low gap quantile (robust to a few duplicates or double
         # triggers), and the longest of them: the bias comes from the slow channel, and a mismatch
         # between channels hid it when the minimum was used (point-process review, cycle 5).
-        tau = max(float(np.quantile(np.diff(a), 0.001 if a.size > 5000 else 0.01)) for a in arrays)
+        tau = max(_dead_time_estimate(np.diff(a)) for a in arrays)
         span = max(float(a[-1]) for a in arrays) - min(float(a[0]) for a in arrays)
         if span <= 0:
             continue
@@ -94,6 +119,17 @@ def dead_time_selection(runs: dict, coincidences: dict | None = None) -> float:
             continue
         worst = max(worst, n_c / span * tau)
     return worst
+
+
+def check_no_duplicates(runs: dict, channels: tuple[str, ...]) -> None:
+    """Refuse duplicate timestamps on one channel: a detector cannot click twice at once, and
+    duplicates can hide the dead-time-selection label (in the library, not only the CLI: audit,
+    cycle 6)."""
+    for key, tags in runs.items():
+        for ch in channels:
+            arr = np.asarray(tags.get(ch, ()))
+            if arr.size > 1 and np.any(np.diff(np.sort(arr)) == 0):
+                raise ValueError(f"{ch} in acquisition {key}: duplicate timestamps on one channel")
 
 
 def check_reference_channel(window: Window, channels: tuple[str, ...]) -> None:
@@ -170,6 +206,7 @@ def chsh(
     policy = policy or Policy.default()
     policy.check_window("chsh", window.source)
     check_reference_channel(window, CHANNELS)
+    check_no_duplicates(runs, CHANNELS)
     s = 0.0
     var = 0.0
     for key, sign in SIGNS.items():

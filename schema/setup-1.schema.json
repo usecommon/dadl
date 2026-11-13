@@ -71,7 +71,7 @@
         "efficiency": {"type": "number", "minimum": 0, "maximum": 1},
         "dark_rate_cps": {"type": "number", "minimum": 0},
         "dead_time_ps": {"type": "integer", "minimum": 0},
-        "jitter_sigma_ps": {"type": "number", "minimum": 0},
+        "jitter_sigma_ps": {"type": "number", "minimum": 0, "description": "Gaussian sigma of the timing jitter in ps. Datasheets usually quote the FWHM, which is 2.355 sigma."},
         "afterpulse_prob": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
         "afterpulse_tau_ps": {"type": "number", "minimum": 0},
         "delay_ps": {"type": "integer"}

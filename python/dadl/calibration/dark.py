@@ -78,9 +78,11 @@ F0_SAMPLES = 4000
 PPC_BINS = 20
 PS_PER_S = 1e12
 #: Afterpulse time constants the fit considers, in ps. Shorter afterpulses
-#: cannot be told apart from dead time; the upper end is also capped at a
-#: tenth of the mean gap, where afterpulses blur into the dark counts.
-TAU_SEARCH_PS = (1e3, 1e7)
+#: cannot be told apart from dead time; the upper end is a tenth of the mean gap,
+#: where afterpulses blur into the dark counts, and at most 1 ms. (A 10 us cap made
+#: free-running InGaAs/InP detectors, with time constants of tens of us, read "no
+#: afterpulsing detected" at a likelihood ratio of 2,400: applications review, cycle 6.)
+TAU_SEARCH_PS = (1e3, 1e9)
 #: Likelihood-ratio threshold for claiming afterpulsing: chi-square(2) at 99.9%.
 #: A stringent level, because the time constant is searched over a range.
 DETECTION_LR = 13.82
@@ -96,14 +98,20 @@ DEFINITIONS = {
 _MODEL = DarkAfterpulseModel()
 
 
-def _tau_bounds(s: np.ndarray) -> tuple[float, float]:
+#: Upper end of the time constants an upper limit on undetected afterpulsing covers (ps). Much
+#: slower afterpulses look like dark counts, and including them would weaken the limit for every
+#: detector; the note states the range.
+LIMIT_TAU_MAX_PS = 1e7
+
+
+def _tau_bounds(s: np.ndarray, cap: float = TAU_SEARCH_PS[1]) -> tuple[float, float]:
     """Afterpulse time constants the data can identify, in ps: from 1 ns to a tenth of the mean gap."""
-    return TAU_SEARCH_PS[0], min(TAU_SEARCH_PS[1], float(s.mean()) / 10)
+    return TAU_SEARCH_PS[0], min(cap, float(s.mean()) / 10)
 
 
-def _fit(s: np.ndarray, r0: float) -> optimize.OptimizeResult | None:
+def _fit(s: np.ndarray, r0: float, cap: float = TAU_SEARCH_PS[1]) -> optimize.OptimizeResult | None:
     """Multi-start bounded fit of the negative log-likelihood; None if no start is usable."""
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, cap)
     if hi_tau <= lo_tau:
         return None
 
@@ -183,9 +191,11 @@ PROFILE_TARGET = 3.841
 LOGIT_P_RANGE = (-15.0, 6.0)
 
 
-def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarray | None) -> float:
+def _profile(
+    s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarray | None, cap: float = TAU_SEARCH_PS[1]
+) -> float:
     """Smallest negative log-likelihood with coordinate `index` of theta fixed at `value`."""
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, cap)
     bounds = [(math.log(r0) - 5, math.log(r0) + 5), LOGIT_P_RANGE, (math.log(lo_tau), math.log(hi_tau))]
     free = [j for j in range(3) if j != index]
 
@@ -224,11 +234,12 @@ def _profile(s: np.ndarray, r0: float, index: int, value: float, warm: np.ndarra
 def _profile_interval(
     s: np.ndarray, r0: float, index: int, centre: float, nll_min: float, limits: tuple[float, float],
     warm: np.ndarray | None,
+    cap: float = TAU_SEARCH_PS[1],
 ) -> tuple[float, float]:
     """{v : 2 (profile(v) - nll_min) <= PROFILE_TARGET}, clipped to `limits` (in fit coordinates)."""
 
     def excess(v: float) -> float:
-        return 2.0 * (_profile(s, r0, index, v, warm) - nll_min) - PROFILE_TARGET
+        return 2.0 * (_profile(s, r0, index, v, warm, cap) - nll_min) - PROFILE_TARGET
 
     lo_lim, hi_lim = limits
     centre = min(max(centre, lo_lim), hi_lim)
@@ -329,7 +340,7 @@ def _p_upper_limit(s: np.ndarray, nll_null: float, log_r0: float) -> tuple[float
     constants in [tau_min, tau_max] ps.
     """
     target = PROFILE_TARGET
-    lo_tau, hi_tau = _tau_bounds(s)
+    lo_tau, hi_tau = _tau_bounds(s, LIMIT_TAU_MAX_PS)
     if hi_tau <= lo_tau:
         return 1.0, lo_tau, lo_tau
 
@@ -391,7 +402,7 @@ def calibrate_dark(
         )
     gaps = np.delete(gaps, order[:dropped])
     m = int(gaps.min())
-    if int(np.sum(gaps < 1.5 * m)) < 3:
+    if int(np.sum(gaps < 1.5 * m)) < 5:
         # Red-team review, cycle 5: at low dark rates one spurious double trigger a few ns under the
         # dead time sets the estimate (14 ns for 22 ns, interval excluding the truth); from dark
         # data alone it cannot be told from a shorter dead time.
@@ -413,11 +424,17 @@ def calibrate_dark(
     unidentified: tuple[str, ...] = ()
     stand_in: tuple[str, ...] = ()
     ess_condition: dict[str, float] = {}
+    edge_detected = False
     lr = 0.0 if res is None else 2.0 * (nll_null - float(res.fun))
     detected = res is not None and lr > DETECTION_LR
     if detected and res.at_bound:
-        notes.append("the afterpulse time constant fitted to the edge of its search range; treated as not identified")
+        notes.append(
+            f"afterpulsing is detected (likelihood ratio {lr:.0f}) but its time constant fitted to the edge of the "
+            "search range (a tenth of the mean gap): the single-exponential model cannot describe it here, and "
+            "the probability below is not a valid limit"
+        )
         detected = False
+        edge_detected = True
 
     laplace = None
     if detected:
@@ -434,10 +451,16 @@ def calibrate_dark(
     use_profile = n < PROFILE_BELOW or (
         res is not None and n * float(expit(res.x[1])) < PROFILE_BELOW_AFTERPULSES
     )
-    nll_min = min(nll_null, float(res.fun)) if res is not None else nll_null
-    p_centre = float(res.x[1]) if res is not None and res.fun <= nll_null else LOGIT_P_RANGE[0]
+    # Undetected afterpulsing is limited over time constants up to LIMIT_TAU_MAX_PS only: refit
+    # within that range so the profile has its own minimum.
+    ref = res if detected else _fit(s, r0, LIMIT_TAU_MAX_PS)
+    nll_min = min(nll_null, float(ref.fun)) if ref is not None else nll_null
+    p_centre = float(ref.x[1]) if ref is not None and ref.fun <= nll_null else LOGIT_P_RANGE[0]
     if use_profile or not detected:
-        p_lo, p_hi = _profile_interval(s, r0, 1, p_centre, nll_min, LOGIT_P_RANGE, res.x if res is not None else None)
+        p_lo, p_hi = _profile_interval(
+            s, r0, 1, p_centre, nll_min, LOGIT_P_RANGE, ref.x if ref is not None else None,
+            TAU_SEARCH_PS[1] if detected else LIMIT_TAU_MAX_PS,
+        )
         p_low = 0.0 if p_lo <= LOGIT_P_RANGE[0] else float(expit(p_lo))
 
     if detected and laplace is not None:
@@ -482,11 +505,12 @@ def calibrate_dark(
         est_ta = None
         unidentified = ("afterpulse_tau_ps",)
         stand_in = ("afterpulse_prob",)
-        notes.append(
-            f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
-            f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
-            f"from {t_lo:.3g} to {t_hi:.3g} ps"
-        )
+        if not edge_detected:
+            notes.append(
+                f"no afterpulsing detected (likelihood ratio {lr:.2f}); afterpulse_prob is reported with its 95% "
+                f"profile-likelihood interval, an upper limit when it starts at 0, for afterpulse time constants "
+                f"from {t_lo:.3g} to {t_hi:.3g} ps"
+            )
         notes.append(
             "the dark rate counts every avalanche past the dead time, so undetected afterpulses (at most the "
             "upper limit on afterpulse_prob, as a fraction) are included in it"

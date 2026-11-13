@@ -9,7 +9,7 @@ version = "0.0.3"
 description = "Python bindings to the DADL core (dadl-quantum-core)"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.74"
+rust-version = "1.85"  # pyo3 0.30 and numpy 0.30 need 1.85; the core itself builds on 1.74
 repository = "https://github.com/usecommon/dadl"
 publish = false
 
