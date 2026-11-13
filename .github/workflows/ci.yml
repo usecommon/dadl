@@ -18,7 +18,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - name: Install the pinned toolchain (rust-toolchain.toml)
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.74 --profile minimal
@@ -51,7 +51,7 @@ jobs:
         python: ["3.10", "3.12"]
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
@@ -91,7 +91,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
@@ -129,7 +129,7 @@ jobs:
           - {os: windows-latest, target: x64, manylinux: "off"}
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
@@ -155,7 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
@@ -191,7 +191,7 @@ jobs:
           - {name: pairs 3, args: "pairs --regimes broad-irf ideal-accidentals"}
     steps:
       # actions/checkout v4.2.2, pinned by commit SHA
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
