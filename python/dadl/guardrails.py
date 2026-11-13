@@ -34,6 +34,11 @@ GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
 NEAR_THRESHOLD_EXACT = "the exact 95% interval contains the threshold"
 LOW_COUNTS = "low counts: the Gaussian error is unreliable; use the exact interval"
 UNVALIDATED_ANALYSIS = "unvalidated analysis"
+SINGLE_BASIS = (
+    "single-basis fringe: V > 1/sqrt(2) implies S > 2 only for a Werner state with this visibility in two "
+    "mutually unbiased bases"
+)
+WINDOW_UNDECLARED = "coincidence window not given: the counts are trusted as given"
 CORRECTION_NOT_COMPUTED = (
     "corrected value not computed: the accidentals exceed the minimum count; report the raw value and its "
     "exact interval"
@@ -215,6 +220,12 @@ class Policy:
         return rules
 
 
+def _mirror(est: Estimate) -> Estimate:
+    low = None if est.high is None else -est.high
+    high = None if est.low is None else -est.low
+    return Estimate(-est.value, est.stderr, low, high)
+
+
 def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = None) -> tuple[str, ...]:
     """Labels that qualify a value against the analysis's physical threshold.
 
@@ -225,6 +236,11 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
       of exactly +-1 or n_min = 0), where the Gaussian interval means nothing.
     """
     labels: list[str] = []
+    if analysis == "chsh" and raw.value < 0:
+        # |S| > 2 violates the inequality whatever the sign convention (Bell review, cycle 2:
+        # S = -2.01 +- 0.02 carried no label).
+        raw = _mirror(raw)
+        corrected = None if corrected is None else _mirror(corrected)
     if raw.stderr == 0 or (corrected is not None and corrected.stderr == 0):
         labels.append(GAUSSIAN_INVALID)
     threshold = THRESHOLDS.get(analysis)

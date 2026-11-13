@@ -339,7 +339,7 @@ Artifacts are immutable and content-addressed; signing is planned (see "Signing"
 ### Minimum metadata for reproducibility
 
 - Detector serial, type, bias/overvoltage, temperature.
-- Time-tagger model, firmware, trigger levels, input delays, dead-time filter settings.
+- Time-tagger model, firmware, trigger levels, input delays, dead-time filter settings. (Phase 2: numeric PTU header settings are recorded in calibration `conditions` as `tagger_*`; they are not yet compared at analysis time.)
 - Coincidence window and how it was chosen (pre-registered).
 - Calibration artifact IDs, the connector-event log.
 - Software versions, including the tomography library version.

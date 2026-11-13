@@ -69,3 +69,12 @@ def test_setup_schema_rejects_bad_setups(patch):
     data.update(patch)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(data, load(SETUP_SCHEMA))
+
+
+def test_packaged_schemas_match_the_repository_copies():
+    # Software review, cycle 2: the schemas ship in the wheel so artifacts can be validated offline.
+    from importlib import resources
+
+    for name in ("calibration-1.schema.json", "setup-1.schema.json"):
+        packaged = resources.files("dadl").joinpath("schemas", name).read_bytes()
+        assert packaged == (ROOT / "schema" / name).read_bytes()

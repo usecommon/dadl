@@ -19,17 +19,35 @@ or `accidentals_stderr` if you know it better (e.g. from many off-peak bins).
 
 from __future__ import annotations
 
+import dataclasses
 import math
+from typing import TYPE_CHECKING
 
 from dadl import _checks
 from dadl.stats import clopper_pearson
-from dadl.guardrails import CORRECTION_NOT_COMPUTED, LOW_COUNTS, Policy, threshold_labels
+from dadl.guardrails import (
+    CORRECTION_NOT_COMPUTED,
+    LOW_COUNTS,
+    SINGLE_BASIS,
+    WINDOW_UNDECLARED,
+    Policy,
+    threshold_labels,
+)
 from dadl.result import Estimate, LabelledValue
+
+if TYPE_CHECKING:
+    from dadl.analysis.chsh import Window
 
 
 def _counts(n_max: float, n_min: float) -> tuple[float, float]:
     n_max = _checks.finite(n_max, "n_max", minimum=0.0)
     n_min = _checks.finite(n_min, "n_min", minimum=0.0)
+    if n_max != round(n_max) or n_min != round(n_min):
+        # Bell review, cycle 2: rates or averaged counts mis-scale the Poisson errors and the
+        # exact interval silently rounded them.
+        raise ValueError("counts must be whole numbers of coincidences (not rates or averages)")
+    if max(n_max, n_min) > 2**53:
+        raise ValueError("counts above 2^53 cannot be represented exactly")
     if n_max + n_min <= 0:
         raise ValueError("counts must not both be zero")
     # n_min > n_max is allowed: a fringe near zero visibility or a HOM peak gives V < 0, and
@@ -126,8 +144,13 @@ def bell_visibility(
     accidentals: float | None = None,
     accidentals_stderr: float | None = None,
     policy: Policy | None = None,
+    window: "Window | None" = None,
 ) -> LabelledValue:
     """Raw fringe visibility for a Bell-type claim.
+
+    Always labelled with the fair-sampling and single-basis caveats (Bell review, cycle 2: a
+    threshold crossing was reported with no label). Pass the coincidence `window`: it is checked
+    against the policy (a planned window only) and recorded; without one, the result says so.
 
     Passing `accidentals` raises GuardrailRefusal under the default policy. Only
     a policy loosened with `Policy.allow(..., reason=...)` returns a corrected
@@ -152,7 +175,17 @@ def bell_visibility(
         else:
             corrected = fringe_visibility_corrected(n_max, n_min, a, var_a)
         min_count = n_min - a
-    return _finish("bell_visibility", raw, corrected, policy, min_count, not_computed)
+    result = _finish("bell_visibility", raw, corrected, policy, min_count, not_computed)
+    from dadl.analysis.chsh import FAIR_SAMPLING
+
+    extra = (FAIR_SAMPLING, SINGLE_BASIS)
+    if window is None:
+        extra += (WINDOW_UNDECLARED,)
+    else:
+        policy.check_window("bell_visibility", window.source)
+    return dataclasses.replace(
+        result, labels=extra + result.labels, window=None if window is None else window.as_record()
+    )
 
 
 def hom_visibility(

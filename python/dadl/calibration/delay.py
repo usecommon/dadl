@@ -22,10 +22,18 @@ MultiHarp 160, 80 ps for a MultiHarp 150 N, 25 ps for a TimeHarp 260 P). The
 tick is passed by the caller when the adapter knows it (`tick_ps`); otherwise
 it is found from the data (the greatest common divisor of the tags, which a
 non-tick offset between channels would spoil). The bin width is rounded up to a whole
-number of ticks, and each bin [e, e + w) is modelled as the continuous delays
-from e - tick/2 to e + w - tick/2. The tick's quantization noise (variance
-tick^2 / 6 for two channels) is part of the fitted jitter, as it is part of
-the timing response.
+number of ticks. Each channel's time is quantized to the tick with a phase
+uniform over the tick, so the difference of two quantized times lands on tick
+k with probability E[max(0, 1 - |D / tick - k|)]: the Gaussian peak
+convolved with a triangle two ticks wide (method v5). The peak's share of a
+bin [e, e + w) is then exact:
+
+    (sigma / tick) [G(z_hi) - G(z_hi - tick / sigma) - G(z_lo) + G(z_lo - tick / sigma)],
+
+with G(z) = z Phi(z) + phi(z) and z = (edge - d) / sigma, so sigma is the
+physical jitter, without the tick's quantization noise. (v1-v4 used a box one
+tick wide: with an 80 ps tick and 21 ps jitter the delay read up to 1.3 ps off
+and covered 0-12%, with the check passing; tagger engineer review, cycle 2.)
 
 The predictive check is a Pearson chi-square on the fit window, with
 adjacent bins merged until each expects at least 5 counts.
@@ -48,7 +56,7 @@ from scipy import special
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check, draws_rng
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.histogram import cross_correlation
@@ -56,7 +64,7 @@ from dadl.stats import Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "4"
+METHOD_VERSION = "5"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -68,13 +76,16 @@ UNITS = {"delay_ps": "ps", "jitter_sigma_ps": "ps"}
 _SQRT2PI = math.sqrt(2 * math.pi)
 
 
-def _edges(n_bins: int, bin_width_ps: int, range_ps: int, tick_ps: int = 1) -> np.ndarray:
-    """Model bin edges. Delays are whole ticks, so the bin [e, e + w) holds the delays e, e + tick, ...,
-    which a continuous delay fills from e - tick/2 to e + w - tick/2. (Ignoring this biased v1 by
-    +0.5 ps, and v2 by +2 ps on 5 ps MultiHarp ticks.)"""
+def _edges(n_bins: int, bin_width_ps: int, range_ps: int) -> np.ndarray:
+    """Bin edges: bin [e, e + w) holds the measured delays e, e + tick, ..., e + w - tick."""
     e = -range_ps + bin_width_ps * np.arange(n_bins + 1, dtype=float)
     e[-1] = min(e[-1], float(range_ps))
-    return e - tick_ps / 2
+    return e
+
+
+def _g(z: np.ndarray) -> np.ndarray:
+    """G(z) = z Phi(z) + phi(z), the antiderivative of the normal CDF."""
+    return z * special.ndtr(z) + np.exp(-0.5 * z * z) / _SQRT2PI
 
 
 class _PeakModel:
@@ -87,11 +98,12 @@ class _PeakModel:
     theta = (log background left, log peak area, delay, log sigma, log background right).
     """
 
-    def __init__(self, counts: np.ndarray, edges: np.ndarray) -> None:
+    def __init__(self, counts: np.ndarray, edges: np.ndarray, tick: float = 1.0) -> None:
         self.n = counts.astype(float)
         self.lo = edges[:-1]
         self.hi = edges[1:]
         self.w = self.hi - self.lo
+        self.tick = float(tick)
 
     def _parts(self, theta: np.ndarray):
         log_bl, log_a, d, log_s, log_br = (float(v) for v in theta)
@@ -99,7 +111,8 @@ class _PeakModel:
         log_s = min(max(log_s, -50.0), 700.0)
         s = math.exp(log_s)
         z_hi, z_lo = (self.hi - d) / s, (self.lo - d) / s
-        g = special.ndtr(z_hi) - special.ndtr(z_lo)
+        t = self.tick / s
+        g = (s / self.tick) * (_g(z_hi) - _g(z_hi - t) - _g(z_lo) + _g(z_lo - t))
         right = np.clip(self.hi - d, 0.0, self.w)
         left = self.w - right
         bl, br = math.exp(log_bl), math.exp(log_br)
@@ -120,11 +133,17 @@ class _PeakModel:
         s, z_hi, z_lo, bg_l, bg_r, peak, mu, straddle, bl, br = self._parts(theta)
         r = 1.0 - self.n / mu
         a = math.exp(theta[1])
-        phi_hi = np.exp(-0.5 * z_hi**2) / _SQRT2PI
-        phi_lo = np.exp(-0.5 * z_lo**2) / _SQRT2PI
+        t = self.tick / s
+
+        def phi(z: np.ndarray) -> np.ndarray:
+            return np.exp(-0.5 * z * z) / _SQRT2PI
+
+        cdf = special.ndtr
+        second = cdf(z_hi) - cdf(z_hi - t) - cdf(z_lo) + cdf(z_lo - t)
+        dens = phi(z_hi) - phi(z_hi - t) - phi(z_lo) + phi(z_lo - t)
         # Moving d right moves bin width from the right level to the left one where d falls in a bin.
-        d_d = -a * (phi_hi - phi_lo) / s + np.where(straddle, bl - br, 0.0)
-        d_logs = -a * (z_hi * phi_hi - z_lo * phi_lo)
+        d_d = -a * second / self.tick + np.where(straddle, bl - br, 0.0)
+        d_logs = a * (s / self.tick) * dens
         return np.array([np.sum(r * bg_l), np.sum(r * peak), np.sum(r * d_d), np.sum(r * d_logs), np.sum(r * bg_r)])
 
 
@@ -212,7 +231,7 @@ def calibrate_delay(
     if range_ps % tick:
         range_ps = -(-range_ps // tick) * tick
     hist = cross_correlation(a, b, bin_width_ps, range_ps)
-    edges = _edges(hist.size, bin_width_ps, range_ps, tick)
+    edges = _edges(hist.size, bin_width_ps, range_ps)
     counts = hist.astype(float)
     background = float(np.median(counts))
     excess = counts - background
@@ -240,7 +259,7 @@ def calibrate_delay(
     half = max(WINDOW_SIGMAS * s0, 50 * bin_width_ps)
     sel = (edges[1:] > d0 - half) & (edges[:-1] < d0 + half)
     idx = np.flatnonzero(sel)
-    model = _PeakModel(counts[idx], edges[idx[0] : idx[-1] + 2])
+    model = _PeakModel(counts[idx], edges[idx[0] : idx[-1] + 2], tick)
     widths = model.w
     b0 = max(background / bin_width_ps, 0.5 / float(widths.sum()))
     a0 = max(float(np.sum(counts[idx] - b0 * widths)), 1.0)
@@ -290,11 +309,11 @@ def calibrate_delay(
         notes.append(f"the fitted jitter ({sigma:.3g} ps) is below the bin width; use narrower bins")
     if tick > sigma / 2:
         notes.append(
-            f"the {tick} ps tick is coarse against the {sigma:.3g} ps jitter: the Gaussian model ignores the tick's "
-            "quantization shape, so the predictive check may fail and the jitter read low"
+            f"the {tick} ps tick is coarse against the {sigma:.3g} ps jitter: the fit models the tick's "
+            "quantization exactly, assuming each channel's phase within the tick is uniform"
         )
 
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, a, b)
     draws = laplace.draws(rng, n_draws)
     estimates = {
         "delay_ps": laplace.interval(2, lambda x: x),

@@ -39,7 +39,7 @@ import numpy as np
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check, draws_rng
 from dadl.coincidences import occupied_slots
 from dadl.data import ChannelId, tags_sha256
 from dadl.histogram import cross_correlation
@@ -189,7 +189,7 @@ def calibrate_accidentals(
     offsets = side_offsets(width_ps, rep_period_ps=rep_period_ps, n_side=n_side, guard_ps=guard)
     counts = shifted_coincidences(a, b, width_ps, delay_a_ps, delay_b_ps, offsets)
     total, m = int(counts.sum()), counts.size
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, a, b)
     est, draws = gamma_posterior(total, side_exposure(offsets, a, b), rng, n_draws)
     notes = [
         f"{total} coincidences in {m} shifted windows ({'pulsed' if rep_period_ps else 'CW'} offsets) "

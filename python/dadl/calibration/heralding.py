@@ -54,7 +54,7 @@ from dadl.calibration.accidentals import (
     side_exposure,
     side_offsets,
 )
-from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check
+from dadl.calibration.base import N_DRAWS, Calibration, with_interruption_check, draws_rng
 from dadl.coincidences import grid_coincidences, occupied_slots
 from dadl.data import ChannelId, tags_sha256
 from dadl.errors import InsufficientCounts
@@ -141,7 +141,7 @@ def calibrate_heralding(
 
     lo, hi = _interval(c, s, _p_nodes(side_total, exposure, s))
     value = min(max((c / s - p_hat) / (1 - p_hat), 0.0), 1.0)
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, herald, signal)
     p_draws = np.minimum(rng.gamma(side_total + 0.5, 1.0 / exposure, n_draws) / s, 0.999)
     q_draws = rng.beta(c + 0.5, s - c + 0.5, n_draws)
     draws = np.clip((q_draws - p_draws) / (1 - p_draws), 0.0, 1.0)

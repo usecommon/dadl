@@ -28,7 +28,7 @@ from collections.abc import Sequence
 import numpy as np
 from scipy import stats as _st
 
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import N_DRAWS, Calibration, draws_rng
 from dadl.calibration.dark import KIND as DARK_KIND
 from dadl.closed_form import K_B_EV
 from dadl.stats import LEVEL, Laplace
@@ -116,7 +116,7 @@ def calibrate_dcr_temperature(
             f"{len(few)} input(s) had fewer than 100 dark gaps: near the 20-gap minimum, runs that pass are biased "
             "upward (and re-acquiring until one passes biases more); prefer longer cold acquisitions"
         )
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, *(sha for d in darks for sha, _ in d.inputs))
     draws = laplace.draws(rng, n_draws)
     inputs = tuple(dict.fromkeys(i for d in darks for i in d.inputs))
     return Calibration(

@@ -19,6 +19,24 @@ N_DRAWS = 2000
 MISFIT_ALPHA = 0.001
 
 
+def draws_rng(seed: int | None, *inputs: object) -> np.random.Generator:
+    """The generator for posterior draws: `seed`, or one derived from the inputs when it is None.
+
+    Software review, cycle 2: with seed=None the same data gave a different artifact ID on every
+    run. Deriving the seed from the input hashes makes a calibration a function of its data.
+    """
+    if seed is None:
+        import hashlib
+
+        from dadl.data import tags_sha256
+
+        h = hashlib.sha256()
+        for x in inputs:
+            h.update((tags_sha256(x) if isinstance(x, np.ndarray) else repr(x)).encode())
+        seed = int.from_bytes(h.digest()[:8], "little")
+    return np.random.default_rng(seed)
+
+
 def with_interruption_check(ppc: float, notes: list[str], *streams: np.ndarray) -> float:
     """Combine a model check with the per-channel interruption test (smaller p doubled).
 

@@ -54,7 +54,7 @@ from scipy import optimize
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration
+from dadl.calibration.base import N_DRAWS, Calibration, draws_rng
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
 from dadl.models import DarkAfterpulseModel
@@ -346,7 +346,7 @@ def calibrate_dark(
     gaps = np.diff(tags)
     if gaps.size < MIN_GAPS:
         raise InsufficientCounts(f"need at least {MIN_GAPS} gaps between dark counts, got {gaps.size}")
-    rng = np.random.default_rng(seed)
+    rng = draws_rng(seed, tags)
 
     notes: list[str] = []
     order = np.argsort(gaps, kind="stable")

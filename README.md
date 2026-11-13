@@ -87,8 +87,8 @@ limits, stated plainly:
   loopholes.
 - **Coverage gates** run 1,000 simulated replicates per calibration at a few
   regimes and catch gross failures (coverage below about 93%), not small ones.
-- **Gaussian timing response.** The delay fit models a Gaussian IRF plus a
-  flat background. A detector with an exponential timing tail (most SNSPDs,
+- **Gaussian timing response.** The delay fit models a Gaussian IRF (with the
+  tagger tick's quantization modelled exactly) on a two-level background. A detector with an exponential timing tail (most SNSPDs,
   many SPADs) is marked `misfit` and the delay artifact refused; the other
   pair calibrations are checked on their own.
 - **SNSPDs.** `family` is a label only. Recovery, timing tails, bias-current
@@ -106,6 +106,18 @@ limits, stated plainly:
 - **Corrected visibility** is refused when the accidentals exceed the minimum
   count (or the corrected value would exceed 1), which removes the datasets
   nearest V = 1; report the raw value with its exact interval there.
+- **Whole-file PTU reading.** A PTU file is decoded in memory at about 100
+  bytes per record (215 with many markers): a 4 GB file needs about 100 GB.
+  Chunked reading is planned. Unrecognised special records and a divided sync
+  input mapped as a detector are refused.
+- **Tagger settings** (input offsets, trigger levels, dead-time settings, the
+  tick) are recorded in each calibration's `conditions` from PTU headers;
+  they are not yet compared when the calibration is used.
+- **Double clicks** in CHSH (both outputs of one side in a slot) count in two
+  outcome combinations, which pulls E toward 0.
+- **Reproducibility.** The same tags, setup and code give the same artifact
+  ID when `created` is fixed (set `SOURCE_DATE_EPOCH`); posterior draws are
+  seeded from the setup's `seed`, or from the input hashes without one.
 - A failed predictive check marks the calibration `misfit`; the CLI refuses to
   write it unless `--accept-misfit` is given.
 
@@ -175,7 +187,7 @@ import dadl
 setup = dadl.load_setup("my-experiment/setup.yaml")
 runs = dadl.read_tags("tags.npz", setup.channels)   # or build the dict yourself:
 # runs[("a", "b")] = {"A+": np.int64 array of ps, "A-": ..., "B+": ..., "B-": ...}
-result = dadl.chsh(runs, dadl.Window(width_ps=2000, source="plan"))
+result = dadl.chsh(runs, setup.window, settings_deg=setup.settings_deg)  # the planned window and delays
 print(result)               # raw S, labels
 print(result.as_record())   # flat record with labels, policy fingerprint, window
 
@@ -200,9 +212,12 @@ hardware:
 ```
 
 The fixed coincidence grid starts at t = 0 of the tag file: slot k holds
-times from k·W to (k + 1)·W after adding the declared delay. Shifting all tags
-(for example re-exporting from the first tag) moves pairs across slot edges
-and changes S within its statistical error; keep the export that was planned.
+times t with k·W ≤ t − delay < (k + 1)·W, and the record says so
+(`grid_origin_ps`). One channel must have delay 0, so a common offset cannot
+move the grid. Shifting all tags (for example re-exporting from the first
+tag) still moves pairs across slot edges: each shift changes S within its
+statistical error, but choosing the best of ten shifts doubles the chance of
+a spurious S > 2 + 1.96σ. Keep the export that was planned.
 
 ## Developing DADL
 

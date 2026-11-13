@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import shutil
 import sys
 from importlib import resources
@@ -22,12 +23,13 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.closed_form import chsh_expected_grid, hom_visibility_expected
+from dadl.guardrails import POLICY_MODIFIED
+from dadl.closed_form import chsh_expected_grid, chsh_ideal, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
-from dadl.tagfile import read_tags, tag_tick_ps, tags_are_simulated, write_ptu_dir, write_tags
+from dadl.tagfile import read_tags, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -51,11 +53,15 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     print(f"  Labels: {'; '.join(result.labels) or 'none'}")
     if result.analysis == "chsh" and result.counts:
-        ratios = ", ".join(f"{k} {v['coincidences_per_singles']:.3f}" for k, v in result.counts.items())
+        ratios = ", ".join(
+            f"{k} {v['coincidences_per_singles']:.3f}"
+            for k, v in result.counts.items()
+            if isinstance(v, dict) and "coincidences_per_singles" in v
+        )
         print(f"  Coincidences per singles (what post-selection kept): {ratios}")
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
-    print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides else ' (default)'}")
+    print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
 
 
 def _quickstart_hom(path: Path, setup: Setup) -> int:
@@ -100,7 +106,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     if setup.analysis_type == "hom":
         return _quickstart_hom(path, setup)
     runs = _simulate(setup)
-    result = chsh(runs, setup.window)
+    result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
     det = setup.detectors["A+"]
     same = all(d == det for d in setup.detectors.values())
     print(f"DADL {__version__} quickstart: {setup.name} (simulated data, seed {setup.seed})")
@@ -114,6 +120,13 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
         f"dead time {det.dead_time_ps / 1000:g} ns, jitter {det.jitter_sigma_ps:.0f} ps, "
         f"afterpulsing {det.afterpulse_prob:.1%}"
     )
+    ideal = chsh_ideal(1.0, setup.settings_deg)
+    if ideal < 2.0:
+        print(
+            f"  warning: with the fixed signs S = E(a,b) - E(a,b') + E(a',b) + E(a',b'), the declared angles give at "
+            f"most S = {ideal:.3f} for a perfect Phi+ state (2.828 is optimal). Relabelling runs after looking at "
+            "the data is a choice outside the plan; set settings_deg to match the sign convention instead."
+        )
     print()
     _print_result(result)
     if same:
@@ -125,6 +138,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
             jitter_sigma_ps=det.jitter_sigma_ps,
             width_ps=setup.window.width_ps,
             visibility=setup.source.visibility,
+            settings_deg=setup.settings_deg,
         )
         print(f"  Closed-form expectation (ignores dead time and afterpulsing): S = {expected:.4f}")
     print()
@@ -265,7 +279,9 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     _refuse_source_on(tags, setup)
     print(f"DADL {__version__} calibrate dark: {setup.name}, tags from {args.tags} (setting {args.setting})")
     for name in wanted:
-        cal = calibrate_dark(tags[name], setup.channel_id(name), backend=backend, seed=setup.seed)
+        cal = calibrate_dark(
+            tags[name], setup.channel_id(name), backend=backend, seed=setup.seed, conditions=tagger_settings(args.tags)
+        )
         print()
         print(cal)
         declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
@@ -326,6 +342,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
         "rate_herald_cps": a.size / span_s if span_s else 0.0,
         "rate_signal_cps": b.size / span_s if span_s else 0.0,
         "analysers_in_path": 0.0,
+        **tagger_settings(args.tags),
     }
     common = {"backend": backend, "seed": setup.seed, "conditions": run_conditions}
     print(f"DADL {__version__} calibrate pairs: {setup.name}, {args.herald} -> {args.signal}, tags from {args.tags}")
@@ -342,9 +359,25 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     # Each artifact is checked and refused on its own: a timing tail that makes the delay fit a
     # misfit says nothing about the accidentals or the heralding ratio (SNSPD specialist review).
     refused = []
+    fitted = cals[0].estimates["delay_ps"].value
+    off_by = fitted - (d_b - d_a)
+    misplaced = abs(off_by) > window.width_ps / 4
+    if misplaced:
+        # Software review, cycle 2: a delay declared 15 ns off wrote heralding_efficiency 0 with
+        # status ok. The heralding ratio needs the pairs in the declared slot.
+        note = (
+            f"the declared delay differs from the fitted one by {off_by:.0f} ps (more than a quarter window): "
+            "true pairs are not in the declared slot"
+        )
+        cals[1] = dataclasses.replace(cals[1], notes=(*cals[1].notes, note))
+        cals[2] = dataclasses.replace(cals[2], notes=(*cals[2].notes, note))
     for cal in cals:
         print()
         print(cal)
+        if misplaced and cal is cals[2] and not args.accept_misfit:
+            refused.append(cal.kind)
+            print("  not written: the declared delay does not put pairs in the declared slot; declare the fitted delay")
+            continue
         try:
             path = _write_checked(cal, args.out, args.accept_misfit)
         except DadlError as exc:
@@ -352,8 +385,7 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             print(f"  not written: {exc}")
         else:
             print(f"  artifact: {path}")
-    fitted = cals[0].estimates["delay_ps"].value
-    if abs(fitted - (d_b - d_a)) > window.width_ps / 4:
+    if misplaced:
         print()
         print(
             f"  The fitted delay ({fitted:.0f} ps) differs from the declared one ({d_b - d_a} ps) by more than a "
@@ -362,12 +394,15 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     capture = _grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps)
     eta = cals[2].estimates["heralding_efficiency"].value
     print()
-    print(
-        f"  Window capture: about {capture:.3f} of true pairs fall in the same {window.width_ps} ps slot, from the "
-        f"fitted jitter and delay offset. heralding_efficiency / capture = {eta / capture:.3f}, a figure closer to a "
-        "sliding-window or Klyshko efficiency (an estimate, not recorded in the artifact; dead-time losses "
-        "are still included)."
-    )
+    if capture > 0.01:
+        print(
+            f"  Window capture: about {capture:.3f} of true pairs fall in the same {window.width_ps} ps slot, from the "
+            f"fitted jitter and delay offset. heralding_efficiency / capture = {eta / capture:.3f}, a figure closer to "
+            "a sliding-window or Klyshko efficiency (an estimate, not recorded in the artifact; dead-time losses "
+            "are still included)."
+        )
+    else:
+        print(f"  Window capture: {capture:.3g}; the declared window and delays miss the pair peak.")
     if refused:
         raise DadlError(f"{len(refused)} of {len(cals)} artifacts not written (misfit): {', '.join(refused)}")
     return 0
@@ -390,7 +425,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         if result.corrected is not None:
             print(f"  Accidentals subtracted ({counts['accidentals']:.3g}, off-peak): V = {result.corrected}")
         return 0
-    result = chsh(runs, setup.window)
+    result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
     print("  Phase 1 trusts the tags as given and reports raw S only.")
     print()
     _print_result(result)
@@ -502,7 +537,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
-    except DadlError as exc:
+    except (DadlError, ValueError, OverflowError) as exc:
+        # Library input errors (ValueError, OverflowError) reach CLI users as a message, not a
+        # traceback (software review, cycle 2).
         print(f"dadl: error: {exc}", file=sys.stderr)
         return 1
 

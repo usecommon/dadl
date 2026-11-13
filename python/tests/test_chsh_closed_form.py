@@ -45,7 +45,7 @@ def test_negligible_accidentals_gives_werner_value():
     assert expected == pytest.approx(chsh_werner(0.95), rel=0.01)
     assert result.raw.value == pytest.approx(expected, abs=5 * result.raw.stderr + 0.01)
     assert FAIR_SAMPLING in result.labels
-    assert result.window == {"width_ps": 10_000, "delays_ps": {}, "source": "plan"}
+    assert result.window == {"width_ps": 10_000, "delays_ps": {}, "source": "plan", "grid_origin_ps": 0}
 
 
 def test_accidentals_reduce_s_as_predicted():

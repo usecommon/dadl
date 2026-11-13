@@ -53,7 +53,9 @@ def check_span(times: np.ndarray, name: str = "times") -> None:
 
 def integer(value: object, name: str, *, minimum: int | None = None) -> int:
     """An exact integer (not bool, not a float with a fractional part)."""
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, got {value!r}")
+    if not isinstance(value, numbers.Integral):
         if isinstance(value, numbers.Real) and math.isfinite(float(value)) and float(value).is_integer():
             value = int(value)
         else:

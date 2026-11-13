@@ -91,8 +91,13 @@ def chsh_expected_grid(
     jitter_sigma_ps: float,
     width_ps: float,
     visibility: float,
+    settings_deg: dict[str, float] | None = None,
 ) -> float:
     """Expected raw S for the simulator with identical detectors, no dead time or afterpulsing.
+
+    With `settings_deg` the ideal S is sum of sign x V cos 2(alpha - beta) over the four setting
+    pairs (the simulator's Phi+ correlator); without it, the optimal 2 sqrt(2) V. (Bell review,
+    cycle 2: other angles printed an expectation of 2.69 beside a measured S of 0.01.)
 
     True coincidences per setting: C = N T eta^2 P_capture (summed over the four
     outcome combinations). Accidentals per combination: r^2 w T with singles
@@ -102,7 +107,18 @@ def chsh_expected_grid(
     c = pair_rate_per_s * duration_s * efficiency**2 * grid_capture_probability(jitter_sigma_ps, width_ps)
     r = pair_rate_per_s * efficiency / 2.0 + dark_rate_cps
     a = 4.0 * r * r * (width_ps * 1e-12) * duration_s
-    return chsh_with_accidentals(visibility, c, a)
+    if settings_deg is None:
+        return chsh_with_accidentals(visibility, c, a)
+    return chsh_ideal(visibility, settings_deg) * c / (c + a)
+
+
+def chsh_ideal(visibility: float, settings_deg: dict[str, float]) -> float:
+    """S = sum of sign x V cos 2(alpha - beta) with the fixed signs of `dadl.analysis.chsh.SIGNS`."""
+    from dadl.analysis.chsh import SIGNS
+
+    return sum(
+        sign * visibility * math.cos(2.0 * math.radians(settings_deg[a] - settings_deg[b])) for (a, b), sign in SIGNS.items()
+    )
 
 
 #: Boltzmann constant in eV/K.

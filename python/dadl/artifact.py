@@ -140,8 +140,28 @@ def build_manifest(
     valid_until: _dt.datetime | None = None,
     supersedes: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
-    """Manifest and posterior bytes for a calibration. `created` defaults to now (UTC)."""
-    created = created or _dt.datetime.now(_dt.timezone.utc)
+    """Manifest and posterior bytes for a calibration.
+
+    `created` defaults to $SOURCE_DATE_EPOCH when set (reproducible builds), else now (UTC). With a
+    fixed `created` the same data and code give the same artifact ID: seeds default to a hash of
+    the inputs.
+    """
+    if created is None:
+        epoch = os.environ.get("SOURCE_DATE_EPOCH")
+        if epoch:
+            try:
+                created = _dt.datetime.fromtimestamp(int(epoch), _dt.timezone.utc)
+            except ValueError as exc:
+                raise ArtifactError(f"SOURCE_DATE_EPOCH must be an integer, got {epoch!r}") from exc
+        else:
+            created = _dt.datetime.now(_dt.timezone.utc)
+    if cal.samples.ndim != 2 or cal.samples.shape[0] < 1:
+        raise ArtifactError("an artifact needs at least one posterior draw")
+    bad = sorted(k for k, v in cal.conditions.items() if isinstance(v, bool) or not isinstance(v, (int, float)))
+    if bad:
+        raise ArtifactError(f"conditions must be numbers (schema calibration/1); not numeric: {bad}")
+    if valid_until is not None and valid_until < created:
+        raise ArtifactError("valid_until is earlier than created")
     post = posterior_bytes(cal.samples)
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
@@ -220,11 +240,27 @@ def write_artifact(cal: Calibration, directory: str | Path, **kwargs: Any) -> Pa
     return mpath
 
 
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
+def _jcs_int(text: str) -> int | float:
+    """JCS writes whole doubles of 2^53 and above as integer literals; read them back as floats."""
+    value = int(text)
+    return value if abs(value) <= 2**53 else float(value)
+
+
 def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
     """Read and verify an artifact manifest and its posterior table."""
     path = Path(path)
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates, parse_int=_jcs_int)
     except (OSError, ValueError) as exc:
         raise ArtifactError(f"cannot read artifact {path}: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
@@ -235,6 +271,11 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
     aid = artifact_id(manifest)
     if path.name != f"{aid}.json":
         raise ArtifactError(f"{path}: content hash {aid} does not match the file name")
+    # The ID is the hash of the file's bytes, so the bytes must be the canonical form itself: a
+    # re-indented file, or one with a duplicate key that parsers resolve differently, is refused
+    # (software review, cycle 2).
+    if raw != canonical_json(manifest):
+        raise ArtifactError(f"{path}: the file is not in canonical (RFC 8785) form")
     ppath = path.with_name(f"{aid}.posterior.npy")
     try:
         post = ppath.read_bytes()

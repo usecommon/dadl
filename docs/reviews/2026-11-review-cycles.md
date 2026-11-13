@@ -37,3 +37,29 @@ evidence or a stated limit), **minor** (documentation, polish).
 | 1.19 | Questionable | PicoHarp 300 router channel 4 refused | Fixed: channels 0–4, as in PicoQuant's demo code |
 | 1.20 | Minor | HydraHarp numbering (sync = 0) undocumented; unhelpful error | Documented; error message explains |
 | 1.21 | Minor | PicoHarp twin traceback; README snippet `dadl.adapters` failed; version heading; quickstart help | Fixed |
+
+## Cycle 2: Bell-test experimentalist, time-tagger firmware engineer, research software engineer
+
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| 2.1 | Wrong | `bell_visibility` reported V = 0.80 past 1/√2 with no label; its planned-window rule was never enforced | Fixed: fair-sampling and single-basis labels always; optional `window` checked against the policy and recorded, else a "window not given" label |
+| 2.2 | Wrong | The quickstart's closed-form S ignored `settings_deg` (2.69 printed beside a measured 0.01); the fixed sign vector was not recorded | Fixed: expectation from Σ sign·V cos 2(α − β); warning when the angles cannot exceed 2 with the fixed signs; signs and angles recorded in the result |
+| 2.3 | Questionable | A common offset on every delay moves the grid origin unseen; best of ten offsets doubled false S > 2 + 1.96σ | Fixed: CHSH and HOM need a reference channel at delay 0; `grid_origin_ps` recorded; README states the selection effect |
+| 2.4 | Minor | Threshold labels ignored S < −2 | Fixed: \|S\| compared |
+| 2.5 | Minor | Double clicks count in two combinations | Documented (docstring, README) |
+| 2.6 | Minor | README grid wording; example dropped declared delays; non-integer counts accepted; "(default)" policy text | Fixed |
+| 2.7 | Questionable | Coarse-tick delay intervals covered 0–12% (80 ps tick, 21 ps jitter), status ok | Fixed: exact Gaussian ⊗ triangle bin probabilities (method v5); 93–98% coverage, bias < 0.15 ps |
+| 2.8 | Questionable | Tagger input offsets and trigger levels never recorded, though design.md promised them | Recorded in `conditions` (`tagger_*`) from PTU headers; files that disagree are refused; comparison at use is open |
+| 2.9 | Questionable | Unknown special records and a divided sync input were dropped silently by the analysis path | Fixed: both refused |
+| 2.10 | Questionable | About 100 bytes per record in memory; metadata checks read whole files 2–5 times | Header-only reads for metadata; memory stated in README; chunked reading open |
+| 2.11 | Minor | Doc drift (flat background, PicoHarp `describe` channels) | Fixed |
+| 2.12 | Questionable | `calibrate pairs` crashed (capture 0) after writing; with a 15 ns delay error it wrote η = 0, status ok | Fixed: guard; a delay mismatch notes the accidentals and refuses the heralding artifact |
+| 2.13 | Questionable | Artifacts with values ≥ 2^53 written but unreadable | Fixed: read back as floats |
+| 2.14 | Questionable | Verification checked parsed content, not bytes; duplicate keys accepted | Fixed: bytes must be canonical; duplicate keys refused |
+| 2.15 | Questionable | Same data gave a new artifact ID every run (`created` now, unseeded draws) | Fixed: seeds from input hashes; `SOURCE_DATE_EPOCH`; contract in README |
+| 2.16 | Minor | Bools accepted as integers | Fixed |
+| 2.17 | Minor | Manifests not checked (0 draws, string conditions, valid_until < created) | Fixed in `build_manifest` |
+| 2.18 | Minor | CSV out-of-range integer traceback; BOM refused | Fixed |
+| 2.19 | Minor | Corrupt `HW_InpChannels` exhausted memory | Fixed: capped at 256 |
+| 2.20 | Minor | Library ValueErrors reached CLI users as tracebacks; huge counts leaked a SciPy TypeError | Fixed |
+| 2.21 | Minor | Schemas not in the wheel; version still 0.0.3 | Schemas shipped (`dadl/schemas`, guarded copy); version bump at release |

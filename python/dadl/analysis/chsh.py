@@ -60,11 +60,38 @@ class Window:
         object.__setattr__(self, "delays_ps", delays)
 
     def as_record(self) -> dict[str, object]:
-        return {"width_ps": self.width_ps, "delays_ps": dict(sorted(self.delays_ps.items())), "source": self.source}
+        return {
+            "width_ps": self.width_ps,
+            "delays_ps": dict(sorted(self.delays_ps.items())),
+            "source": self.source,
+            # Slot k holds tags with k W <= t - delay < (k + 1) W, t in the tag file's own clock.
+            "grid_origin_ps": 0,
+        }
+
+
+def check_reference_channel(window: Window, channels: tuple[str, ...]) -> None:
+    """Refuse delays with no channel at 0: a common offset only moves the fixed grid's origin.
+
+    Bell review, cycle 2: adding one offset to every delay leaves the relative delays (and the
+    delay check) unchanged but moves pairs across slot edges; picking the best of ten such
+    offsets doubled the rate of S > 2 + 1.96 sigma at a true S of 2.00.
+    """
+    delays = [window.delays_ps.get(ch, 0) for ch in channels]
+    if min(delays) != 0:
+        raise ValueError(
+            f"declared delays {dict(zip(channels, delays))} have no reference channel at 0 ps; subtract "
+            f"{min(delays)} ps from every delay (a common offset only moves the coincidence grid's origin)"
+        )
 
 
 def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, float, int]:
-    """E = (N++ + N-- - N+- - N-+) / N and its variance (1 - E^2) / N."""
+    """E = (N++ + N-- - N+- - N-+) / N and its variance (1 - E^2) / N.
+
+    Double clicks: a slot with both outputs of one side and a click on the other counts in two
+    outcome combinations, so N can exceed the coincident slots (0.06% of slots at 10^6 pairs/s
+    on the example). This pulls E toward 0 (conservative for CHSH) and is not the
+    fixed-random-assignment rule a CH/Eberhard analysis needs; that rule is chosen with them.
+    """
     missing = [ch for ch in CHANNELS if ch not in tags]
     if missing:
         raise ValueError(f"run is missing channel(s) {missing}; a CHSH run needs {list(CHANNELS)}")
@@ -101,14 +128,20 @@ def chsh(
     runs: dict[tuple[str, str], dict[str, np.ndarray]],
     window: Window,
     policy: Policy | None = None,
+    *,
+    settings_deg: dict[str, float] | None = None,
 ) -> LabelledValue:
     """Raw CHSH S from one run per setting pair, with a fixed window from the analysis plan.
+
+    The signs are fixed (`SIGNS`) and recorded with the result, with the declared analyser angles
+    when given, so the sign assignment is part of the record rather than a later choice.
 
     `runs` maps each setting pair ("a", "b"), ("a", "b'"), ("a'", "b"),
     ("a'", "b'") to a dict of channel name -> int64 ps tags for A+, A-, B+, B-.
     """
     policy = policy or Policy.default()
     policy.check_window("chsh", window.source)
+    check_reference_channel(window, CHANNELS)
     s = 0.0
     var = 0.0
     for key, sign in SIGNS.items():
@@ -121,7 +154,10 @@ def chsh(
     labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
     if interrupted(*(runs[k][ch] for k in SIGNS for ch in CHANNELS)):
         labels += (INTERRUPTED,)
-    counts = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
+    counts: dict[str, object] = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
+    counts["signs"] = {f"{k[0]},{k[1]}": s for k, s in SIGNS.items()}
+    if settings_deg is not None:
+        counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     return LabelledValue(
         analysis="chsh",
         raw=raw,

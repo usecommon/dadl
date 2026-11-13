@@ -56,13 +56,14 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
                     raise ConfigError(f"{path}: missing array(s) {missing}; need {list(COLUMNS)}")
                 cols = {c: npz[c] for c in COLUMNS}
         elif path.suffix == ".csv":
-            with path.open(encoding="utf-8") as fh:
+            # utf-8-sig: Excel's "CSV UTF-8" starts with a byte-order mark.
+            with path.open(encoding="utf-8-sig") as fh:
                 header = [h.strip() for h in fh.readline().split(",")]
             if header != list(COLUMNS):
                 raise ConfigError(f"{path}: header must be {','.join(COLUMNS)}, got {','.join(header)}")
             # Read as text and check every cell is an integer: some NumPy versions
             # silently truncate "1.5" when asked for int64 directly.
-            text = np.loadtxt(path, delimiter=",", skiprows=1, dtype=str, ndmin=2)
+            text = np.loadtxt(path, delimiter=",", skiprows=1, dtype=str, ndmin=2, encoding="utf-8-sig")
             if text.size:
                 text = np.char.strip(text)
                 digits = np.char.isdigit(np.char.lstrip(text, "+-"))
@@ -79,7 +80,7 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
             raise ConfigError(f"{path}: tag files must be .npz or .csv")
     except FileNotFoundError as exc:
         raise ConfigError(f"tag file not found: {path}") from exc
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise ConfigError(f"{path}: cannot parse as integer columns: {exc}") from exc
 
     try:
@@ -150,9 +151,24 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
         if not path.exists():
             raise ConfigError(f"{directory}: missing {path.name} (one PTU file per acquisition, setting0.ptu, ...)")
         try:
-            tagset = PtuFile(path).read()
+            reader = PtuFile(path)
+            tagset = reader.read()
         except AdapterError as exc:
             raise ConfigError(str(exc)) from exc
+        unknown_records = reader.record_counts().get("unknown", 0)
+        if unknown_records:
+            # Tagger engineer review, cycle 2: 1000 unrecognised special records were dropped
+            # silently and the analysis printed S as normal.
+            raise ConfigError(
+                f"{path}: {unknown_records} special records of an unrecognised kind; DADL does not analyse files "
+                "it cannot fully account for. Inspect them with dadl.adapters.PtuFile(path).events()."
+            )
+        divided = [e.value for e in reader.events() if e.kind == "sync-divider"]
+        if divided and 0 in channels:
+            raise ConfigError(
+                f"{path}: input 0 (sync) is divided by {divided[0]} (HWSync_Divider) but is mapped to "
+                f"channel {channels[0]!r}; a divided input records one event in {divided[0]} and cannot be a detector"
+            )
         if tagset.metadata.get("incomplete"):
             raise ConfigError(
                 f"{path}: the acquisition lost data ({tagset.metadata.get('data_loss')}, from TTResult_StopReason); "
@@ -220,6 +236,38 @@ def tag_tick_ps(path: str | Path) -> int | None:
     return whole if whole >= 1 and abs(res - whole) <= 1e-9 * res else None
 
 
+#: PTU header entries that define where a tag lands in time: input offsets, trigger/CFD levels and
+#: edges, dead-time settings, sync offset and divider, and the tick.
+TAGGER_SETTING_PREFIXES = ("HWInpChan_", "HWSync_", "HW_InpChannels", "MeasDesc_GlobalResolution", "HW_ExternalRefClock")
+
+
+def tagger_settings(path: str | Path) -> dict[str, float]:
+    """Numeric tagger settings from a folder of PTU files, for an artifact's `conditions`.
+
+    A calibrated delay holds only while these stay as they were (tagger engineer review, cycle 2:
+    input offsets and trigger levels were never recorded). Files of one folder must agree.
+    """
+    path = Path(path)
+    if not path.is_dir():
+        return {}
+    from dadl.adapters.ptu import PtuFile
+
+    found: dict[str, float] | None = None
+    for f in sorted(path.glob("setting*.ptu")):
+        header = PtuFile(f).header
+        settings = {
+            f"tagger_{k}": float(v)
+            for k, v in sorted(header.items())
+            if k.startswith(TAGGER_SETTING_PREFIXES) and isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        if found is None:
+            found = settings
+        elif settings != found:
+            changed = sorted(k for k in set(found) | set(settings) if found.get(k) != settings.get(k))
+            raise ConfigError(f"{path}: the tagger settings differ between files ({', '.join(changed[:5])})")
+    return found or {}
+
+
 def tags_are_simulated(path: str | Path) -> bool:
     """True when the tags were written by DADL's simulator: a folder of PTU files whose headers say
     so, or an .npz written by `write_tags` with simulated=True.
@@ -235,7 +283,8 @@ def tags_are_simulated(path: str | Path) -> bool:
     from dadl.adapters.ptu import PtuFile
 
     files = sorted(path.glob("setting*.ptu"))
-    flags = {PtuFile(f).header.get("DADL_Simulated") is True or PtuFile(f).header.get("CreatorSW_Name") == "DADL" for f in files}
+    headers = [PtuFile(f).header for f in files]
+    flags = {h.get("DADL_Simulated") is True or h.get("CreatorSW_Name") == "DADL" for h in headers}
     if len(flags) > 1:
         raise ConfigError(f"{path} mixes simulated and recorded PTU files; keep them in separate folders")
     return bool(files) and flags == {True}

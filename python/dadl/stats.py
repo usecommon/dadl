@@ -121,6 +121,11 @@ class Laplace:
         return Interval(transform(m), transform(m - z * sd), transform(m + z * sd), level)
 
     def draws(self, rng: np.random.Generator, n_draws: int) -> np.ndarray:
+        try:
+            np.linalg.cholesky(self.cov)
+        except np.linalg.LinAlgError:
+            # A conditional posterior (a parameter held fixed) has zero rows: semi-definite.
+            return rng.multivariate_normal(self.mean, self.cov, size=n_draws, method="eigh")
         return rng.multivariate_normal(self.mean, self.cov, size=n_draws, method="cholesky")
 
 

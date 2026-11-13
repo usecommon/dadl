@@ -161,3 +161,127 @@ def test_unsupported_config_still_raises(tmp_path):
     bad.write_text("schema_version: 1\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_setup(bad)
+
+
+# --- Cycle 2 -----------------------------------------------------------------------------------
+
+
+def test_bell_visibility_always_carries_its_caveats_and_checks_the_window():
+    from dadl.analysis.chsh import FAIR_SAMPLING, Window
+    from dadl.analysis.visibility import bell_visibility
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import SINGLE_BASIS, WINDOW_UNDECLARED
+
+    r = bell_visibility(9000, 1000)
+    assert {FAIR_SAMPLING, SINGLE_BASIS, WINDOW_UNDECLARED} <= set(r.labels)
+    planned = bell_visibility(9000, 1000, window=Window(width_ps=2000, source="plan"))
+    assert WINDOW_UNDECLARED not in planned.labels and planned.window["source"] == "plan"
+    with pytest.raises(GuardrailRefusal):
+        bell_visibility(9000, 1000, window=Window(width_ps=2000, source="data"))
+    with pytest.raises(ValueError, match="whole numbers"):
+        bell_visibility(90.5, 10.0)
+
+
+def test_chsh_expectation_follows_the_declared_angles(tmp_path, capsys):
+    from dadl.cli import example_path
+
+    text = example_path("chsh-spad").read_text(encoding="utf-8")
+    assert "settings_deg" in text
+    alt = tmp_path / "alt.yaml"
+    import re
+
+    alt.write_text(re.sub(r"settings_deg:.*", 'settings_deg: {a: 0, "a\'": 45, b: -22.5, "b\'": 22.5}', text, count=1),
+                   encoding="utf-8")
+    assert main(["quickstart", str(alt)]) == 0
+    out = capsys.readouterr().out
+    expected = float(out.split("Closed-form expectation")[1].split("S = ")[1].split()[0])
+    raw = float(out.split("Raw S = ")[1].split()[0])
+    assert abs(expected) < 0.05 and abs(raw) < 0.1 and "warning" in out
+
+
+def test_negative_s_beyond_minus_two_is_labelled():
+    from dadl.guardrails import NEAR_THRESHOLD, threshold_labels
+    from dadl.result import Estimate
+
+    assert NEAR_THRESHOLD in threshold_labels("chsh", Estimate(-2.01, 0.02))
+    assert threshold_labels("chsh", Estimate(-2.01, 0.02)) == threshold_labels("chsh", Estimate(2.01, 0.02))
+
+
+def test_a_common_delay_offset_is_refused():
+    from dadl.analysis.chsh import Window, chsh
+
+    runs = {k: {ch: np.arange(0, 10**9, 10**6, dtype=np.int64) for ch in ("A+", "A-", "B+", "B-")}
+            for k in (("a", "b"), ("a", "b'"), ("a'", "b"), ("a'", "b'"))}
+    window = Window(width_ps=2000, delays_ps={"A+": 300, "A-": 300, "B+": 500, "B-": 500}, source="plan")
+    with pytest.raises(ValueError, match="reference channel"):
+        chsh(runs, window)
+
+
+def test_coarse_tick_delay_is_unbiased_with_the_triangle_kernel():
+    from dadl.calibration import calibrate_delay
+
+    rng = np.random.default_rng(7)
+    covered = 0
+    for _ in range(20):
+        t = np.sort(rng.uniform(0, 5e11, 20_000))
+        a = np.floor((t + rng.normal(0, 15, t.size)) / 80).astype(np.int64) * 80
+        b = np.floor((t + 1220 + rng.normal(0, 15, t.size)) / 80).astype(np.int64) * 80
+        cal = calibrate_delay(np.sort(a), np.sort(b), CHS, tick_ps=80, n_draws=10)
+        covered += cal.estimates["delay_ps"].contains(1220.0)
+    assert covered >= 16
+
+
+def test_artifacts_round_trip_large_numbers_and_refuse_non_canonical_files(tmp_path):
+    import datetime as dt
+    import json
+
+    from dadl.artifact import read_artifact, write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.artifact import ArtifactError
+    from dadl.sim import simulate_dark
+
+    tags = simulate_dark(DetectorParams(dark_rate_cps=1000.0, dead_time_ps=22_000), 2.0, np.random.default_rng(1))
+    cal = calibrate_dark(tags, CHS[0], conditions={"start_ps": 1.7e18})
+    created = dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc)
+    path = write_artifact(cal, tmp_path / "a", created=created)
+    manifest, _ = read_artifact(path)
+    assert manifest["conditions"]["start_ps"] == 1.7e18
+    # Same data, no seed: the same artifact (the draw seed comes from the input hashes).
+    again = write_artifact(calibrate_dark(tags, CHS[0], conditions={"start_ps": 1.7e18}), tmp_path / "b", created=created)
+    assert again.name == path.name
+    pretty = tmp_path / "c" / path.name
+    pretty.parent.mkdir()
+    pretty.write_text(json.dumps(json.loads(path.read_text()), indent=1), encoding="utf-8")
+    (pretty.parent / path.name.replace(".json", ".posterior.npy")).write_bytes(
+        path.with_name(path.name.replace(".json", ".posterior.npy")).read_bytes()
+    )
+    with pytest.raises(ArtifactError, match="canonical"):
+        read_artifact(pretty)
+    dup = path.read_bytes().replace(b'{"backend"', b'{"kind":"dcr-temperature","backend"', 1)
+    pretty.write_bytes(dup)
+    with pytest.raises(ArtifactError):
+        read_artifact(pretty)
+
+
+def test_bools_are_not_integers_and_csv_bom_is_accepted(tmp_path):
+    from dadl import _checks
+    from dadl.tagfile import read_tags
+
+    with pytest.raises(TypeError):
+        _checks.integer(True, "x")
+    p = tmp_path / "t.csv"
+    p.write_bytes("﻿setting,channel,timestamp_ps\n0,0,100\n".encode("utf-8"))
+    assert read_tags(p)[("a", "b")]["A+"].tolist() == [100]
+    p.write_text("setting,channel,timestamp_ps\n0,0,9223372036854775808\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        read_tags(p)
+
+
+def test_conditional_laplace_draws_do_not_need_a_definite_covariance():
+    # Found by the gates after cycle 2: a fit with an unidentified background crashed when drawing.
+    from dadl.stats import Laplace
+
+    cov = np.zeros((3, 3))
+    cov[1:, 1:] = [[1.0, 0.2], [0.2, 2.0]]
+    d = Laplace(np.zeros(3), cov).draws(np.random.default_rng(0), 500)
+    assert d.shape == (500, 3) and np.all(d[:, 0] == 0)
