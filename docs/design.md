@@ -4,7 +4,7 @@ Nov 10, 2026 · @Jeff · revised Nov 11, 2026 after the third review
 
 ## Summary
 
-We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, designed to keep a living, versioned calibration model for every single-photon detector channel and carry that model's uncertainty into Bell S, visibility and fidelity. An MCP server may later sit on top so agents can call the same validated tools. Status: draft. Version 0.1.0 is released, with phase 1 partly and phase 2 fully done; this doc is the canonical phase plan, and the README and the overview site copy it.
+We will build an open-source, vendor-neutral, physics-first library (Python API, Rust core), developed in public on GitHub, designed to keep a living, versioned calibration model for every single-photon detector channel and carry that model's uncertainty into Bell S, visibility and fidelity. An MCP server may later sit on top so agents can call the same validated tools. Status: draft. Version 0.1.1 is released, with phase 1 partly and phase 2 fully done; this doc is the canonical phase plan, and the README and the overview site copy it.
 
 **What users get:** a downloadable starter kit, not a turnkey product. A user installs it, runs the full pipeline on simulated data in minutes, then tests and adjusts adapters, detector models, analyses and guardrail policies to fit their own setup. Everything is built to be read, changed and re-tested.
 

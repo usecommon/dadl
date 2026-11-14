@@ -37,7 +37,7 @@ Issues = "https://github.com/usecommon/dadl/issues"
 [project.optional-dependencies]
 test = ["pytest>=7.0", "jsonschema>=4.18"]
 # The compiled core must match this package's version exactly (dadl._backend checks).
-core = ["dadl-quantum-core==0.1.0"]
+core = ["dadl-quantum-core==0.1.1"]
 
 [project.scripts]
 dadl = "dadl.cli:main"

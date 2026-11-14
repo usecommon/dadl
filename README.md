@@ -13,7 +13,7 @@ result look better than the data supports.
 a short technical report on the problem DADL solves, how it is used in an
 experiment, its guardrails and its roadmap.
 
-> **Status: pre-alpha (0.1.0): phase 1 partial, phase 2 done.** Anything may change in 0.x. The
+> **Status: pre-alpha (0.1.1): phase 1 partial, phase 2 done.** Anything may change in 0.x. The
 > canonical phase plan is in [docs/design.md](docs/design.md#mvp-scope-and-milestones).
 
 ## What works today (0.1.0)
