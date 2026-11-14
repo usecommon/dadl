@@ -5,6 +5,16 @@ releases. The `calibration/1` artifact schema is frozen from 0.1.0 (new
 optional fields may be added; changes to existing ones need `calibration/2`)
 and is versioned separately from the packages.
 
+## 0.1.1 (2026-11-14)
+
+Release fix, no code changes to the packages. The 0.1.0 upload of
+`dadl-quantum-core`, a new PyPI project, was refused: its pending trusted
+publisher had the same repository, workflow and environment as
+`dadl-quantum`'s existing publisher, which PyPI matched instead. The core now
+publishes from its own environment, `pypi-core`. 0.1.0 reached crates.io only;
+0.1.1 is the first release of `dadl-quantum-core` and the first phase-2
+release of `dadl-quantum` on PyPI.
+
 ## 0.1.0 (2026-11-13)
 
 Phase 2: calibrations with simulation-checked 95% intervals, content-addressed

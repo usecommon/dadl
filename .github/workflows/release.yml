@@ -3,18 +3,21 @@ name: Release
 # Publishes the Python packages (dadl-quantum and the compiled
 # dadl-quantum-core) to PyPI and the Rust crate to crates.io with
 # Trusted Publishing (OIDC): no registry token is stored anywhere. Triggered by
-# pushing a tag like v0.0.4 that points at a commit on main.
+# pushing a tag like v0.1.1 that points at a commit on main.
 #
-# The build job has no OIDC permission; only the two publish jobs can mint a
-# registry token. Both run in environments (`pypi`, `crates`) that should have
-# a required reviewer (see docs/reviews/2026-11-council.md).
+# The build job has no OIDC permission; only the publish jobs can mint a
+# registry token. They run in environments (`pypi`, `pypi-core`, `crates`)
+# that should have a required reviewer (see docs/reviews/2026-11-council.md).
 #
 # One-time setup on pypi.org (Account settings -> Publishing): project
 # "dadl-quantum", owner "usecommon", repository "dadl", workflow
-# "release.yml", environment "pypi".
+# "release.yml", environment "pypi"; and project "dadl-quantum-core", same
+# owner, repository and workflow, environment "pypi-core".
 #
-# The same PyPI setup is needed for project "dadl-quantum-core" (same
-# workflow and environment) before its first release.
+# The core needs its own environment: with the same repository, workflow and
+# environment as dadl-quantum's publisher, PyPI matched that existing
+# publisher, which cannot create a new project ("Non-user identities cannot
+# create new projects"), and the 0.1.0 core upload failed three times.
 #
 # One-time setup on crates.io (crate "dadl" -> Settings -> Trusted Publishing):
 # owner "usecommon", repository "dadl", workflow "release.yml", environment
@@ -146,7 +149,7 @@ jobs:
     name: Publish dadl-quantum-core to PyPI
     needs: [build, core-wheels, core-sdist]
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: pypi-core
     permissions:
       id-token: write
     steps:

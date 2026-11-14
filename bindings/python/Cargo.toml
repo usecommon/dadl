@@ -5,7 +5,7 @@
 
 [package]
 name = "dadl-core-python"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python bindings to the DADL core (dadl-quantum-core)"
 edition = "2021"
 license = "MIT OR Apache-2.0"
