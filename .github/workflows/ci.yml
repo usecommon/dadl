@@ -55,7 +55,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ matrix.python }}
       - name: Install
@@ -74,7 +74,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.10"
       - name: Install the floors from pyproject.toml
@@ -95,7 +95,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.10"
       - name: Install the pinned toolchain (rust-toolchain.toml)
@@ -133,7 +133,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
       # PyO3/maturin-action v1.51.0, pinned by commit SHA
@@ -159,7 +159,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
       - name: Build
@@ -195,7 +195,7 @@ jobs:
         with:
           persist-credentials: false
       # actions/setup-python v5.3.0, pinned by commit SHA
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
       - name: Install
