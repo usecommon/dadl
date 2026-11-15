@@ -5,6 +5,38 @@ releases. The `calibration/1` artifact schema is frozen from 0.1.0 (new
 optional fields may be added; changes to existing ones need `calibration/2`)
 and is versioned separately from the packages.
 
+## Unreleased
+
+### Published results as executable tests
+
+- `python/tests/test_published_results.py` rebuilds three published results
+  from simulated time tags (design doc, the open high-risk review item):
+  - accidental subtraction (Thompson, quant-ph/9903066, on Tittel et al.
+    1997): a noisy-link source with accidentals about 30% of the fringe
+    maximum reads raw V = 0.44 (exact interval below 1/sqrt 2); DADL's own
+    off-peak estimate would lift it to about 0.8, and the default policy
+    refuses that; a loosened policy labels it;
+  - the coincidence-time loophole (Christensen et al., arXiv:1503.07573;
+    Larsson et al., arXiv:1309.0712): a local model with setting-dependent
+    detection times reads S = 2.77 (tens of Gaussian sigma) with a window
+    centred on Alice's detections, 1.59 on DADL's planned 10 ns grid (both
+    match the model's closed forms), and a data-chosen window is refused. A
+    grid only a little wider than the attacker's stagger still reads S > 2:
+    the fixed grid does not close the fair-coincidence assumption for CHSH,
+    which the result's label already says;
+  - the NIST calibration comparison (Polyakov and Migdall, SPIE 6583,
+    65830A): the heralding calibration at the 0.18% (k = 1) precision regime
+    recovers the injected efficiency, and agrees with a substitution
+    calibration against a reference detector within combined uncertainty.
+- Fact-check of the figures these tests use: 45% to 82% (with about 30%
+  accidentals), the 71% limit, "over 2700-sigma" and the 0.14(14)%, 0.18%,
+  0.17% and 0.5% (k = 1) NIST figures match their sources. Two wordings were
+  corrected in the design doc and the site: the NIST methods *differ by*
+  0.14(14)%, within the comparison's uncertainty (not "agree to within"), and
+  the 2700-sigma violation was of the CH inequality with event-centred
+  windows, with no significant violation (not "none") with a predefined one.
+- No package code changed; no bugs found.
+
 ## 0.1.1 (2026-11-14)
 
 Release fix, no code changes to the packages. The 0.1.0 upload of

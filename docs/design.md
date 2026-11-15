@@ -28,7 +28,7 @@ Three design commitments shape everything below:
 
 ## Background and problem
 
-The physics is solved; the integration is not. Klyshko (correlated-photon) calibration agrees with substitution calibration at NIST to within 0.14(14)%, with uncertainties of 0.18% and 0.17% (k=1), and NIST describes a low-cost substitution procedure targeting 0.5% (k=1). Dead time, afterpulsing and accidentals all have textbook models. The gap is that nobody owns the chain *detector state → correction → uncertainty → result → explanation* across vendors.
+The physics is solved; the integration is not. At NIST, Klyshko (correlated-photon) and substitution calibrations of the same detector agree within the comparison's uncertainty, differing by 0.14(14)%, with relative standard uncertainties of 0.18% and 0.17% (k=1), and NIST describes a low-cost substitution procedure targeting 0.5% (k=1). Dead time, afterpulsing and accidentals all have textbook models. The gap is that nobody owns the chain *detector state → correction → uncertainty → result → explanation* across vendors.
 
 | Tool | What it does well | Where it stops |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ The physics is solved; the integration is not. Klyshko (correlated-photon) calib
 | Photon-HDF5 | Open HDF5 schema with provenance | Point-value detector fields only; no posteriors, uncertainty or calibration history |
 | Qunnect, Aliro | Network automation and orchestration | Polarization and network level; depend on device telemetry |
 
-The biggest technical risk is overcorrection, not missing corrections. Subtracting accidentals can turn a non-violating Bell dataset into a violating one. Data-dependent coincidence windows open the coincidence-time loophole; one NIST and University of Illinois analysis showed a classical source producing an apparent violation of over 2700σ (assuming Gaussian statistics), and none with a predefined fixed window. MLE tomography has been shown to underestimate fidelity and overestimate entanglement, and bootstrapping inherits that bias.
+The biggest technical risk is overcorrection, not missing corrections. Subtracting accidentals can turn a non-violating Bell dataset into a violating one. Data-dependent coincidence windows open the coincidence-time loophole; one NIST and University of Illinois analysis showed a classical source producing an apparent violation of the CH inequality of over 2700σ (assuming Gaussian statistics) with windows centred on the detections, and no significant violation with a predefined window. MLE tomography has been shown to underestimate fidelity and overestimate entanglement, and bootstrapping inherits that bias.
 
 ## Goals and non-goals
 
@@ -634,7 +634,7 @@ The layer is only credible if its intervals are calibrated and its failures are 
 | Adversarial | Bright-light/blinding injection, deliberate connector reseats, temperature steps | Signatures flagged; change-points detected; no silent correction |
 | Agent evals | Scripted tasks on the simulator twin | Tool-call validity; explanation numbers match attribution output |
 
-Guardrail regression tests run in CI: the accidental-subtraction case (45% → 82% visibility crossing the 71% threshold) and the coincidence-time-loophole case must both be refused.
+Guardrail regression tests run in CI: the accidental-subtraction case (45% → 82% visibility crossing the 71% threshold) and the coincidence-time-loophole case must both be refused. `python/tests/test_published_results.py` rebuilds both, and the NIST Klyshko-versus-substitution comparison, from simulated time tags (implemented after 0.1.1).
 
 Simulation tests are partly circular when the simulator shares the fitter's forward model. To guard against that, the simulator also generates data from deliberately different models (non-exponential afterpulsing, rate-dependent η, non-stationary drift within a window). The pass criterion there is that posterior predictive checks flag the misfit rather than return confident wrong intervals.
 
@@ -701,7 +701,7 @@ A first review (2026-11-10) found the design sound but missing the contracts nee
 | Simulation validation is circular if the simulator shares the fitter's model | Medium | Fixed: added misspecified-simulation tests |
 | Shapley attribution over MLE tomography may be too slow | Medium | Fixed: cheaper estimator inside the loop; benchmark in phase 4 |
 | Architecture diagram shows no path from the `calibrate` tool to the calibration engine | Low | Fixed: diagram now shows calibrate and measure paths |
-| The project has no outside reviewers, so the physics and guardrails rely on internal checks only | High | Open: before phase 3, run reviewer-role agent passes, fact-check every cited figure against its source, and turn published results (accidental subtraction, coincidence-time loophole, NIST calibration comparison) into executable tests |
+| The project has no outside reviewers, so the physics and guardrails rely on internal checks only | High | Partly closed (after 0.1.1): the three published results are executable tests on simulated time tags (`python/tests/test_published_results.py`), and the figures they use were checked against their sources (two wordings corrected). Still open: no outside or human reviewer; the tests reproduce the published mechanisms, not the published data |
 
 ### Second review (2026-11-10)
 
@@ -725,7 +725,7 @@ Five independent review agents (physicist, loophole red team, security engineer,
 | Fact-check | Ten citations needed correcting (NIST low-cost method, 2700σ attribution, Eberhard source, MLE bias source, SPAD dead time, SiPM crosstalk, SNSPD dark counts, Photon-HDF5 schema, ETSI title, Kwiat version) | Medium | Fixed; Eberhard and Schwemmer added to References |
 | Architecture | MVP too large for an unstated team size | High | Open: team-size question added |
 | Architecture | The diagram is an embed that won't render on GitHub | Low | Fixed: Mermaid |
-| All | All review is by agents, with no human physicist | High | Open: published results become executable tests before phase 3 |
+| All | All review is by agents, with no human physicist | High | Open: the published results are now executable tests (after 0.1.1), but no human physicist has reviewed the physics |
 
 ### Third review (2026-11-11)
 
