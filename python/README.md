@@ -15,7 +15,7 @@ fixed-grid coincidence counting; CHSH and Bell/HOM visibility analyses with
 guardrails that refuse invalid corrections; calibrations of dark rate,
 afterpulsing, dead time, DCR(T), delay and jitter, accidentals and heralding
 efficiency from your own tags, written as content-addressed artifacts
-(`dadl calibrate dark`, `dadl calibrate pairs`); PicoQuant PTU (T2) input; and
+(`dadl calibrate dark`, `dadl calibrate pairs`); PicoQuant PTU (T2 and T3) input; and
 an optional compiled core (`pip install "dadl-quantum[core]"`). Uncertainties
 are statistical only; read the known limits in the repository README before
 relying on a number.

@@ -19,12 +19,16 @@ class MyTagger:
 
 1. **Integer picoseconds on a declared clock.** Convert ticks with integer
    arithmetic when the tick is a whole number of ps; otherwise round and say
-   so in `TagSet.metadata`. Never return floats.
+   so in `TagSet.metadata`. Never return floats. When the format stores times
+   relative to a reference (PTU T3: sync count and start-stop time), record
+   the time model and what it assumes in `TagSet.metadata`.
 2. **Overflow and rollover are the adapter's job.** Test across many
    rollovers, including any multi-rollover record the format has.
 3. **No silent drops.** Count every record: tags + events must equal the
    records read, and a truncated file or trailing data is an error
-   (`dadl.errors.AdapterError`), never a shorter result.
+   (`dadl.errors.AdapterError`), never a shorter result. Tags derived from
+   records rather than read from them (the PTU T3 sync channel) are counted
+   separately and kept out of that sum.
 4. **Time order.** Tags per channel are sorted. If the format promises order,
    refuse out-of-order data instead of sorting it quietly.
 5. **Provenance.** `config()` returns the device settings the file or device

@@ -13,15 +13,28 @@ an afterpulse at the end of its dead time plus an exponential delay, so
 afterpulses cascade. An afterpulse that falls inside a later avalanche's dead
 time is lost.
 
-Not simulated yet: crosstalk and breakdown flash, and a separate TDC dead
-time. Arrival times are drawn as float64 ps, exact to the picosecond only up
-to 2^53 ps (about 2.5 hours of simulated time per run).
+Crosstalk (opt-in, `Crosstalk`): with probability `probability`, every
+recorded avalanche on the source channel triggers a crosstalk avalanche
+candidate on the target channel `delay_ps` later (Gaussian jitter
+`jitter_sigma_ps`, never earlier than its cause). A nonzero delay models a Si
+SPAD breakdown flash reaching the other detector after 2 n_g L / c; zero
+models electrical or pixel crosstalk. The candidate is lost inside the
+target's dead time; recorded, it is an avalanche like any other: it starts a
+dead time, can afterpulse, and can trigger crosstalk in turn, so links in both
+directions cascade. All channels then run in one event loop in time order.
+Without crosstalk (the default) every channel is simulated on its own, as
+before, and results for a given seed are unchanged.
+
+Not simulated yet: twilight counts and a separate TDC dead time. Arrival
+times are drawn as float64 ps, exact to the picosecond only up to 2^53 ps
+(about 2.5 hours of simulated time per run).
 """
 
 from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -40,9 +53,11 @@ __all__ = [
     "CHANNELS",
     "CHSH_PAIRS",
     "CHSH_SETTINGS",
+    "Crosstalk",
     "DetectorParams",
     "PairSource",
     "detect",
+    "detect_channels",
     "poisson_times",
     "simulate_chsh",
     "simulate_chsh_setting",
@@ -94,6 +109,34 @@ class PairSource:
             raise ValueError("coherence_time_ps must be positive")
 
 
+@dataclass(frozen=True)
+class Crosstalk:
+    """Crosstalk from one channel to another (ground truth for one direction of one pair).
+
+    Every recorded avalanche on `source` triggers, with probability
+    `probability`, a crosstalk avalanche candidate on `target` at
+    `delay_ps` + N(0, `jitter_sigma_ps`) after it, in recorded time (the
+    offset of the peak it makes in the target - source cross-correlation),
+    floored at 0: crosstalk never precedes its cause. For both directions
+    give two links.
+    """
+
+    source: str
+    target: str
+    probability: float
+    delay_ps: float = 0.0
+    jitter_sigma_ps: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.source == self.target:
+            raise ValueError("crosstalk needs two different channels (use afterpulse_prob for a channel's own)")
+        p = _checks.finite(self.probability, "probability", minimum=0.0)
+        if p >= 1.0:
+            raise ValueError("crosstalk probability must be in [0, 1)")
+        _checks.finite(self.delay_ps, "delay_ps", minimum=0.0)
+        _checks.finite(self.jitter_sigma_ps, "jitter_sigma_ps", minimum=0.0)
+
+
 def poisson_times(rate: float, duration_s: float, rng: np.random.Generator) -> np.ndarray:
     """Sorted float64 arrival times (ps) of a homogeneous Poisson process."""
     _checks.finite(rate, "rate", minimum=0.0)
@@ -109,6 +152,16 @@ def detect(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Turn photon arrival times into recorded int64 time tags for one detector."""
+    arrivals = _primaries(photon_times_ps, det, duration_s, rng)
+    if det.afterpulse_prob == 0:
+        return apply_nonparalyzable(arrivals, det.dead_time_ps)
+    return _self_exciting(arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng)
+
+
+def _primaries(
+    photon_times_ps: np.ndarray, det: DetectorParams, duration_s: float, rng: np.random.Generator
+) -> np.ndarray:
+    """Sorted int64 primary avalanche candidates: detected photons (jittered, delayed) and dark counts."""
     photons = np.asarray(photon_times_ps, dtype=np.float64)
     kept = photons[rng.random(photons.size) < det.efficiency]
     if det.jitter_sigma_ps > 0:
@@ -120,9 +173,110 @@ def detect(
         # Even an ideal detector records one tag per picosecond: two arrivals rounded to the same
         # ps are one click (analyses refuse duplicate timestamps).
         arrivals = np.unique(arrivals)
-    if det.afterpulse_prob == 0:
-        return apply_nonparalyzable(arrivals, det.dead_time_ps)
-    return _self_exciting(arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng)
+    return arrivals
+
+
+def detect_channels(
+    photons: Mapping[str, np.ndarray],
+    detectors: Mapping[str, DetectorParams],
+    duration_s: float,
+    rng: np.random.Generator,
+    crosstalk: Sequence[Crosstalk] = (),
+) -> dict[str, np.ndarray]:
+    """Recorded tags of several detectors, coupled by `crosstalk` links (see the module docstring).
+
+    Without crosstalk this is `detect` per channel, in the order of `photons`.
+    """
+    missing = [ch for ch in photons if ch not in detectors]
+    if missing:
+        raise ValueError(f"missing detector parameters for {missing}")
+    unknown = sorted({x for link in crosstalk for x in (link.source, link.target)} - set(photons))
+    if unknown:
+        raise ValueError(f"crosstalk names channel(s) {unknown}, not among {list(photons)}")
+    if not crosstalk:
+        return {ch: detect(photons[ch], detectors[ch], duration_s, rng) for ch in photons}
+    names = list(photons)
+    primaries = [_primaries(photons[ch], detectors[ch], duration_s, rng) for ch in names]
+    out = _coupled(names, primaries, [detectors[ch] for ch in names], crosstalk, rng)
+    return dict(zip(names, out))
+
+
+class _Draws:
+    """Random numbers drawn in blocks, one at a time (the event loop needs scalars)."""
+
+    def __init__(self, rng: np.random.Generator, block: int = 4096) -> None:
+        self._rng, self._block = rng, block
+        self._u = self._n = self._e = np.empty(0)
+        self._iu = self._in = self._ie = 0
+
+    def uniform(self) -> float:
+        if self._iu == self._u.size:
+            self._u, self._iu = self._rng.random(self._block), 0
+        self._iu += 1
+        return float(self._u[self._iu - 1])
+
+    def normal(self) -> float:
+        if self._in == self._n.size:
+            self._n, self._in = self._rng.standard_normal(self._block), 0
+        self._in += 1
+        return float(self._n[self._in - 1])
+
+    def exponential(self) -> float:
+        if self._ie == self._e.size:
+            self._e, self._ie = self._rng.standard_exponential(self._block), 0
+        self._ie += 1
+        return float(self._e[self._ie - 1])
+
+
+def _coupled(
+    names: list[str],
+    primaries: list[np.ndarray],
+    dets: list[DetectorParams],
+    crosstalk: Sequence[Crosstalk],
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Dead time, cascading afterpulses and cascading crosstalk across channels, event by event.
+
+    Primaries of all channels are merged in time order (ties: channel order);
+    triggered candidates (afterpulses, crosstalk) wait in a min-heap and go
+    first at equal times, as in `_self_exciting`.
+    """
+    index = {name: i for i, name in enumerate(names)}
+    links: list[list[tuple[int, float, float, float]]] = [[] for _ in names]
+    for link in crosstalk:
+        links[index[link.source]].append(
+            (index[link.target], float(link.probability), float(link.delay_ps), float(link.jitter_sigma_ps))
+        )
+    times = np.concatenate(primaries) if primaries else np.empty(0, dtype=np.int64)
+    chans = np.concatenate([np.full(p.size, i, dtype=np.int64) for i, p in enumerate(primaries)])
+    order = np.argsort(times, kind="stable")
+    prim_t, prim_c = times[order].tolist(), chans[order].tolist()
+    # A zero dead time still records at most one tag per ps per channel (as `detect` does).
+    dead = [max(int(d.dead_time_ps), 1) for d in dets]
+    ap = [(float(d.afterpulse_prob), float(d.afterpulse_tau_ps)) for d in dets]
+    draws = _Draws(rng)
+    out: list[list[int]] = [[] for _ in names]
+    next_allowed = [-(1 << 62)] * len(names)
+    pending: list[tuple[int, int]] = []  # (time, channel) of triggered candidates
+    i, n = 0, len(prim_t)
+    while i < n or pending:
+        if pending and (i >= n or pending[0][0] <= prim_t[i]):
+            t, c = heapq.heappop(pending)
+        else:
+            t, c = prim_t[i], prim_c[i]
+            i += 1
+        if t < next_allowed[c]:
+            continue
+        out[c].append(t)
+        next_allowed[c] = t + dead[c]
+        p_ap, tau = ap[c]
+        if p_ap > 0 and draws.uniform() < p_ap:
+            heapq.heappush(pending, (t + dets[c].dead_time_ps + round(tau * draws.exponential()), c))
+        for target, p, delay, sigma in links[c]:
+            if draws.uniform() < p:
+                offset = delay + sigma * draws.normal() if sigma > 0 else delay
+                heapq.heappush(pending, (t + max(0, round(offset)), target))
+    return [np.array(o, dtype=np.int64) for o in out]
 
 
 def _self_exciting(
@@ -178,18 +332,21 @@ def simulate_pairs(
     det_b: DetectorParams,
     duration_s: float,
     rng: np.random.Generator,
+    crosstalk: Sequence[Crosstalk] = (),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Recorded tags of two detectors, each receiving one photon of every pair (a CW SPDC source).
 
     Channel b's photon arrives at the same time as channel a's; the relative
     delay of the recorded tags is det_b.delay_ps - det_a.delay_ps and the
     width of the coincidence peak comes from both detectors' jitter.
+    `crosstalk` links name the channels "a" and "b".
     """
     _checks.finite(duration_s, "duration_s", minimum=0.0)
     if duration_s <= 0:
         raise ValueError("duration_s must be positive")
     t = poisson_times(pair_rate_per_s, duration_s, rng)
-    return detect(t, det_a, duration_s, rng), detect(t, det_b, duration_s, rng)
+    out = detect_channels({"a": t, "b": t}, {"a": det_a, "b": det_b}, duration_s, rng, crosstalk)
+    return out["a"], out["b"]
 
 
 def simulate_hom(
@@ -199,6 +356,7 @@ def simulate_hom(
     path_delay_ps: float,
     duration_s: float,
     rng: np.random.Generator,
+    crosstalk: Sequence[Crosstalk] = (),
 ) -> dict[str, np.ndarray]:
     """Recorded tags on the two outputs ("A", "B") of a Hong-Ou-Mandel beamsplitter.
 
@@ -206,7 +364,8 @@ def simulate_hom(
     by different ports with probability (1 - V exp(-(delay / tau_c)^2)) / 2,
     V = source.visibility and tau_c = source.coherence_time_ps; otherwise
     both leave by the same port, where the detector (not photon-number
-    resolving) records at most one of them.
+    resolving) records at most one of them. `crosstalk` links name the
+    channels "A" and "B".
     """
     _checks.finite(path_delay_ps, "path_delay_ps")
     _checks.finite(duration_s, "duration_s", minimum=0.0)
@@ -225,10 +384,8 @@ def simulate_hom(
         t2[split & first_to_a], t1[split & ~first_to_a],
         t1[~split & ~first_to_a], t2[~split & ~first_to_a],  # both to B
     ])
-    return {
-        "A": detect(np.sort(to_a), det_a, duration_s, rng),
-        "B": detect(np.sort(to_b), det_b, duration_s, rng),
-    }
+    photons = {"A": np.sort(to_a), "B": np.sort(to_b)}
+    return detect_channels(photons, {"A": det_a, "B": det_b}, duration_s, rng, crosstalk)
 
 
 def simulate_chsh_setting(
@@ -238,8 +395,9 @@ def simulate_chsh_setting(
     detectors: dict[str, DetectorParams],
     duration_s: float,
     rng: np.random.Generator,
+    crosstalk: Sequence[Crosstalk] = (),
 ) -> dict[str, np.ndarray]:
-    """Recorded tags on channels A+, A-, B+, B- for one pair of analyzer angles."""
+    """Recorded tags on channels A+, A-, B+, B- for one pair of analyzer angles (`crosstalk` among them)."""
     missing = set(CHANNELS) - set(detectors)
     if missing:
         raise ValueError(f"missing detector parameters for {sorted(missing)}")
@@ -253,7 +411,7 @@ def simulate_chsh_setting(
     same = rng.random(n) < p_same
     b_plus = np.where(same, a_plus, ~a_plus)
     photons = {"A+": t[a_plus], "A-": t[~a_plus], "B+": t[b_plus], "B-": t[~b_plus]}
-    return {ch: detect(photons[ch], detectors[ch], duration_s, rng) for ch in CHANNELS}
+    return detect_channels({ch: photons[ch] for ch in CHANNELS}, detectors, duration_s, rng, crosstalk)
 
 
 def simulate_chsh(
@@ -262,6 +420,7 @@ def simulate_chsh(
     duration_s: float,
     rng: np.random.Generator,
     settings: dict[str, float] | None = None,
+    crosstalk: Sequence[Crosstalk] = (),
 ) -> dict[tuple[str, str], dict[str, np.ndarray]]:
     """One acquisition per CHSH setting pair, keyed like ("a", "b'")."""
     angles = CHSH_SETTINGS if settings is None else settings
@@ -269,6 +428,6 @@ def simulate_chsh(
     if missing:
         raise ValueError(f"settings are missing angle(s) for {missing}")
     return {
-        (sa, sb): simulate_chsh_setting(source, angles[sa], angles[sb], detectors, duration_s, rng)
+        (sa, sb): simulate_chsh_setting(source, angles[sa], angles[sb], detectors, duration_s, rng, crosstalk)
         for sa, sb in CHSH_PAIRS
     }

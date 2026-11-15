@@ -7,7 +7,7 @@ reported as a typed event.
 | Adapter | Status | Module |
 | --- | --- | --- |
 | PicoQuant PTU, T2 mode (PicoHarp 300, HydraHarp v1/v2, TimeHarp 260 N/P, MultiHarp) | Available (0.1.0) | `dadl.adapters.ptu` |
-| PicoQuant T3 mode | Planned | |
+| PicoQuant PTU, T3 mode (the same devices) | Available (unreleased) | `dadl.adapters.ptu` |
 | Simulated tagger (hardware twin): live batches with injectable buffer overflows, dropped batches and config changes | Available (0.1.0) | `dadl.adapters.simdevice` |
 | Swabian Instruments, qutools, IDQ | Seeking contributors | |
 
@@ -23,6 +23,15 @@ reader.config()               # scalar header entries, kept as provenance
 The PTU reader is DADL's own (no vendor software). Its tests write PTU
 fixtures with `python/tests/ptu_writer.py` and, when the third-party
 `ptufile` package is installed, check that both readers give the same times.
+
+T3 files store each event's sync count (nsync) and start-stop time (dtime),
+not an absolute time. The reader returns nsync x sync period + dtime x
+resolution in ps, from the header's `MeasDesc_GlobalResolution` (the sync
+period) and `MeasDesc_Resolution`: exact when both are whole ps, rounded
+with a note otherwise, and only as good as the assumption that the sync
+period held for the whole run. Input 0 holds the syncs that started a
+recorded measurement, not every sync pulse (a `t3-sync` event says so).
+`write_ptu(..., sync_period_ps=12_500)` writes simulated T3 files.
 
 ## Hardware twin
 
