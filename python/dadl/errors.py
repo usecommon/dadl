@@ -19,3 +19,8 @@ class ConfigError(DadlError):
 
 class AdapterError(DadlError):
     """A vendor file or device stream is malformed, truncated or of an unsupported format."""
+
+
+class StaleCalibration(DadlError):
+    """A calibration artifact does not cover the dataset: outside its validity time range, or
+    recorded under conditions (tagger settings, temperature, bias) that do not match it."""

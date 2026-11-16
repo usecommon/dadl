@@ -62,7 +62,18 @@ INTERRUPTED = (
 )
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
-KNOWN_CORRECTIONS = frozenset({"accidental_subtraction", "afterpulse", "dead_time", "efficiency"})
+KNOWN_CORRECTIONS = frozenset(
+    {
+        "accidental_subtraction",
+        "afterpulse",
+        "dead_time",
+        "efficiency",
+        # Not corrections but overridable refusals when calibrations are used (dadl.propagate):
+        # a misfit artifact, and one whose validity or conditions do not cover the dataset.
+        "misfit_calibration",
+        "calibration_outside_validity",
+    }
+)
 
 #: Thresholds that carry a physical claim, per analysis type.
 #: bell_visibility: V > 1/sqrt(2) implies S > 2 only for a Werner state with
