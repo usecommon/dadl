@@ -26,6 +26,20 @@ and is versioned separately from the packages.
   `calibration_outside_validity`); and artifacts calibrated on the analysed data (no override).
   Overrides label the result "policy modified".
 
+### Phase 3, M2: forward model and corrected HOM visibility
+
+- `dadl.forward.corrected_visibility`: the corrected two-point visibility fitted under a model of
+  what the detectors recorded (live fraction of the channel pair from propagated dead times;
+  accidentals from each acquisition's own off-peak bins), with joint Monte Carlo over counts and
+  calibration draws. The interval is the 95% quantiles; the statistical and calibration parts
+  are reported separately (`Estimate.stderr_statistical`, `stderr_calibration`).
+- `hom_from_tags(..., calibrations=, channels=)` uses it; the subtraction path stays when no
+  calibrations are given, and asking for both is refused. Results list `corrections` in the
+  order applied and carry the artifact IDs. A dead time known only as an upper limit is
+  corrected at the bound, with the value at zero alongside (decision D3).
+- Dead-time correction is not in the default HOM rule: it needs
+  `Policy.allow("hom_visibility", "dead_time", reason)` and is labelled "policy modified".
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

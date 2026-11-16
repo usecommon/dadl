@@ -35,7 +35,10 @@ import numpy as np
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
-from dadl.guardrails import INTERRUPTED, Policy
+from dadl.data import ChannelId
+from dadl.errors import GuardrailRefusal
+from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.propagate import CalibrationSet
 from dadl.stationarity import interrupted
 from dadl.result import LabelledValue
 
@@ -65,13 +68,32 @@ def hom_from_tags(
     runs: dict[str, dict[str, np.ndarray]],
     window: Window,
     *,
-    subtract_accidentals: bool = True,
+    subtract_accidentals: bool | None = None,
     policy: Policy | None = None,
+    calibrations: CalibrationSet | None = None,
+    channels: tuple[ChannelId, ChannelId] | None = None,
+    seed: int = 0,
 ) -> tuple[LabelledValue, dict[str, float]]:
     """HOM visibility from `runs["dip"]` and `runs["reference"]` (each {"A": tags, "B": tags}).
 
+    Without `calibrations` the corrected value is the off-peak accidental subtraction (unless
+    `subtract_accidentals=False`). With `calibrations` (a `dadl.propagate.CalibrationSet`, and
+    `channels` naming its channels for A and B), the corrected value comes from the forward model
+    (`dadl.forward`) with calibration uncertainty; asking for the subtraction as well is refused,
+    since one model must not count the accidentals twice.
+
     Returns the labelled result and the counts it used.
     """
+    if calibrations is not None:
+        if subtract_accidentals:
+            raise GuardrailRefusal(
+                "subtract_accidentals and calibrations both correct the accidentals: use the forward model "
+                "(calibrations) alone, so no correction is counted twice"
+            )
+        if channels is None or len(channels) != 2:
+            raise ValueError("with calibrations, pass channels=(channel of A, channel of B)")
+    elif subtract_accidentals is None:
+        subtract_accidentals = True
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
 
     for name in HOM_SETTINGS:
@@ -117,6 +139,37 @@ def hom_from_tags(
         result = hom_visibility(c_max, c_min, policy=policy, exposure_ratio=ratio)
     counts["subtracted"] = float(result.corrected is not None)
     labels = result.labels + (TWO_POINT,)
+    if calibrations is not None:
+        from dadl.forward import RunCounts, bound_range, corrected_visibility
+
+        side_ref = shifted_coincidences(
+            np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
+        )
+
+        def run_counts(name: str, c: int, side_counts: np.ndarray, span: float) -> RunCounts:
+            return RunCounts(
+                coincidences=int(c),
+                offpeak_sum=int(side_counts.sum()),
+                offpeak_shifts=int(side_counts.size),
+                duration_s=span / 1e12,
+                singles_a=int(runs[name]["A"].size),
+                singles_b=int(runs[name]["B"].size),
+            )
+
+        high = run_counts("reference", c_max, side_ref, t_ref)
+        low = run_counts("dip", c_min, side, t_dip)
+        fwd = corrected_visibility(
+            "hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed
+        )
+        rng = bound_range("hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy)
+        if rng is not None:
+            counts["corrected_at_zero_dead_time"] = rng["at_zero"]
+            counts["corrected_at_bound_dead_time"] = rng["at_bound"]
+        counts["accidentals_reference"] = high.accidentals
+        labels = tuple(dict.fromkeys(labels + fwd.labels + threshold_labels("hom_visibility", result.raw, fwd.estimate)))
+        result = dataclasses.replace(
+            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
+        )
     if interrupted(*([np.sort(runs[k][ch]) for ch in HOM_CHANNELS] for k in HOM_SETTINGS)):
         # SNSPD specialist review: a latch in 20% of the dip run raised V by 13 sigma, unlabelled.
         labels += (INTERRUPTED,)

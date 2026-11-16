@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: What `Estimate.stderr` means in phase 1. Calibration uncertainty is not yet propagated.
+#: What `Estimate.stderr` means for raw values (and corrected ones without propagated calibrations).
 UNCERTAINTY_KIND = "statistical only (Gaussian, 1 sigma)"
 
 
@@ -32,11 +32,24 @@ class Estimate:
     stderr: float
     low: float | None = None
     high: float | None = None
+    #: Corrected values from the forward model (phase 3): the statistical and calibration parts
+    #: of `stderr`, each with the other part held at its point value. None for raw values.
+    stderr_statistical: float | None = None
+    stderr_calibration: float | None = None
+
+    @property
+    def uncertainty_kind(self) -> str:
+        if self.stderr_calibration is None:
+            return UNCERTAINTY_KIND
+        return "statistical and calibration (joint Monte Carlo, 1 sigma; interval is 95% quantiles)"
 
     def __str__(self) -> str:
         text = f"{self.value:.4f} ± {self.stderr:.4f}"
         if self.low is not None and self.high is not None:
-            text += f" (exact 95%: [{self.low:.4f}, {self.high:.4f}])"
+            kind = "95%" if self.stderr_calibration is not None else "exact 95%"
+            text += f" ({kind}: [{self.low:.4f}, {self.high:.4f}])"
+        if self.stderr_calibration is not None:
+            text += f" [stat {self.stderr_statistical:.4f}, calibration {self.stderr_calibration:.4f}]"
         return text
 
     def __format__(self, spec: str) -> str:
@@ -58,6 +71,8 @@ class LabelledValue:
     corrected: Estimate | None = None
     labels: tuple[str, ...] = field(default_factory=tuple)
     artifact_ids: tuple[str, ...] = field(default_factory=tuple)
+    #: Corrections behind `corrected`, in the order applied (design, "Minimum metadata").
+    corrections: tuple[str, ...] = field(default_factory=tuple)
     #: SHA-256 of the effective guardrail policy (rules and thresholds).
     policy_fingerprint: str | None = None
     #: Policy overrides in force, as "analysis: correction (reason)".
@@ -112,6 +127,10 @@ class LabelledValue:
             "corrected_low": None if self.corrected is None else self.corrected.low,
             "corrected_high": None if self.corrected is None else self.corrected.high,
             "uncertainty": UNCERTAINTY_KIND,
+            "corrected_uncertainty": None if self.corrected is None else self.corrected.uncertainty_kind,
+            "corrected_stderr_statistical": None if self.corrected is None else self.corrected.stderr_statistical,
+            "corrected_stderr_calibration": None if self.corrected is None else self.corrected.stderr_calibration,
+            "corrections": js(list(self.corrections)),
             "labels": js(list(self.labels)),
             "artifact_ids": js(list(self.artifact_ids)),
             "policy_fingerprint": self.policy_fingerprint,
