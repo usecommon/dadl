@@ -14,6 +14,18 @@ and is versioned separately from the packages.
   intervals). NumPyro is chosen as the optional MCMC backend (decision D2); see
   `docs/reviews/2026-11-ppl-benchmark.md`. No package code changed.
 
+### Phase 3, M1: calibration sets
+
+- `dadl.propagate.CalibrationSet` loads verified artifacts for an analysis and draws their
+  posteriors jointly: columns of one artifact share a sample index; artifacts are drawn
+  independently, keyed on their IDs. Stand-in columns are returned as bounds, never as draws
+  (decision D3).
+- Refusals before any calibration is used: misfit artifacts (override `misfit_calibration`);
+  artifacts outside their `valid_for` range or whose recorded conditions do not cover the
+  dataset, with `tagger_*` settings now compared at use (new `StaleCalibration`, override
+  `calibration_outside_validity`); and artifacts calibrated on the analysed data (no override).
+  Overrides label the result "policy modified".
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results
