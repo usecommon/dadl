@@ -102,7 +102,11 @@ plainly:
 - **Bell results** assume fair sampling and fair coincidence, with static
   settings: they do not close detection, locality or freedom-of-choice
   loopholes (nor the memory loophole, where a local model uses earlier
-  trials). "Coincidences per singles" is printed for each arm: the fraction
+  trials). A planned, fixed window does not by itself close the
+  coincidence-time loophole for CHSH: a local model whose timing shifts are
+  a little shorter than the window still reads S > 2 (2.34 in
+  `test_published_results.py`); only windows much wider than any plausible
+  setting-dependent delay make that model fail. "Coincidences per singles" is printed for each arm: the fraction
   of that arm's clicks that post-selection kept, about the other arm's
   efficiency times the window capture. Compare the smaller of the two with
   the detection-loophole thresholds, about 0.83 (CHSH) or 2/3 (Eberhard). CHSH needs both outputs of each analyser (A+, A−, B+, B−); the
