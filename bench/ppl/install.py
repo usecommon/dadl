@@ -19,6 +19,8 @@ import time
 import venv
 from pathlib import Path
 
+# Pinned so the install does not query the GitHub API for the latest release (rate-limited on CI).
+CMDSTAN_VERSION = "2.40.0"
 PACKAGES = {"numpyro": ["numpyro"], "pymc": ["pymc"], "cmdstanpy": ["cmdstanpy"]}
 
 
@@ -50,9 +52,9 @@ def main(library: str, venv_dir: str, run_dir: str) -> None:
     if not rec["pip_ok"]:
         rec["pip_error"] = (proc.stderr or proc.stdout)[-2000:]
     if library == "cmdstanpy" and rec["pip_ok"]:
-        home = out / "cmdstan-home"
+        home = (out / "cmdstan-home").resolve()
         home.mkdir(exist_ok=True)
-        args = [str(py), "-m", "cmdstanpy.install_cmdstan", "--dir", str(home), "--cores", "4"]
+        args = [str(py), "-m", "cmdstanpy.install_cmdstan", "--dir", str(home), "--cores", "4", "--version", CMDSTAN_VERSION]
         if os.name == "nt":
             args.append("--compiler")
         t = time.perf_counter()
