@@ -1,6 +1,6 @@
 # Phase 3 plan: inference and plans
 
-Nov 15, 2026 · draft for the owner · builds on 0.1.1
+Nov 15, 2026 · decisions taken Nov 16, 2026 · builds on 0.1.1
 
 Phase 3 in [design.md](design.md#mvp-scope-and-milestones) delivers "forward model, joint Monte
 Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n)
@@ -45,7 +45,7 @@ calibration uncertainty), so the gate has three parts, all required on every pul
 3. **`coverage`** (extended): the phase 2 job plus the series dead-time regimes (M4) and, if
    NUTS is adopted (M5), the same gates run with NUTS posteriors on the fast tier.
 
-**Decision D1.** Adopt the three-part gate (recommended), or keep the design's `guardrails` job
+**Decision D1 (taken: three-part gate).** Adopt the three-part gate, or keep the design's `guardrails` job
 only. If adopted, design.md's phase table row changes to name all three.
 
 ## Milestones
@@ -86,7 +86,7 @@ install benchmark on Windows" (open question in design.md).
 - Acceptance: all three measured on all three OSes or the failure recorded; licences checked
   (NumPyro Apache-2.0, PyMC Apache-2.0, Stan BSD-3; all compatible with MIT OR Apache-2.0).
 
-**Decision D2.** Library choice, after M0. Recommendation going in: NumPyro, as an optional
+**Decision D2 (taken: NumPyro preferred, M0 confirms).** Library choice, after M0. Recommendation going in: NumPyro, as an optional
 extra `dadl-quantum[mcmc]`, if JAX installs from wheels on Windows without a compiler; PyMC
 second. Stan's separate toolchain install fails the "clean install on a lab PC" test unless the
 benchmark shows otherwise. Whatever wins stays optional: the base install keeps NumPy and SciPy
@@ -326,9 +326,12 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Rotating seeds for the coverage gates | expert review Q11 | M10, if the owner agrees to change the gate rule before running |
 | Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
 
-## Decisions for the owner
+## Decisions
 
-| # | Question | Options | Recommendation |
+The owner took all nine on Nov 16, 2026, each as recommended below. D2 is a
+preference going into M0; the benchmark still has to confirm it.
+
+| # | Question | Options | Decided |
 | --- | --- | --- | --- |
 | D1 | What gates phase 3 | `guardrails` only (design) / plus `propagation` and extended `coverage` | Three-part gate: corrected intervals are the new numbers and need a coverage test |
 | D2 | MCMC library | NumPyro / PyMC / Stan, after M0 | NumPyro as an optional extra if it installs from wheels on Windows; Laplace stays default |
