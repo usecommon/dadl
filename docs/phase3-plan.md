@@ -86,7 +86,7 @@ install benchmark on Windows" (open question in design.md).
 - Acceptance: all three measured on all three OSes or the failure recorded; licences checked
   (NumPyro Apache-2.0, PyMC Apache-2.0, Stan BSD-3; all compatible with MIT OR Apache-2.0).
 
-**Decision D2 (taken: NumPyro preferred, M0 confirms).** Library choice, after M0. Recommendation going in: NumPyro, as an optional
+**Decision D2 (taken: NumPyro, confirmed by M0 in [the benchmark record](reviews/2026-11-ppl-benchmark.md)).** Library choice, after M0. Recommendation going in: NumPyro, as an optional
 extra `dadl-quantum[mcmc]`, if JAX installs from wheels on Windows without a compiler; PyMC
 second. Stan's separate toolchain install fails the "clean install on a lab PC" test unless the
 benchmark shows otherwise. Whatever wins stays optional: the base install keeps NumPy and SciPy
