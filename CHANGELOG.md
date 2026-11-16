@@ -7,6 +7,13 @@ and is versioned separately from the packages.
 
 ## Unreleased
 
+### Phase 3, M0: inference library benchmark
+
+- `bench/ppl/` and the `PPL benchmark` workflow measure NumPyro, PyMC and Stan on Windows,
+  Linux and macOS (binary-only install, size, compile and sampling speed, agreement with DADL's
+  intervals). NumPyro is chosen as the optional MCMC backend (decision D2); see
+  `docs/reviews/2026-11-ppl-benchmark.md`. No package code changed.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results
