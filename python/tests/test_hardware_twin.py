@@ -2,10 +2,10 @@
 
 import numpy as np
 import pytest
-from ptu_writer import encode, write_ptu as write_fixture
+from ptu_writer import encode, encode_t3, write_ptu as write_fixture
 
 from dadl.adapters import Adapter, Faults, PtuFile, SimulatedTagger, check_accounting, ptu
-from dadl.adapters.ptu_write import DEVICES, encode_records, write_ptu
+from dadl.adapters.ptu_write import DEVICES, MAX_INPUT, T3_RECORD_TYPES, encode_records, encode_t3_records, write_ptu
 from dadl.cli import example_path, main
 from dadl.config import load_setup
 from dadl.errors import ConfigError
@@ -24,6 +24,44 @@ def test_vectorized_encoder_matches_the_record_by_record_writer(rtype):
     inputs = np.where(marker, rng.integers(1, 15, ticks.size), rng.integers(0, 3, ticks.size))
     events = [(int(t), "marker" if m else "tag", int(i)) for t, i, m in zip(ticks, inputs, marker)]
     np.testing.assert_array_equal(encode_records(rtype, ticks, inputs, marker), np.array(encode(rtype, events), dtype=np.uint32))
+
+
+@pytest.mark.parametrize("rtype", [ptu.PICOHARP_T3, ptu.HYDRAHARP1_T3, ptu.HYDRAHARP2_T3, ptu.MULTIHARP_T3])
+def test_vectorized_t3_encoder_matches_the_record_by_record_writer(rtype):
+    rng = np.random.default_rng(rtype & 0xFFFFF)
+    family, wrap = ptu.T3_FORMATS[rtype]
+    far = 1023 + 7 if family == "hh2" else 9  # an HH2 gap needing two count records
+    nsync = np.sort(np.concatenate([rng.integers(0, 40 * wrap, 2000), [50 * wrap, 50 * wrap, (50 + far) * wrap + 3]]))
+    marker = rng.random(nsync.size) < 0.05
+    inputs = np.where(marker, rng.integers(1, 15, nsync.size), rng.integers(1, 5, nsync.size))
+    dtime = np.where(marker, 0, rng.integers(0, 4096, nsync.size))
+    events = [(int(s), "marker" if m else "tag", int(i), int(d)) for s, i, m, d in zip(nsync, inputs, marker, dtime)]
+    np.testing.assert_array_equal(encode_t3_records(rtype, nsync, dtime, inputs, marker),
+                                  np.array(encode_t3(rtype, events), dtype=np.uint32))
+
+
+@pytest.mark.parametrize("device", sorted(DEVICES))
+def test_written_t3_file_reads_back_quantized(tmp_path, device):
+    _, tick, _ = DEVICES[device]
+    period = 12_500
+    rng = np.random.default_rng(1)
+    tags = {inp: np.sort(rng.choice(10**10, 3000, replace=False)) for inp in range(1, min(MAX_INPUT[device], 2) + 1)}
+    reader = PtuFile(write_ptu(tmp_path / "f.ptu", tags, device=device, sync_period_ps=period, markers=[(10**9, 3)]))
+    got = reader.read()
+    assert reader.mode == "T3" and reader.record_type == T3_RECORD_TYPES[device]
+    assert got.metadata["simulated"] is True and got.metadata["exact_ps"] is True
+    by_input = {ch.input: got[ch] for ch in got.channels}
+    for inp, t in tags.items():
+        np.testing.assert_array_equal(by_input[inp], t // period * period + t % period // tick * tick)
+    np.testing.assert_array_equal(by_input[0], np.unique(np.concatenate(list(tags.values())) // period) * period)
+    assert [(e.time_ps, e.value) for e in reader.events() if e.kind == "marker"] == [(10**9 // period * period, 3)]
+
+
+def test_t3_writer_refuses_sync_tags_and_long_periods(tmp_path):
+    with pytest.raises(ValueError, match="input 0"):
+        write_ptu(tmp_path / "a.ptu", {0: np.array([1, 2]), 1: np.array([5])}, sync_period_ps=12_500)
+    with pytest.raises(ValueError, match="dtime range"):
+        write_ptu(tmp_path / "b.ptu", {1: np.array([5])}, device="picoharp", sync_period_ps=100_000)
 
 
 @pytest.mark.parametrize("device", sorted(DEVICES))
@@ -63,6 +101,27 @@ def test_ptu_folder_round_trip_gives_the_same_result(tmp_path, capsys):
     assert main(["analyze", "chsh-spad", "--tags", str(tmp_path / "ptu")]) == 0
     via_ptu = capsys.readouterr().out.split("Raw S = ")[1].split()[0]
     assert direct == via_ptu
+
+
+def test_t3_ptu_folder_reads_back_the_simulated_tags(tmp_path):
+    """A HydraHarp T3 folder (1 ps dtime, 12.5 ns sync) returns the simulated tags exactly."""
+    from dadl.sim import DetectorParams, PairSource, simulate_hom
+    from dadl.tagfile import ptu_file, tag_tick_ps, tagger_settings
+
+    det = DetectorParams(efficiency=0.8, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    rng = np.random.default_rng(9)
+    runs = {key: simulate_hom(PairSource(pair_rate_per_s=1e5), det, det, delay, 0.05, rng)
+            for key, delay in (("dip", 0.0), ("reference", 50.0))}
+    runs = {k: {ch: t[t >= 0] for ch, t in run.items()} for k, run in runs.items()}
+    for i, key in enumerate(("dip", "reference")):
+        write_ptu(ptu_file(tmp_path, i), {1: runs[key]["A"], 2: runs[key]["B"]}, sync_period_ps=12_500)
+    # Input 0 (derived syncs) is left out unless mapped; the detector inputs read back exactly.
+    got = read_tags(tmp_path, {1: "A", 2: "B"}, ("dip", "reference"))
+    for key in runs:
+        for ch in ("A", "B"):
+            np.testing.assert_array_equal(got[key][ch], runs[key][ch])
+    assert tag_tick_ps(tmp_path) == 1
+    assert tagger_settings(tmp_path)["tagger_MeasDesc_Resolution"] == pytest.approx(1e-12)
 
 
 def test_calibration_from_simulated_ptu_is_recorded_as_sim(tmp_path, capsys):

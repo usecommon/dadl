@@ -13,14 +13,16 @@ Two encodings are accepted:
 - `.npz`: a NumPy archive with arrays named `setting`, `channel`, `timestamp_ps`;
 - `.csv`: a header line `setting,channel,timestamp_ps`, then one row per tag.
 
-A third form is a folder of PicoQuant PTU files (T2), one per acquisition,
-named setting0.ptu, setting1.ptu, ... in setting order; PTU input numbers are
-the channel numbers. Other vendor formats (Swabian .ttbin, Photon-HDF5) need
+A third form is a folder of PicoQuant PTU files (T2 or T3), one per
+acquisition, named setting0.ptu, setting1.ptu, ... in setting order; PTU input
+numbers are the channel numbers. In T3 files, input 0 (the syncs that started
+a recorded measurement, derived by the adapter) is read only when mapped. Other vendor formats (Swabian .ttbin, Photon-HDF5) need
 exporting to one of these.
 """
 
 from __future__ import annotations
 
+import math
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -233,6 +235,9 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
                 "DADL does not analyse incomplete files. Read it with dadl.adapters.PtuFile to inspect it."
             )
         by_input = {ch.input: tagset[ch] for ch in tagset.channels}
+        if reader.mode == "T3" and 0 not in channels:
+            # Derived from the tag records, not recorded: no record goes unread when it is left out.
+            by_input.pop(0, None)
         unknown = sorted(set(by_input) - set(channels))
         if unknown:
             raise ConfigError(
@@ -289,7 +294,17 @@ def tag_tick_ps(path: str | Path) -> int | None:
     files = sorted(path.glob("setting*.ptu"))
     if not files:
         return None
-    res = PtuFile(files[0]).resolution_s * 1e12
+    reader = PtuFile(files[0])
+    tick = _whole_ps(reader.resolution_s)
+    if reader.mode == "T3":
+        # T3 tags are nsync x period + dtime x resolution: they fall on the grid of both.
+        period = None if reader.sync_period_s is None else _whole_ps(reader.sync_period_s)
+        return math.gcd(tick, period) if tick and period else None
+    return tick
+
+
+def _whole_ps(seconds: float) -> int | None:
+    res = seconds * 1e12
     whole = round(res)
     return whole if whole >= 1 and abs(res - whole) <= 1e-9 * res else None
 
@@ -312,11 +327,14 @@ def tagger_settings(path: str | Path) -> dict[str, float]:
 
     found: dict[str, float] | None = None
     for f in sorted(path.glob("setting*.ptu")):
-        header = PtuFile(f).header
+        reader = PtuFile(f)
+        header = reader.header
+        # In T3 the dtime resolution places tags too (MeasDesc_GlobalResolution is the sync period).
+        prefixes = TAGGER_SETTING_PREFIXES + (("MeasDesc_Resolution",) if reader.mode == "T3" else ())
         settings = {
             f"tagger_{k}": float(v)
             for k, v in sorted(header.items())
-            if k.startswith(TAGGER_SETTING_PREFIXES) and isinstance(v, (int, float)) and not isinstance(v, bool)
+            if k.startswith(prefixes) and isinstance(v, (int, float)) and not isinstance(v, bool)
         }
         if found is None:
             found = settings

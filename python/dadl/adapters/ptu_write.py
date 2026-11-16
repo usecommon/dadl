@@ -1,4 +1,4 @@
-"""Write time tags as PicoQuant PTU files (T2 mode): the file half of DADL's hardware twin.
+"""Write time tags as PicoQuant PTU files (T2 or T3 mode): the file half of DADL's hardware twin.
 
 `write_ptu` turns tags (int64 ps per input) into the file a PicoQuant
 instrument would have written: the PTU header, then 32-bit T2 records with
@@ -9,6 +9,13 @@ Tags are quantized to the device tick (floor), as an ideal TDC does; with
 the HydraHarp's 1 ps tick, simulated ps tags pass through unchanged. The twin
 models no TDC dead time, differential non-linearity or overrun stop: its
 files are structurally valid, not a model of every instrument behaviour.
+
+With `sync_period_ps`, the file is T3: each tag becomes the sync period it
+falls in (nsync = t // period) and its start-stop time after that sync in
+device ticks (dtime), so it reads back as t // period * period plus the
+tick-floored remainder. The sync is implied by the period, not written as
+tags (input 0 is refused), and the period must fit in the device's dtime
+field (4096 ticks on the PicoHarp, 32768 on the HydraHarp family).
 
 Every file this module writes says so: the header carries
 `CreatorSW_Name = "DADL"` and `DADL_Simulated = True`, and the reader marks
@@ -40,10 +47,21 @@ DEVICES: dict[str, tuple[int, int, str]] = {
     "multiharp": (ptu.MULTIHARP_T2, 5, "MultiHarp 160"),
     "multiharp150n": (ptu.MULTIHARP_T2, 80, "MultiHarp 150 N"),
 }
+#: The T3 record type of each preset (same tick, used as the dtime resolution).
+T3_RECORD_TYPES: dict[str, int] = {
+    "picoharp": ptu.PICOHARP_T3,
+    "hydraharp": ptu.HYDRAHARP2_T3,
+    "timeharp260p": ptu.TIMEHARP260P_T3,
+    "multiharp": ptu.MULTIHARP_T3,
+    "multiharp150n": ptu.MULTIHARP_T3,
+}
 #: Highest input number each preset can record (HydraHarp family: 0 is the sync input).
 MAX_INPUT: dict[str, int] = {"picoharp": 1, "hydraharp": 8, "timeharp260p": 2, "multiharp": 64, "multiharp150n": 16}
 
 _HH2_MAX_COUNT = (1 << 25) - 1
+_HH2_T3_MAX_COUNT = (1 << 10) - 1
+#: Width of the T3 dtime field per family (bits).
+_T3_DTIME_BITS = {"picoharp": 12, "hh1": 15, "hh2": 15}
 
 
 def _entry(name: str, typ: int, value: Any, idx: int = -1) -> bytes:
@@ -62,6 +80,31 @@ def _entry(name: str, typ: int, value: Any, idx: int = -1) -> bytes:
     if typ == ptu.TY_BOOL8:
         return struct.pack("<32siIq", ident, idx, typ, 1 if value else 0)
     return struct.pack("<32siIq", ident, idx, typ, int(value))
+
+
+def _with_overflows(event: np.ndarray, delta: np.ndarray, family: str, ofl_value: np.uint32, max_count: int) -> np.ndarray:
+    """Event records with `delta[i]` wraps' worth of overflow records before event i."""
+    n_ofl = -(-delta // max_count) if family == "hh2" else delta
+    total = int(event.size + n_ofl.sum())
+    out = np.empty(total, dtype=np.uint32)
+    # Each event i is preceded by n_ofl[i] overflow records.
+    event_pos = np.arange(event.size) + np.cumsum(n_ofl)
+    out[event_pos] = event
+    is_ofl = np.ones(total, dtype=bool)
+    is_ofl[event_pos] = False
+    if family == "hh2":
+        # Counts per overflow record: full chunks of max_count, then the remainder.
+        idx = np.repeat(np.arange(event.size), n_ofl)
+        first = np.repeat(np.cumsum(n_ofl) - n_ofl, n_ofl)
+        k = np.arange(idx.size) - first  # chunk number within its event
+        remaining = delta[idx] - k * max_count
+        counts = np.minimum(remaining, max_count).astype(np.uint32)
+        out[is_ofl] = ofl_value | counts
+    elif family == "hh1":
+        out[is_ofl] = ofl_value | np.uint32(1)
+    else:
+        out[is_ofl] = ofl_value
+    return out
 
 
 def encode_records(
@@ -94,7 +137,6 @@ def encode_records(
             (np.uint32(0xF) << np.uint32(28)) | (t & np.uint32(0x0FFFFFF0)) | inputs.astype(np.uint32),
             (inputs.astype(np.uint32) << np.uint32(28)) | t,
         )
-        n_ofl = delta
         ofl_value = np.uint32(0xF) << np.uint32(28)
     else:
         if np.any(inputs[~marker] > 63) or np.any((inputs[marker] < 1) | (inputs[marker] > 15)):
@@ -103,32 +145,58 @@ def encode_records(
         chan = np.where(marker, inputs, np.where(inputs == 0, 0, inputs - 1)).astype(np.uint32)
         is_special = marker | (inputs == 0)
         event = np.where(is_special, special, np.uint32(0)) | (chan << np.uint32(25)) | t
-        if family == "hh2":
-            n_ofl = -(-delta // _HH2_MAX_COUNT)
-        else:
-            n_ofl = delta
         ofl_value = special | (np.uint32(0x3F) << np.uint32(25))
+    return _with_overflows(event, delta, family, ofl_value, _HH2_MAX_COUNT)
 
-    total = int(ticks.size + n_ofl.sum())
-    out = np.empty(total, dtype=np.uint32)
-    # Each event i is preceded by n_ofl[i] overflow records.
-    event_pos = np.arange(ticks.size) + np.cumsum(n_ofl)
-    out[event_pos] = event
-    is_ofl = np.ones(total, dtype=bool)
-    is_ofl[event_pos] = False
-    if family == "hh2":
-        # Counts per overflow record: full chunks of _HH2_MAX_COUNT, then the remainder.
-        idx = np.repeat(np.arange(ticks.size), n_ofl)
-        first = np.repeat(np.cumsum(n_ofl) - n_ofl, n_ofl)
-        k = np.arange(idx.size) - first  # chunk number within its event
-        remaining = delta[idx] - k * _HH2_MAX_COUNT
-        counts = np.minimum(remaining, _HH2_MAX_COUNT).astype(np.uint32)
-        out[is_ofl] = ofl_value | counts
-    elif family == "hh1":
-        out[is_ofl] = ofl_value | np.uint32(1)
+
+def encode_t3_records(
+    record_type: int,
+    nsync: np.ndarray,
+    dtime: np.ndarray,
+    inputs: np.ndarray,
+    is_marker: np.ndarray | None = None,
+) -> np.ndarray:
+    """32-bit T3 records for events sorted by nsync: tags (inputs, dtime) and markers (marker bits).
+
+    Inputs use the reader's numbering (PicoHarp 1-4; HydraHarp family k >= 1
+    is record channel k - 1). Overflow records follow the T2 rules with the
+    nsync wrap: one per wrap for PicoHarp and HydraHarp v1, one record carrying
+    the wrap count (up to 2^10 - 1) for the HydraHarp v2 family.
+    """
+    family, wrap = ptu.T3_FORMATS[record_type]
+    nsync = np.asarray(nsync, dtype=np.int64)
+    dtime = np.asarray(dtime, dtype=np.int64)
+    inputs = np.asarray(inputs, dtype=np.int64)
+    marker = np.zeros(nsync.size, dtype=bool) if is_marker is None else np.asarray(is_marker, dtype=bool)
+    if nsync.size and (np.any(np.diff(nsync) < 0) or nsync[0] < 0):
+        raise ValueError("nsync must be non-negative and sorted")
+    if np.any((dtime[~marker] < 0) | (dtime[~marker] >= 1 << _T3_DTIME_BITS[family])):
+        raise ValueError(f"dtime must fit in {_T3_DTIME_BITS[family]} bits")
+    q = nsync // wrap
+    delta = np.diff(q, prepend=0)
+    n = (nsync - q * wrap).astype(np.uint32)
+    d = np.where(marker, 0, dtime).astype(np.uint32)
+
+    if family == "picoharp":
+        if np.any((inputs[~marker] < 1) | (inputs[~marker] > 4)) or np.any((inputs[marker] < 1) | (inputs[marker] > 0xF)):
+            raise ValueError("PicoHarp T3 inputs must be 1..4 and marker bits 1..15")
+        event = np.where(
+            marker,
+            (np.uint32(0xF) << np.uint32(28)) | (inputs.astype(np.uint32) << np.uint32(16)) | n,
+            (inputs.astype(np.uint32) << np.uint32(28)) | (d << np.uint32(16)) | n,
+        )
+        ofl_value = np.uint32(0xF) << np.uint32(28)
     else:
-        out[is_ofl] = ofl_value
-    return out
+        if np.any((inputs[~marker] < 1) | (inputs[~marker] > 64)) or np.any((inputs[marker] < 1) | (inputs[marker] > 15)):
+            raise ValueError("HydraHarp-family T3 inputs must be 1..64 and marker bits 1..15")
+        special = np.uint32(1) << np.uint32(31)
+        event = np.where(
+            marker,
+            special | (inputs.astype(np.uint32) << np.uint32(25)) | n,
+            ((inputs - 1).astype(np.uint32) << np.uint32(25)) | (d << np.uint32(10)) | n,
+        )
+        ofl_value = special | (np.uint32(0x3F) << np.uint32(25))
+    return _with_overflows(event, delta, family, ofl_value, _HH2_T3_MAX_COUNT)
 
 
 def write_ptu(
@@ -141,11 +209,29 @@ def write_ptu(
     serial: str = "SIM-0001",
     trigger_levels_mv: Mapping[int, int] | None = None,
     comment: str = "DADL simulation, not a recording",
+    sync_period_ps: int | None = None,
 ) -> Path:
-    """Write `tags` ({input: sorted int64 ps}) and `markers` ([(time_ps, bits)]) as a T2 PTU file."""
+    """Write `tags` ({input: sorted int64 ps}) and `markers` ([(time_ps, bits)]) as a PTU file.
+
+    T2 by default; T3 when `sync_period_ps` (a whole number of ps) is given.
+    """
     if device not in DEVICES:
         raise ValueError(f"device must be one of {sorted(DEVICES)}, got {device!r}")
     record_type, tick_ps, hw_type = DEVICES[device]
+    t3 = sync_period_ps is not None
+    if t3:
+        record_type = T3_RECORD_TYPES[device]
+        if isinstance(sync_period_ps, bool) or int(sync_period_ps) != sync_period_ps or sync_period_ps <= 0:
+            raise ValueError("sync_period_ps must be a positive whole number of ps")
+        sync_period_ps = int(sync_period_ps)
+        bits = _T3_DTIME_BITS[ptu.T3_FORMATS[record_type][0]]
+        if (sync_period_ps - 1) // tick_ps >= 1 << bits:
+            raise ValueError(
+                f"a {sync_period_ps} ps sync period is longer than the {hw_type} T3 dtime range "
+                f"({(1 << bits) * tick_ps} ps at a {tick_ps} ps resolution)"
+            )
+        if any(int(k) == 0 for k in tags):
+            raise ValueError("T3 files record no sync tags: input 0 is implied by sync_period_ps")
     too_high = sorted(int(k) for k in tags if int(k) > MAX_INPUT[device])
     if too_high:
         raise ValueError(
@@ -157,23 +243,35 @@ def write_ptu(
         arr = np.asarray(arr, dtype=np.int64)
         if arr.size and arr[0] < 0:
             raise AdapterError("PTU times cannot be negative; shift the tags to start at 0 or later")
-        parts_t.append(arr // tick_ps)
+        parts_t.append(arr)
         parts_i.append(np.full(arr.size, int(inp), dtype=np.int64))
         parts_m.append(np.zeros(arr.size, dtype=bool))
     if markers:
         m = np.asarray(markers, dtype=np.int64).reshape(-1, 2)
-        parts_t.append(m[:, 0] // tick_ps)
+        parts_t.append(m[:, 0])
         parts_i.append(m[:, 1])
         parts_m.append(np.ones(len(m), dtype=bool))
-    ticks = np.concatenate(parts_t) if parts_t else np.empty(0, dtype=np.int64)
+    times = np.concatenate(parts_t) if parts_t else np.empty(0, dtype=np.int64)
     inputs = np.concatenate(parts_i) if parts_i else np.empty(0, dtype=np.int64)
     marker = np.concatenate(parts_m) if parts_m else np.empty(0, dtype=bool)
-    order = np.argsort(ticks, kind="stable")
-    records = encode_records(record_type, ticks[order], inputs[order], marker[order])
+    if t3:
+        assert sync_period_ps is not None
+        nsync = times // sync_period_ps
+        dtime = np.where(marker, 0, (times - nsync * sync_period_ps) // tick_ps)
+        quantized = nsync * sync_period_ps + dtime * tick_ps
+        order = np.argsort(quantized, kind="stable")
+        records = encode_t3_records(record_type, nsync[order], dtime[order], inputs[order], marker[order])
+        last = int(quantized.max()) + tick_ps if times.size else 0
+    else:
+        ticks = times // tick_ps
+        order = np.argsort(ticks, kind="stable")
+        records = encode_records(record_type, ticks[order], inputs[order], marker[order])
+        last = int(ticks.max() + 1) * tick_ps if ticks.size else 0
 
     n_inputs = max([int(k) for k in tags] + [0]) + 1
     if duration_ps is None:
-        duration_ps = int(ticks.max() + 1) * tick_ps if ticks.size else 0
+        duration_ps = last
+    global_res_ps = sync_period_ps if t3 else tick_ps
     header = [
         _entry("File_GUID", ptu.TY_ANSI_STRING, "{00000000-0000-0000-0000-000000000000}"),
         _entry("File_Comment", ptu.TY_ANSI_STRING, comment),
@@ -183,16 +281,19 @@ def write_ptu(
         _entry("HW_Type", ptu.TY_ANSI_STRING, hw_type),
         _entry("HW_SerialNo", ptu.TY_ANSI_STRING, serial),
         _entry("HW_InpChannels", ptu.TY_INT8, n_inputs),
-        _entry("Measurement_Mode", ptu.TY_INT8, 2),
+        _entry("Measurement_Mode", ptu.TY_INT8, 3 if t3 else 2),
         _entry("Measurement_SubMode", ptu.TY_INT8, 0),
         _entry("MeasDesc_Resolution", ptu.TY_FLOAT8, tick_ps * 1e-12),
-        _entry("MeasDesc_GlobalResolution", ptu.TY_FLOAT8, tick_ps * 1e-12),
+        _entry("MeasDesc_GlobalResolution", ptu.TY_FLOAT8, global_res_ps * 1e-12),
         _entry("MeasDesc_AcquisitionTime", ptu.TY_FLOAT8, duration_ps / 1e9),
         _entry("TTResultFormat_TTTRRecType", ptu.TY_INT8, record_type),
         _entry("TTResultFormat_BitsPerRecord", ptu.TY_INT8, 32),
         _entry("TTResult_NumberOfRecords", ptu.TY_INT8, int(records.size)),
         _entry("TTResult_StopReason", ptu.TY_INT8, 0),
     ]
+    if t3:
+        assert sync_period_ps is not None
+        header.append(_entry("TTResult_SyncRate", ptu.TY_INT8, round(1e12 / sync_period_ps)))
     for inp, level in sorted((trigger_levels_mv or {}).items()):
         header.append(_entry("HWInpChan_TrgLevel", ptu.TY_INT8, int(level), idx=int(inp)))
     header.append(_entry("Header_End", ptu.TY_EMPTY8, None))

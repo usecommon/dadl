@@ -37,6 +37,52 @@ and is versioned separately from the packages.
   windows, with no significant violation (not "none") with a predefined one.
 - No package code changed; no bugs found.
 
+### PicoQuant PTU T3 mode
+
+- `dadl.adapters.ptu` reads T3 files from the same devices as T2: PicoHarp
+  300 (0x00010303), HydraHarp v1 (0x00010304), HydraHarp v2 (0x01010304),
+  TimeHarp 260 N/P (0x00010305, 0x00010306) and generic T3 (MultiHarp,
+  PicoHarp 330: 0x00010307). Record types, bit layouts and overflow rules
+  follow PicoQuant's demo code (PicoQuant-Time-Tagged-File-Format-Demos,
+  PTU/C/ptudemo.cc and PTU/Python/Read_PTU.py). Tags are nsync x sync period
+  + dtime x resolution in int64 ps, exact when both are whole ps, rounded
+  with a note otherwise (the period's fraction is kept exactly, so late
+  syncs do not drift); metadata records the time model and its assumption
+  of a constant sync period. Input numbers match T2 (HydraHarp family:
+  record channel k is input k + 1); input 0 holds the syncs that started a
+  recorded measurement, not every sync, and a `t3-sync` event says so.
+  Overflows, markers (at their sync) and unknown special records are
+  accounted for as in T2; PicoHarp T3 channels outside 1-4 and tags out of
+  time order (a dtime beyond the header's sync period) are refused. Before,
+  T3 files were refused.
+- PTU folders (`--tags DIR`) accept T3 files; input 0 is read only when
+  mapped. `tag_tick_ps` is the grid of both period and resolution, and the
+  T3 dtime resolution is recorded with the tagger settings.
+- `dadl.adapters.ptu_write.write_ptu(..., sync_period_ps=...)` writes
+  simulated T3 files (`encode_t3_records`), byte-identical to the test
+  suite's record-by-record writer.
+
+### Crosstalk in the simulator (phase 1)
+
+- `dadl.sim.Crosstalk(source, target, probability, delay_ps, jitter_sigma_ps)`:
+  opt-in crosstalk links for `detect_channels`, `simulate_pairs`,
+  `simulate_hom`, `simulate_chsh_setting` and `simulate_chsh`. Every
+  recorded avalanche on the source can trigger one on the target at a
+  jittered offset (a Si SPAD breakdown flash after 2 n_g L / c, or zero for
+  electrical crosstalk); crosstalk avalanches start dead time, afterpulse
+  and trigger crosstalk in turn, all in one time-domain event loop. Off by
+  default: without links every channel is simulated as before and results
+  for a given seed are unchanged.
+- Closed-form tests: a thinned shifted copy on a dark channel, a
+  cross-correlation excess of p x singles at the offset (none at the
+  mirror offset), geometric cascades both ways, crosstalk lost inside the
+  target's dead time, recorded crosstalk starting a dead time, crosstalk
+  avalanches afterpulsing.
+- Not yet: crosstalk in `setup.yaml`, a crosstalk calibration, or a label in
+  the HOM analysis (in the two-point method an in-window crosstalk excess
+  looks like coincidences). On `hom-snspd`, 1% zero-offset crosstalk A to B
+  lowers V from 0.919 to 0.904 (README, Known limits).
+
 ## 0.1.1 (2026-11-14)
 
 Release fix, no code changes to the packages. The 0.1.0 upload of

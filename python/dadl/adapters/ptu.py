@@ -1,8 +1,8 @@
-"""PicoQuant PTU files, T2 mode, read without vendor software.
+"""PicoQuant PTU files, T2 and T3 mode, read without vendor software.
 
 A PTU file is the 8-byte magic `PQTTTR\\0\\0`, an 8-byte version, a list of
 tagged header entries ending with `Header_End`, then 32-bit records.
-Supported record types (T2: every event carries its absolute time):
+Supported record types. T2, where every event carries its absolute time:
 
 | Device | Record type | Tick wrap per overflow |
 | --- | --- | --- |
@@ -10,16 +10,46 @@ Supported record types (T2: every event carries its absolute time):
 | HydraHarp, format v1 | 0x00010204 | 33552000 |
 | HydraHarp v2, TimeHarp 260 N/P, generic T2 (MultiHarp, PicoHarp 330) | 0x01010204, 0x00010205, 0x00010206, 0x00010207 | 33554432 x count |
 
-T3 files (times relative to a sync pulse) are refused with a clear error.
+T3, where every event carries the number of the sync period it fell in
+(nsync) and its start-stop time after that sync (dtime):
 
-Channels: PicoHarp inputs keep their numbers (0 and 1). On the HydraHarp
-family the sync input is 0 and detector input k (numbered from 0 in the
-record) is k + 1, matching PicoQuant's own numbering.
+| Device | Record type | Fields, most significant first (bits) | nsync wrap per overflow |
+| --- | --- | --- | --- |
+| PicoHarp 300 | 0x00010303 | channel 4, dtime 12, nsync 16 | 65536 |
+| HydraHarp, format v1 | 0x00010304 | special 1, channel 6, dtime 15, nsync 10 | 1024 |
+| HydraHarp v2, TimeHarp 260 N/P, generic T3 (MultiHarp, PicoHarp 330) | 0x01010304, 0x00010305, 0x00010306, 0x00010307 | as HydraHarp v1 | 1024 x count |
 
-Times: ticks are multiplied by `MeasDesc_GlobalResolution` to give ps. When
-that is a whole number of ps (1, 4, 5, 80 ps, ...) the conversion is exact
-integer arithmetic; otherwise tags are rounded to the nearest ps and a note
-says so.
+Record types, bit layouts and overflow rules follow PicoQuant's demo code
+(github.com/PicoQuant/PicoQuant-Time-Tagged-File-Format-Demos: PTU/C/ptudemo.cc
+and PTU/Python/Read_PTU.py). A T3 overflow record (PicoHarp: channel 15 with
+dtime 0; HydraHarp family: special, channel 63) adds one wrap, or on v2-family
+files `nsync` wraps (0 meaning 1). Markers are PicoHarp channel 15 with a
+non-zero dtime (the dtime field holds the marker bits) and HydraHarp-family
+special records on channels 1-15.
+
+T3 times: a T3 file stores no absolute times. The absolute time of a T3 event
+is nsync x sync period + dtime x resolution, with the sync period from
+`MeasDesc_GlobalResolution` and the dtime unit from `MeasDesc_Resolution`.
+This assumes the sync period in the header held for the whole acquisition: a
+sync source that drifts by a fraction f moves a tag at time t by about f x t.
+Markers carry no dtime and are placed at their sync. The sync input is a
+channel of its own (input 0, as in T2), but a T3 file records only the syncs
+that started a recorded start-stop measurement: the sync channel holds one
+tag per distinct nsync of a tag record, not every sync pulse, a `t3-sync`
+event says so, and `sync_periods` in the metadata counts the sync periods
+the data span. Its singles rate is therefore not the sync rate.
+
+Channels: PicoHarp inputs keep their numbers (T2: 0 and 1; T3 detector
+records 1-4, with the sync as 0). On the HydraHarp family the sync input is 0
+and detector input k (numbered from 0 in the record) is k + 1, matching
+PicoQuant's own T2 numbering; T3 files use the same numbers, so an input
+keeps its number in either mode.
+
+Times: T2 ticks are multiplied by `MeasDesc_GlobalResolution` to give ps.
+When that (in T3: both the sync period and the dtime resolution) is a whole
+number of ps (1, 4, 5, 80 ps, a 12500 ps sync period, ...) the conversion is
+exact integer arithmetic; otherwise tags are rounded to the nearest ps and a
+note says so.
 
 The whole record body is decoded in memory: about 100 bytes per record at
 peak (a 160 MB file took 4.2 GB; with markers about 215 bytes per record).
@@ -42,8 +72,10 @@ reported as summary `Event`s, markers one by one.
 
 from __future__ import annotations
 
+import math
 import struct
 from collections.abc import Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +106,12 @@ HYDRAHARP2_T2 = 0x01010204
 TIMEHARP260N_T2 = 0x00010205
 TIMEHARP260P_T2 = 0x00010206
 MULTIHARP_T2 = 0x00010207
+PICOHARP_T3 = 0x00010303
+HYDRAHARP1_T3 = 0x00010304
+HYDRAHARP2_T3 = 0x01010304
+TIMEHARP260N_T3 = 0x00010305
+TIMEHARP260P_T3 = 0x00010306
+MULTIHARP_T3 = 0x00010307
 #: TTResult_StopReason values that end a complete acquisition; any other value means data were lost.
 COMPLETE_STOP_REASONS = {0: "time over", 1: "manual stop", 2: "count overflow stop"}
 STOP_REASON_NAMES = {3: "error", -2: "FIFO overrun", -9: "queue overrun", -10: "data transfer failure",
@@ -81,17 +119,21 @@ STOP_REASON_NAMES = {3: "error", -2: "FIFO overrun", -9: "queue overrun", -10: "
 #: PicoHarp 300 T2 channel values: 0 is the sync input (Ch0), 1-4 are Ch1 through a PHR router
 #: (channel 1 without one). PicoQuant's T2 demo code treats channel > 4 as illegal.
 PICOHARP_MAX_INPUT = 4
+#: PicoHarp 300 T3 detector channels are 1-4; PicoQuant's T3 demo code treats 0 and > 4 as illegal.
+PICOHARP_T3_MIN_INPUT = 1
+#: Sync periods (MeasDesc_GlobalResolution of a T3 file) accepted: 1 ps to 1 s.
+T3_PERIOD_RANGE_S = (1e-12, 1.0)
 
 #: Header bytes read first; a longer header is read on in steps.
 HEADER_CHUNK = 1 << 16
 #: More inputs than any PicoQuant device has; a larger HW_InpChannels is a corrupt header.
 MAX_HEADER_INPUTS = 256
 
-T3_TYPES = {0x00010303, 0x00010304, 0x01010304, 0x00010305, 0x00010306, 0x00010307}
-
 PICOHARP_WRAP = 210_698_240
 HYDRAHARP1_WRAP = 33_552_000
 HH2_WRAP = 33_554_432
+PICOHARP_T3_WRAP = 65_536
+HH_T3_WRAP = 1_024
 
 #: Record type -> (family, wrap). "hh1" counts one wrap per overflow record;
 #: "hh2" counts the record's 25-bit value (0 meaning 1).
@@ -103,6 +145,19 @@ FORMATS = {
     TIMEHARP260P_T2: ("hh2", HH2_WRAP),
     MULTIHARP_T2: ("hh2", HH2_WRAP),
 }
+#: T3 record type -> (family, nsync wrap): the same overflow rules per family as T2, with
+#: "hh2" counting the record's 10-bit nsync value (0 meaning 1).
+T3_FORMATS = {
+    PICOHARP_T3: ("picoharp", PICOHARP_T3_WRAP),
+    HYDRAHARP1_T3: ("hh1", HH_T3_WRAP),
+    HYDRAHARP2_T3: ("hh2", HH_T3_WRAP),
+    TIMEHARP260N_T3: ("hh2", HH_T3_WRAP),
+    TIMEHARP260P_T3: ("hh2", HH_T3_WRAP),
+    MULTIHARP_T3: ("hh2", HH_T3_WRAP),
+}
+T3_TYPES = frozenset(T3_FORMATS)
+
+_INT64_MAX = int(np.iinfo(np.int64).max)
 
 
 def parse_header(data: bytes) -> tuple[dict[str, Any], int]:
@@ -149,8 +204,16 @@ def parse_header(data: bytes) -> tuple[dict[str, Any], int]:
     raise AdapterError("PTU header has too many entries")
 
 
+def _unwrap(incr: np.ndarray, wrap: int) -> np.ndarray:
+    """Running overflow offset; refuses sums beyond int64."""
+    # A crafted file of maximal overflow records wrapped the int64 sum silently (QKD review, cycle 4).
+    if incr.size and float(np.sum(incr, dtype=np.float64)) + float(wrap) >= float(_INT64_MAX):
+        raise AdapterError("PTU overflow records exceed the int64 tick range")
+    return np.cumsum(incr, dtype=np.int64)
+
+
 def _decode(records: np.ndarray, family: str, wrap: int) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Ticks and input numbers of every tag, plus the non-tag records."""
+    """T2: ticks and input numbers of every tag, plus the non-tag records."""
     rec = records.astype(np.uint64)
     if family == "picoharp":
         ch = (rec >> np.uint64(28)).astype(np.int64)
@@ -179,11 +242,7 @@ def _decode(records: np.ndarray, family: str, wrap: int) -> tuple[np.ndarray, np
         is_tag = ~sp | sync
         tag_input = np.where(sync, 0, ch + 1)
         marker_bits = ch
-    # A crafted file of maximal overflow records wrapped the int64 sum silently (QKD review, cycle 4).
-    if incr.size and float(np.sum(incr, dtype=np.float64)) + float(wrap) >= float(np.iinfo(np.int64).max):
-        raise AdapterError("PTU overflow records exceed the int64 tick range")
-    offset = np.cumsum(incr, dtype=np.int64)
-    time = offset + tt
+    time = _unwrap(incr, wrap) + tt
     extra = {
         "rollovers": int(np.sum(incr) // wrap) if incr.size else 0,
         "overflow_records": int(overflow.sum()),
@@ -196,18 +255,100 @@ def _decode(records: np.ndarray, family: str, wrap: int) -> tuple[np.ndarray, np
     return time[is_tag], tag_input[is_tag], extra
 
 
-def _to_ps(ticks: np.ndarray, resolution_s: float) -> tuple[np.ndarray, bool]:
-    res_ps = resolution_s * 1e12
+def _decode_t3(
+    records: np.ndarray, family: str, wrap: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """T3: unwrapped nsync, dtime and input number of every tag, plus the non-tag records."""
+    rec = records.astype(np.uint64)
+    if family == "picoharp":
+        ch = (rec >> np.uint64(28)).astype(np.int64)
+        dtime = ((rec >> np.uint64(16)) & np.uint64(0xFFF)).astype(np.int64)
+        nsync = (rec & np.uint64(0xFFFF)).astype(np.int64)
+        special = ch == 0xF
+        overflow = special & (dtime == 0)
+        marker = special & (dtime != 0)
+        unknown = np.zeros(rec.size, dtype=bool)
+        incr = np.where(overflow, wrap, 0)
+        is_tag = ~special
+        tag_input = ch
+        marker_bits = dtime
+    else:
+        sp = (rec >> np.uint64(31)).astype(bool)
+        ch = ((rec >> np.uint64(25)) & np.uint64(0x3F)).astype(np.int64)
+        dtime = ((rec >> np.uint64(10)) & np.uint64(0x7FFF)).astype(np.int64)
+        nsync = (rec & np.uint64(0x3FF)).astype(np.int64)
+        overflow = sp & (ch == 0x3F)
+        marker = sp & (ch >= 1) & (ch <= 15)
+        # Special records on channel 0 or 16-62 have no meaning in T3; they are counted, not read.
+        unknown = sp & ~overflow & ~marker
+        if family == "hh1":
+            incr = np.where(overflow, wrap, 0)
+        else:
+            incr = np.where(overflow, wrap * np.where(nsync == 0, 1, nsync), 0)
+        is_tag = ~sp
+        tag_input = ch + 1
+        marker_bits = ch
+    n = _unwrap(incr, wrap) + nsync
+    used = is_tag | marker
+    extra = {
+        "rollovers": int(np.sum(incr) // wrap) if incr.size else 0,
+        "overflow_records": int(overflow.sum()),
+        "marker_nsync": n[marker],
+        "marker_bits": marker_bits[marker],
+        "unknown": int(unknown.sum()),
+        "sync_periods": int(n[used].max()) + 1 if used.any() else 0,
+    }
+    if int(is_tag.sum() + overflow.sum() + marker.sum() + unknown.sum()) != rec.size:
+        raise AssertionError("PTU record accounting does not add up")  # pragma: no cover
+    return n[is_tag], dtime[is_tag], tag_input[is_tag], extra
+
+
+def _whole_ps(seconds: float) -> int | None:
+    """`seconds` as a whole number of ps, or None when it is not one (to 1e-9 relative)."""
+    res_ps = seconds * 1e12
     whole = round(res_ps)
     if whole >= 1 and abs(res_ps - whole) <= 1e-9 * res_ps:
-        if ticks.size and int(ticks.max()) > np.iinfo(np.int64).max // whole:
+        return int(whole)
+    return None
+
+
+def _to_ps(ticks: np.ndarray, resolution_s: float) -> tuple[np.ndarray, bool]:
+    whole = _whole_ps(resolution_s)
+    if whole is not None:
+        if ticks.size and int(ticks.max()) > _INT64_MAX // whole:
             raise AdapterError("PTU times exceed the int64 ps range")
         return ticks * np.int64(whole), True
-    return np.rint(ticks.astype(np.float64) * res_ps).astype(np.int64), False
+    return np.rint(ticks.astype(np.float64) * (resolution_s * 1e12)).astype(np.int64), False
+
+
+def _t3_to_ps(nsync: np.ndarray, dtime: np.ndarray, period_s: float, resolution_s: float) -> tuple[np.ndarray, bool]:
+    """nsync x period + dtime x resolution in ps: exact when both are whole ps, else rounded."""
+    period, res = _whole_ps(period_s), _whole_ps(resolution_s)
+    if period is not None and res is not None:
+        if nsync.size and int(nsync.max()) * period + int(dtime.max()) * res > _INT64_MAX:
+            raise AdapterError("PTU times exceed the int64 ps range")
+        return nsync * np.int64(period) + dtime * np.int64(res), True
+    period_ps, res_ps = period_s * 1e12, resolution_s * 1e12
+    if nsync.size and float(nsync.max()) * period_ps + float(dtime.max()) * res_ps >= 0.99 * _INT64_MAX:
+        raise AdapterError("PTU times exceed the int64 ps range")
+    # The header's period exactly (the float64 product period_s * 1e12 is off by up to 1e-12 ps,
+    # several ps after 1e12 syncs), split into whole ps (integer arithmetic) and a fraction.
+    exact_period = Fraction(period_s) * 10**12
+    base = math.floor(exact_period)
+    frac = float(exact_period - base)
+    rest = np.rint(nsync.astype(np.float64) * frac + dtime.astype(np.float64) * res_ps).astype(np.int64)
+    return nsync * np.int64(base) + rest, False
+
+
+def _resolution(header: Mapping[str, Any], key: str, path: Path, lo: float, hi: float, what: str) -> float:
+    res = header.get(key)
+    if not isinstance(res, float) or not lo <= res <= hi:
+        raise AdapterError(f"{path}: {key} is missing or outside {what}")
+    return res
 
 
 class PtuFile:
-    """Adapter for one PicoQuant PTU file in T2 mode."""
+    """Adapter for one PicoQuant PTU file in T2 or T3 mode."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -231,22 +372,35 @@ class PtuFile:
         rtype = self.header.get("TTResultFormat_TTTRRecType")
         if not isinstance(rtype, int) or isinstance(rtype, bool):
             raise AdapterError(f"{self.path}: TTResultFormat_TTTRRecType must be an integer, got {rtype!r}")
-        if rtype in T3_TYPES:
-            raise AdapterError(f"{self.path}: T3 mode (record type 0x{rtype:08X}) is not supported; record in T2 mode")
-        if rtype not in FORMATS:
+        if rtype in FORMATS:
+            self.mode = "T2"
+        elif rtype in T3_FORMATS:
+            self.mode = "T3"
+        else:
             raise AdapterError(f"{self.path}: unsupported PTU record type {rtype!r}")
         self.record_type = int(rtype)
-        res = self.header.get("MeasDesc_GlobalResolution")
-        if not isinstance(res, float) or not 1e-15 <= res <= 1e-6:
-            raise AdapterError(f"{self.path}: MeasDesc_GlobalResolution is missing or outside 1 fs - 1 us")
-        self.resolution_s = res
+        #: The time unit of a tag: the T2 tick, or the T3 dtime resolution.
+        self.resolution_s: float
+        #: T3 only: the sync period (MeasDesc_GlobalResolution in a T3 file); None in T2.
+        self.sync_period_s: float | None = None
+        if self.mode == "T2":
+            self.resolution_s = _resolution(self.header, "MeasDesc_GlobalResolution", self.path, 1e-15, 1e-6,
+                                            "1 fs - 1 us")
+        else:
+            self.resolution_s = _resolution(self.header, "MeasDesc_Resolution", self.path, 1e-15, 1e-6,
+                                            "1 fs - 1 us")
+            self.sync_period_s = _resolution(self.header, "MeasDesc_GlobalResolution", self.path,
+                                             *T3_PERIOD_RANGE_S, "1 ps - 1 s (the T3 sync period)")
         self._events: tuple[Event, ...] = ()
         self._counts: dict[str, int] = {}
 
+    @property
+    def family(self) -> str:
+        return (FORMATS if self.mode == "T2" else T3_FORMATS)[self.record_type][0]
+
     def describe(self) -> DeviceInfo:
-        family = FORMATS[self.record_type][0]
         n_inputs = self.header.get("HW_InpChannels")
-        if family == "picoharp":
+        if self.family == "picoharp":
             channels = tuple(range(PICOHARP_MAX_INPUT + 1))
         elif isinstance(n_inputs, int) and 0 < n_inputs <= MAX_HEADER_INPUTS:
             # As the header reports it; check against the inputs that carry tags after `read`.
@@ -275,6 +429,42 @@ class PtuFile:
         """How every record was used (filled by `read`)."""
         return dict(self._counts)
 
+    def _read_t2(self, records: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, dict[str, Any]]:
+        family, wrap = FORMATS[self.record_type]
+        ticks, inputs, extra = _decode(records, family, wrap)
+        ps, exact = _to_ps(ticks, self.resolution_s)
+        marker_ps, _ = _to_ps(extra["marker_times"], self.resolution_s)
+        if family == "picoharp" and inputs.size and int(inputs.max()) > PICOHARP_MAX_INPUT:
+            raise AdapterError(
+                f"{self.path}: PicoHarp T2 record on input {int(inputs.max())}; valid inputs are 0-{PICOHARP_MAX_INPUT}"
+            )
+        extra["tag_records"] = int(ticks.size)
+        return ps, inputs, marker_ps, exact, extra
+
+    def _read_t3(self, records: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, dict[str, Any]]:
+        family, wrap = T3_FORMATS[self.record_type]
+        assert self.sync_period_s is not None
+        nsync, dtime, inputs, extra = _decode_t3(records, family, wrap)
+        if family == "picoharp" and inputs.size:
+            lo, hi = int(inputs.min()), int(inputs.max())
+            if lo < PICOHARP_T3_MIN_INPUT or hi > PICOHARP_MAX_INPUT:
+                bad = lo if lo < PICOHARP_T3_MIN_INPUT else hi
+                raise AdapterError(
+                    f"{self.path}: PicoHarp T3 record on input {bad}; valid inputs are "
+                    f"{PICOHARP_T3_MIN_INPUT}-{PICOHARP_MAX_INPUT}"
+                )
+        ps, exact = _t3_to_ps(nsync, dtime, self.sync_period_s, self.resolution_s)
+        markers = extra["marker_nsync"]
+        marker_ps, _ = _t3_to_ps(markers, np.zeros_like(markers), self.sync_period_s, self.resolution_s)
+        # The syncs that started a recorded measurement are the sync channel (input 0), as in T2.
+        syncs = np.unique(nsync)
+        sync_ps, _ = _t3_to_ps(syncs, np.zeros_like(syncs), self.sync_period_s, self.resolution_s)
+        extra["tag_records"] = int(nsync.size)
+        extra["sync_tags"] = int(syncs.size)
+        ps = np.concatenate([ps, sync_ps])
+        inputs = np.concatenate([inputs, np.zeros(syncs.size, dtype=np.int64)])
+        return ps, inputs, marker_ps, exact, extra
+
     def read(self) -> TagSet:
         n_records = self.header.get("TTResult_NumberOfRecords")
         if not isinstance(n_records, int) or n_records < 0:
@@ -286,29 +476,31 @@ class PtuFile:
                 f"{body_bytes} bytes of records; the file is truncated or has trailing data"
             )
         records = np.fromfile(self.path, dtype="<u4", count=n_records, offset=self._offset)
-        family, wrap = FORMATS[self.record_type]
-        ticks, inputs, extra = _decode(records, family, wrap)
-        ps, exact = _to_ps(ticks, self.resolution_s)
-        marker_ps, _ = _to_ps(extra["marker_times"], self.resolution_s)
+        reader = self._read_t2 if self.mode == "T2" else self._read_t3
+        ps, inputs, marker_ps, exact, extra = reader(records)
+        family = self.family
 
-        if family == "picoharp" and inputs.size and int(inputs.max()) > PICOHARP_MAX_INPUT:
-            raise AdapterError(
-                f"{self.path}: PicoHarp T2 record on input {int(inputs.max())}; valid inputs are 0-{PICOHARP_MAX_INPUT}"
-            )
         info = self.describe()
         device = info.model if info.serial is None else f"{info.model}-{info.serial}"
         tags: dict[ChannelId, np.ndarray] = {}
         for inp in np.unique(inputs):
             arr = ps[inputs == inp]
-            # T2 records are written in time order; refuse rather than silently sort if not.
+            # Records are written in time order; refuse rather than silently sort if not. In T3
+            # this also catches a dtime beyond the header's sync period.
             if arr.size > 1 and np.any(arr[1:] < arr[:-1]):
-                raise AdapterError(f"{self.path}: input {int(inp)} is not in time order")
+                hint = " (in T3: a dtime longer than the sync period in the header?)" if self.mode == "T3" else ""
+                raise AdapterError(f"{self.path}: input {int(inp)} is not in time order{hint}")
             tags[ChannelId(device, int(inp))] = arr
 
         events = [Event("rollover", value=extra["rollovers"], detail={"records": extra["overflow_records"]})]
         events += [Event("marker", time_ps=int(t), value=int(b)) for t, b in zip(marker_ps, extra["marker_bits"])]
         if extra["unknown"]:
             events.append(Event("unknown-special", value=extra["unknown"]))
+        if self.mode == "T3":
+            events.append(Event("t3-sync", value=extra["sync_tags"], detail={
+                "note": "input 0 holds only the syncs that started a recorded measurement, not every sync",
+                "sync_periods": extra["sync_periods"],
+            }))
         stop = self.header.get("TTResult_StopReason")
         incomplete = False
         if stop is None:
@@ -331,12 +523,15 @@ class PtuFile:
                                 detail={"note": "input 0 (sync) is divided: it records one event in every " f"{divider}"}))
         self._events = tuple(events)
         self._counts = {
-            "tags": int(ticks.size),
+            "tags": extra["tag_records"],
             "overflow_records": extra["overflow_records"],
             "markers": int(marker_ps.size),
             "unknown": extra["unknown"],
             "total": int(records.size),
         }
+        if self.mode == "T3":
+            # Derived from the tag records, not records themselves: outside the accounting sum.
+            self._counts["sync_tags"] = extra["sync_tags"]
 
         # Duration from the data: the requested acquisition time is not the time acquired.
         last = max([int(a[-1]) for a in tags.values() if a.size] + [int(t) for t in marker_ps], default=-1)
@@ -352,11 +547,22 @@ class PtuFile:
             "incomplete": incomplete,
             "inputs_with_tags": sorted(ch.input for ch in tags),
         }
+        if self.mode == "T3":
+            assert self.sync_period_s is not None
+            metadata.update({
+                "mode": "T3",
+                "sync_period_ps": self.sync_period_s * 1e12,
+                "sync_periods": extra["sync_periods"],
+                "time_model": "nsync x sync period + dtime x resolution; the header's sync period is assumed "
+                              "constant over the acquisition",
+                "sync_tags": "input 0 holds only the syncs that started a recorded measurement",
+            })
         if incomplete:
             metadata["data_loss"] = STOP_REASON_NAMES.get(stop, f"stop reason {stop}")
         if not exact:
-            metadata["note"] = "the tick is not a whole number of ps; tags were rounded to the nearest ps"
-        return TagSet(tags, duration_ps=duration, clock=f"{device} T2 clock", metadata=metadata)
+            what = "the tick is" if self.mode == "T2" else "the sync period or dtime resolution is"
+            metadata["note"] = f"{what} not a whole number of ps; tags were rounded to the nearest ps"
+        return TagSet(tags, duration_ps=duration, clock=f"{device} {self.mode} clock", metadata=metadata)
 
 
 def _str_or_none(v: Any) -> str | None:
@@ -364,5 +570,5 @@ def _str_or_none(v: Any) -> str | None:
 
 
 def read_ptu(path: str | Path) -> TagSet:
-    """Read a PTU T2 file into a TagSet (see `PtuFile` for events and provenance)."""
+    """Read a PTU file (T2 or T3) into a TagSet (see `PtuFile` for events and provenance)."""
     return PtuFile(path).read()

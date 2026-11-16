@@ -37,8 +37,8 @@ experiment, its guardrails and its roadmap.
 - Bell fringe and HOM dip visibility, with accidental subtraction only where
   the guardrail policy allows it. `dadl quickstart hom-snspd` simulates a HOM
   dip on two SNSPDs and analyses it from the tags.
-- **PicoQuant PTU files** (T2: PicoHarp, HydraHarp, TimeHarp 260, MultiHarp)
-  read by DADL's own adapter (phase 2).
+- **PicoQuant PTU files** (T2 and T3: PicoHarp, HydraHarp, TimeHarp 260,
+  MultiHarp) read by DADL's own adapter (phase 2; T3 unreleased).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 - **Hardware twin** (phase 2): `dadl simulate SETUP --out DIR
@@ -81,9 +81,14 @@ plainly:
   mean dark gap; when dark rate × time constant exceeds about 0.01 (a hot
   InGaAs detector), the afterpulse probability reads high and its interval
   covers less than 95% (72–75% at 0.04), and the calibration says so.
-- **No crosstalk or twilight counts** are modelled: 1% crosstalk between the
-  HOM detectors lowered V from 0.919 to 0.896 unlabelled. Crosstalk is
-  planned.
+- **Crosstalk is simulated, not calibrated or labelled.** The simulator
+  takes opt-in crosstalk links between channels (`dadl.sim.Crosstalk`:
+  probability, offset, jitter; off by default, and not yet a `setup.yaml`
+  field), but no calibration fits a crosstalk matrix and no analysis flags
+  it. On the `hom-snspd` example, 1% zero-offset crosstalk from A to B
+  lowers V from 0.919 to 0.904 (0.889 with 1% each way), unlabelled; at an
+  offset outside the coincidence window (a breakdown flash several ns late)
+  it leaves V unchanged. Twilight counts are not modelled.
 - **Jitter is a Gaussian sigma.** Datasheets usually quote the FWHM
   (2.355 sigma): convert before entering `jitter_sigma_ps`.
 - **Hard-edge, non-paralyzable dead time.** Valid for actively quenched SPAD
@@ -285,12 +290,14 @@ print(dadl.bell_visibility(1450, 550))            # raw fringe visibility
 print(dadl.hom_visibility(1000, 120, accidentals=40))  # dip visibility, corrected value labelled
 ```
 
-PicoQuant `.ptu` files (T2 mode) read directly: `from dadl.adapters import read_ptu`, then
+PicoQuant `.ptu` files (T2 or T3 mode) read directly: `from dadl.adapters import read_ptu`, then
 `read_ptu("run.ptu")` returns int64 ps per channel, with rollovers and markers reported as events
 (see `adapters/README.md`). From the command line, pass a folder of `setting0.ptu`,
 `setting1.ptu`, ... as `--tags`. On HydraHarp, MultiHarp and TimeHarp 260 files, input 0 is the
 sync input and detector inputs are numbered from 1, as in PicoQuant's software; map those
-numbers under `channels:`. Other formats: export to the generic tag file.
+numbers under `channels:`. T3 times are rebuilt as sync count x sync period + start-stop time,
+assuming the header's sync period held for the whole run, and in T3 input 0 holds only the syncs
+that started a recorded measurement. Other formats: export to the generic tag file.
 
 Before calibrating recorded data, edit the copied `setup.yaml`:
 
