@@ -7,6 +7,7 @@ separately from sampling.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,13 @@ IMPORT_S = time.perf_counter() - T0
 from common import CHAINS, DARK_SITES, DELAY_SITES, DRAWS, WARMUP, load, save  # noqa: E402
 
 HERE = Path(__file__).parent / "models"
+
+if os.name == "nt":
+    # CmdStan on Windows must link models with the toolchain it was built with. A different
+    # MinGW earlier on PATH (GitHub's runners have GCC 15 in C:\mingw64) fails at link time
+    # with undefined std:: references; a lab PC with its own MinGW would hit the same.
+    _home = Path(os.environ["CMDSTAN"]).parent if os.environ.get("CMDSTAN") else None
+    cmdstanpy.utils.cxx_toolchain_path(install_dir=str(_home) if _home else None)
 
 
 def run(stan_file, data, names, seed, init):
