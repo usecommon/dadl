@@ -1,0 +1,104 @@
+# Phase 3 milestone M0: install and speed benchmark of NumPyro, PyMC and Stan (CmdStanPy).
+# Not part of CI gating: run by hand, and on pull requests that change bench/ppl/.
+# See bench/ppl/README.md and docs/reviews/2026-11-ppl-benchmark.md.
+name: PPL benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bench/ppl/**"
+      - ".github/workflows/ppl-bench.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.library }}${{ matrix.variant }} (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+        library: [numpyro, pymc, cmdstanpy]
+        variant: [""]
+        include:
+          # PyMC with PyTensor's C backend turned off: what a lab PC with no compiler gets.
+          - { os: ubuntu-latest, python: "3.13", library: pymc, variant: "-nocompiler" }
+          - { os: windows-latest, python: "3.13", library: pymc, variant: "-nocompiler" }
+          - { os: macos-latest, python: "3.13", library: pymc, variant: "-nocompiler" }
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUN: runs/${{ matrix.library }}${{ matrix.variant }}-${{ matrix.os }}-py${{ matrix.python }}
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Prepare data and references (separate environment with dadl)
+        run: |
+          python -m venv prep
+          PREP=prep/bin/python; [ -f prep/Scripts/python.exe ] && PREP=prep/Scripts/python.exe
+          $PREP -m pip install -q ./python "arviz>=0.20,<1"
+          $PREP bench/ppl/prepare.py data > /dev/null
+          echo "PREP=$PREP" >> "$GITHUB_ENV"
+          mkdir -p "$RUN"
+          printf '{"name": "%s%s, %s, Python %s"}' "${{ matrix.library }}" "${{ matrix.variant }}" "${{ matrix.os }}" "${{ matrix.python }}" > "$RUN/label.json"
+      - name: Clean install, binary wheels only
+        run: |
+          python bench/ppl/install.py ${{ matrix.library }} libenv "$RUN"
+          LIB=libenv/bin/python; [ -f libenv/Scripts/python.exe ] && LIB=libenv/Scripts/python.exe
+          echo "LIB=$LIB" >> "$GITHUB_ENV"
+      - name: Sample
+        continue-on-error: true
+        run: |
+          if [ "${{ matrix.variant }}" = "-nocompiler" ]; then export PYTENSOR_FLAGS=cxx=; fi
+          if [ "${{ matrix.library }}" = "cmdstanpy" ]; then
+            export CMDSTAN=$($PREP -c "import json; print(json.load(open('$RUN/install.json')).get('cmdstan_dir', ''))")
+          fi
+          cd bench/ppl
+          ../../$LIB run_${{ matrix.library == 'cmdstanpy' && 'stan' || matrix.library }}.py ../../data "../../$RUN"
+      - name: Diagnostics
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f "$RUN/timings.json" ]; then $PREP bench/ppl/analyze.py data "$RUN" > /dev/null; fi
+          rm -rf "$RUN/cmdstan-home" "$RUN"/*_draws.npz
+      # actions/upload-artifact v7.0.2, pinned by commit SHA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ppl-${{ matrix.library }}${{ matrix.variant }}-${{ matrix.os }}-py${{ matrix.python }}
+          path: runs/
+
+  report:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/download-artifact v8.0.2, pinned by commit SHA
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: ppl-*
+          merge-multiple: true
+          path: runs/
+      - name: Table
+        run: |
+          python bench/ppl/report.py runs > table.md
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+      # actions/upload-artifact v7.0.2, pinned by commit SHA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ppl-report
+          path: |
+            table.md
+            runs/
