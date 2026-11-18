@@ -190,7 +190,6 @@ jobs:
           - {name: pairs 2, args: "pairs --regimes bright-background"}
           - {name: pairs 3, args: "pairs --regimes broad-irf ideal-accidentals"}
           - {name: deadtime series-spad, args: "deadtime --regimes series-spad"}
-          - {name: deadtime passive-quench, args: "deadtime --regimes passive-quench"}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -209,6 +208,64 @@ jobs:
           OMP_NUM_THREADS: "1"
         timeout-minutes: 40
         run: python -m dadl.calibration.coverage ${{ matrix.part.args }} --replicates 1000 --jobs 4
+
+  coverage-shard:
+    # passive-quench fits afterpulsing (about 2.5 s a replicate locally, several times that on a
+    # runner): its replicates run in four shards that coverage-merge sums and gates.
+    name: Calibration coverage shard (deadtime passive-quench ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "./python[test]"
+      - name: One slice of the replicates
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+        timeout-minutes: 40
+        run: >-
+          python -m dadl.calibration.coverage deadtime --regimes passive-quench --replicates 1000 --jobs 4
+          --shard ${{ matrix.shard }}/4 --out coverage-shard-${{ matrix.shard }}.json
+      # actions/upload-artifact v7.0.2, pinned by commit SHA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage-shard-${{ matrix.shard }}.json
+
+  coverage-merge:
+    name: Calibration coverage gate (1,000 replicates, deadtime passive-quench)
+    needs: coverage-shard
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "./python[test]"
+      # actions/download-artifact v8.0.2, pinned by commit SHA
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: coverage-shard-*
+          merge-multiple: true
+          path: shards/
+      - name: Sum the shards and apply the gates
+        run: python -m dadl.calibration.coverage merge shards/*.json
 
   propagation:
     # Phase 3 gate, part 2: corrected values with calibration uncertainty cover the injected truth

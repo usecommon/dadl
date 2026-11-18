@@ -148,3 +148,21 @@ def test_cli_scan_and_calibrate(tmp_path, capsys):
     assert "deadtime-series" in text and "settings [0, 1]" in text
     assert main(["simulate", "chsh-spad", "--rates", "1e6,2e6", "--out", str(tmp_path / "x.npz")]) != 0
     assert "--rates applies to --deadtime-scan" in capsys.readouterr().err
+
+
+def test_coverage_shards_merge_to_the_whole(tmp_path):
+    import json
+
+    from dadl.calibration.coverage import main, merge, run
+
+    whole = run("deadtime", 4, seed=3, regimes=["series-spad"])
+    files = []
+    for k in (1, 2):
+        out = tmp_path / f"s{k}.json"
+        assert main(["deadtime", "--regimes", "series-spad", "--replicates", "4", "--seed", "3", "--jobs", "2",
+                     "--shard", f"{k}/2", "--out", str(out)]) == 0
+        files.append(json.loads(out.read_text()))
+    merged = merge(files)
+    assert [(r.calibration, r.covered, r.at_least) for r in merged] == [(r.calibration, r.covered, r.at_least) for r in whole]
+    with pytest.raises(ValueError, match="not all"):
+        merge(files[:1])

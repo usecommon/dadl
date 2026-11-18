@@ -5,6 +5,11 @@ independent random stream, runs the calibration, and records whether each 95%
 interval contains the truth. Run from the command line:
 
     python -m dadl.calibration.coverage {dark,pairs,dcr,deadtime,all} --replicates 1000 [--jobs 4]
+    python -m dadl.calibration.coverage deadtime --regimes passive-quench --shard 1/4 --out p1.json
+    python -m dadl.calibration.coverage merge p*.json
+
+A shard runs one contiguous slice of the replicates and writes its counts ungated; `merge` sums
+the shards (refusing gaps, overlaps and mixed seeds) and applies the gates.
 
 Each calibration is gated at more than one point of parameter space (a
 "regime"), since a method can cover well at one point and fail at another:
@@ -25,6 +30,7 @@ CLI passes them.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import multiprocessing
 import os
@@ -487,7 +493,8 @@ def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
 
 
 def run(
-    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None
+    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None,
+    part: range | None = None,
 ) -> list[CoverageResult]:
     """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
     the named `regimes` (CI splits the gate across runners this way).
@@ -503,11 +510,14 @@ def run(
     if unknown:
         raise ValueError(f"unknown regime(s) {unknown} for {name!r}")
     if jobs <= 1:
-        return [res for n, r in units for res in _unit((n, r, replicates, seed, None))]
+        return [res for n, r in units for res in _unit((n, r, replicates, seed, part))]
+    span = part if part is not None else range(replicates)
+    # Chunks no larger than a worker's share of a regime, so a shard keeps every worker busy.
+    chunk = max(1, min(CHUNK, -(-len(span) // jobs)))
     tasks = [
-        (n, r, replicates, seed, range(lo, min(lo + CHUNK, replicates)))
+        (n, r, replicates, seed, range(lo, min(lo + chunk, span.stop)))
         for n, r in units
-        for lo in range(0, replicates, CHUNK)
+        for lo in range(span.start, span.stop, chunk)
     ]
     # Fresh ("spawn") workers with one BLAS thread each: forked workers inherit the parent's
     # OpenBLAS thread pool on Linux, and several pools spinning on few cores slowed the CI gate
@@ -532,15 +542,84 @@ def run(
     return out
 
 
+def shard_range(shard: str, replicates: int) -> range:
+    """Shard "k/n" (1-based) as its contiguous slice of the replicates."""
+    try:
+        k, n = (int(x) for x in shard.split("/"))
+    except ValueError:
+        raise ValueError(f"shard must be k/n, got {shard!r}") from None
+    if not 1 <= k <= n:
+        raise ValueError(f"shard {shard!r}: need 1 <= k <= n")
+    return range((k - 1) * replicates // n, k * replicates // n)
+
+
+def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
+    return {
+        "seed": seed,
+        "replicates": results[0].replicates if results else 0,
+        "range": [part.start, part.stop],
+        "results": [
+            {"calibration": r.calibration, "covered": r.covered, "gate": list(r.gate), "at_least": r.at_least}
+            for r in results
+        ],
+    }
+
+
+def merge(records: list[dict]) -> list[CoverageResult]:
+    """Sum shard records into gated results; refuses mixed seeds or totals and slices that do not
+    tile the replicates exactly."""
+    if not records:
+        raise ValueError("no shards to merge")
+    seeds = {r["seed"] for r in records}
+    totals = {r["replicates"] for r in records}
+    if len(seeds) != 1 or len(totals) != 1:
+        raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    replicates = totals.pop()
+    out = []
+    for name in dict.fromkeys(res["calibration"] for r in records for res in r["results"]):
+        mine = [(r["range"], res) for r in records for res in r["results"] if res["calibration"] == name]
+        nxt = 0
+        for lo, hi in sorted(tuple(rng) for rng, _ in mine):
+            if lo != nxt:
+                raise ValueError(f"{name}: shards do not tile 0-{replicates} (gap or overlap at {lo})")
+            nxt = hi
+        if nxt != replicates:
+            raise ValueError(f"{name}: shards cover replicates 0-{nxt}, not all {replicates}")
+        keys = dict.fromkeys(k for _, res in mine for k in res["covered"])
+        covered = {k: sum(res["covered"].get(k, 0) for _, res in mine) for k in keys}
+        first = mine[0][1]
+        out.append(CoverageResult(name, replicates, covered, tuple(first["gate"]), bool(first["at_least"])))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dadl.calibration.coverage")
-    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "deadtime", "all"])
+    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "deadtime", "all", "merge"])
+    parser.add_argument("files", nargs="*", help="merge: the shard files")
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
     parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
     parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the family)")
+    parser.add_argument("--shard", help="k/n: run only the k-th of n slices of the replicates; not gated")
+    parser.add_argument("--out", help="with --shard: write the partial counts here, for merge")
     args = parser.parse_args(argv)
-    results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes)
+    if args.calibration == "merge":
+        if not args.files:
+            parser.error("merge needs the shard files")
+        results = merge([json.loads(open(f, encoding="utf-8").read()) for f in args.files])
+    else:
+        if args.files:
+            parser.error("files are only for merge")
+        if (args.shard is None) != (args.out is None):
+            parser.error("--shard and --out go together")
+        part = shard_range(args.shard, args.replicates) if args.shard else None
+        results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes, part)
+        if part is not None:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                json.dump(shard_record(results, args.seed, part), fh, indent=1)
+            for r in results:
+                print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
+            return 0
     for r in results:
         print(r)
     return 0 if all(r.passed() for r in results) else 1

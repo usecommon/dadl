@@ -108,7 +108,11 @@ and is versioned separately from the packages.
   draws). The likelihood ratio against the hard-edge model is recorded.
 - CLI: `dadl simulate SETUP --deadtime-scan [--rates R1,R2,...]` (one rate per setting) and
   `dadl calibrate deadtime SETUP --tags scan.npz [--dark DIR] --out DIR`.
-- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI).
+- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI; locally
+  tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: under
+  light the shortest gap is almost always tau_np itself, exact to the tick.
+- `python -m dadl.calibration.coverage` gains `--shard k/n --out FILE` and `merge FILES`, as the
+  propagation gate has; CI runs passive-quench in four shards.
 - Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery; the forward model
   still uses the dark calibration's non-paralyzable dead time.
 
