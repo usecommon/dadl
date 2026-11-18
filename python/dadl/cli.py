@@ -125,12 +125,14 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
 
 #: Length of the simulated dark run per channel that the quickstart calibrates from.
 QUICKSTART_DARK_S = 10.0
+#: Length of the simulated pair run (no beamsplitter) that calibrates the delay and jitter.
+QUICKSTART_PAIRS_S = 0.2
 
 
 def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, dict, str | None]:
-    """HOM through the forward model with calibrations from simulated dark runs.
+    """HOM through the forward model with calibrations from simulated dark and pair runs.
 
-    The dark runs are calibrated into a temporary folder and loaded as an analysis would load
+    The dark runs (dead time) and a pair run (delay and jitter, for the window capture) are calibrated into a temporary folder and loaded as an analysis would load
     them. If the dark data only bound the dead time too loosely to use (an SNSPD's 100 cps), the
     refusal is reported and the accidentals are corrected alone.
     """
@@ -144,23 +146,34 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
     from dadl.guardrails import Policy
     from dadl.propagate import CalibrationSet, DatasetContext
 
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.calibration.delay import calibrate_delay
+
     dark = simulate_setup_dark(setup, QUICKSTART_DARK_S)[setup.setting_keys[0]]
+    pairs = simulate_setup_heralding(setup, QUICKSTART_PAIRS_S)[setup.setting_keys[0]]
     channels = (setup.channel_id("A"), setup.channel_id("B"))
     acquired = dt.datetime.now(dt.timezone.utc)
     dataset = DatasetContext(acquired=acquired)
-    policy = Policy.default().allow("hom_visibility", "dead_time", "quickstart: dead time from simulated dark runs")
+    policy = (
+        Policy.default()
+        .allow("hom_visibility", "dead_time", "quickstart: dead time from simulated dark runs")
+        .allow("hom_visibility", "window_capture", "quickstart: delay and jitter from a simulated pair run")
+    )
     with tempfile.TemporaryDirectory() as tmp:
         for name, ch in zip(("A", "B"), channels):
             cal = calibrate_dark(dark[name], ch, backend="sim", seed=setup.seed)
             write_artifact(cal, tmp, accept_misfit=True, created=acquired)
+        delay = calibrate_delay(pairs["A"], pairs["B"], channels, backend="sim", seed=setup.seed)
+        write_artifact(delay, tmp, accept_misfit=True, created=acquired)
+        common = {"channels": channels, "seed": setup.seed, "reference_delay_ps": setup.reference_delay_ps}
         cset = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset)
         try:
-            result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed)
+            result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=cset, **common)
             return result, counts, None
         except GuardrailRefusal as exc:
-            note = str(exc).split(": use", 1)[0].split(", so a correction", 1)[0]
-        none = CalibrationSet.load(tmp, analysis="hom_visibility", dataset=dataset, kinds=())
-        result, counts = hom_from_tags(runs, setup.window, calibrations=none, channels=channels, seed=setup.seed)
+            note = str(exc).split(", so a correction", 1)[0]
+        without_dark = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset, kinds=(DELAY_KIND,))
+        result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=without_dark, **common)
     return result, counts, note
 
 
@@ -763,7 +776,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
         channels = (setup.channel_id("A"), setup.channel_id("B")) if cset is not None else None
         result, counts = hom_from_tags(
-            runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed
+            runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed,
+            reference_delay_ps=setup.reference_delay_ps,
         )
         result = dataclasses.replace(
             result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra

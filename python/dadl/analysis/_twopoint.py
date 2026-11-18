@@ -18,7 +18,9 @@ def span_ps(run: dict[str, np.ndarray], channels: tuple[str, str]) -> float:
     return float(max(int(a.max()) for a in arrays) - min(int(a.min()) for a in arrays))
 
 
-def run_counts(run: dict[str, np.ndarray], coincidences: int, side: np.ndarray, span: float, channels=("A", "B")):
+def run_counts(
+    run: dict[str, np.ndarray], coincidences: int, side: np.ndarray, span: float, channels=("A", "B"), offsets=(0.0,)
+):
     from dadl.forward import RunCounts
 
     a, b = channels
@@ -29,6 +31,7 @@ def run_counts(run: dict[str, np.ndarray], coincidences: int, side: np.ndarray, 
         duration_s=span / 1e12,
         singles_a=int(np.asarray(run[a]).size),
         singles_b=int(np.asarray(run[b]).size),
+        pair_offsets_ps=tuple(float(o) for o in offsets),
     )
 
 
@@ -41,13 +44,16 @@ def forward_from_counts(
     calibrations: CalibrationSet,
     policy: Policy | None,
     seed: int,
+    window_ps: int,
+    declared_delay_ps: float,
 ) -> tuple[object, dict[str, float]]:
     """The forward-model correction and the counts it adds (the D3 range when a dead time is a bound)."""
     from dadl.forward import bound_range, corrected_visibility
 
-    fwd = corrected_visibility(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed)
+    grid = {"window_ps": window_ps, "declared_delay_ps": declared_delay_ps}
+    fwd = corrected_visibility(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed, **grid)
     extra: dict[str, float] = {}
-    rng = bound_range(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy)
+    rng = bound_range(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, **grid)
     if rng is not None:
         extra["corrected_at_zero_dead_time"] = rng["at_zero"]
         extra["corrected_at_bound_dead_time"] = rng["at_bound"]

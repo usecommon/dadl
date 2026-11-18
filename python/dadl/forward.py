@@ -38,8 +38,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import special
 
 from dadl.calibration.dark import KIND as DARK_KIND
+from dadl.calibration.delay import KIND as DELAY_KIND
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal
 from dadl.guardrails import Policy
@@ -53,6 +55,10 @@ MAX_DEAD_FRACTION = 0.2
 
 FORWARD_MODEL = "corrected by the forward model (corrections listed in order), calibration uncertainty included"
 DEAD_FRACTION_HIGH = "dead fraction above 20%: the live-fraction model is first order"
+CAPTURE_UNMODELLED = (
+    "window capture not modelled (no delay-jitter calibration for the channel pair): the fixed grid splits more "
+    "pairs at the reference delay than at the dip, and V reads low"
+)
 DEAD_TIME_BOUND = "dead time known only as an upper limit: corrected at the bound; counts give the value at zero"
 
 
@@ -67,6 +73,10 @@ class RunCounts:
     duration_s: float
     singles_a: int
     singles_b: int
+    #: Arrival-time offsets (b - a, ps) of the signal pairs on top of the window's declared
+    #: delays, as an equal-weight mixture: (0,) at a HOM dip or a fringe setting, (+d, -d) at a
+    #: HOM path delay d (either photon may reach either output).
+    pair_offsets_ps: tuple[float, ...] = (0.0,)
 
     def __post_init__(self) -> None:
         if self.duration_s <= 0:
@@ -87,6 +97,23 @@ def _duration(ps: float) -> str:
         if ps >= scale:
             return f"{ps / scale:.3g} {unit}"
     return f"{ps:.3g} ps"
+
+
+def grid_capture(offset_ps, sigma_ps, width_ps: float) -> np.ndarray:
+    """Probability that a pair with arrival difference D ~ N(offset, sigma) lands in one slot of a
+    fixed grid of width W: E[max(0, 1 - |D| / W)], in closed form (vectorised)."""
+    mu = np.asarray(offset_ps, dtype=float)
+    sig = np.maximum(np.asarray(sigma_ps, dtype=float), 1e-9)
+    w = float(width_ps)
+
+    def part(lo, hi, sign):
+        # integral over [lo, hi] of (1 - sign * d / W) N(d; mu, sig)
+        a, b = (lo - mu) / sig, (hi - mu) / sig
+        mass = special.ndtr(b) - special.ndtr(a)
+        first = mu * mass - sig * (np.exp(-0.5 * b * b) - np.exp(-0.5 * a * a)) / np.sqrt(2 * np.pi)
+        return mass - sign * first / w
+
+    return part(0.0, w, 1.0) + part(-w, 0.0, -1.0)
 
 
 def live_fraction(
@@ -111,11 +138,43 @@ class Corrected:
     artifact_ids: tuple[str, ...]
 
 
-def _signal(run: RunCounts, c, offsum, tau_a, tau_b) -> np.ndarray:
+def _signal(run: RunCounts, c, offsum, tau_a, tau_b, capture=1.0) -> np.ndarray:
     a = offsum / run.offpeak_shifts
     t = run.duration_s
     live = live_fraction(run.singles_a / t, run.singles_b / t, tau_a, tau_b, run.coincidences / t)
-    return (c - a) / (t * live)
+    return (c - a) / (t * live * capture)
+
+
+def _capture(
+    calibrations: CalibrationSet | None,
+    channels: tuple[ChannelId, ChannelId],
+    runs: tuple[RunCounts, RunCounts],
+    window_ps: int | None,
+    declared_delay_ps: float,
+    n: int,
+    seed: int,
+):
+    """Per-run grid capture (draws, point value) from the delay-jitter artifact of the channel
+    pair, or None when there is none or no window was given."""
+    if calibrations is None or window_ps is None:
+        return None
+    hits = [m for m in calibrations.members if m.kind == DELAY_KIND and set(m.channels) == set(channels)]
+    if not hits:
+        return None
+    cal = hits[0].calibration
+    sign = 1.0 if tuple(cal.channels) == tuple(channels) else -1.0
+    joint = calibrations.draws(n, seed)
+    delay = sign * joint.column(DELAY_KIND, "delay_ps", channels[0])
+    jitter = joint.column(DELAY_KIND, "jitter_sigma_ps", channels[0])
+    d0 = sign * float(cal.estimates["delay_ps"].value)
+    j0 = float(cal.estimates["jitter_sigma_ps"].value)
+    out = []
+    for run in runs:
+        offs = run.pair_offsets_ps
+        draws = sum(grid_capture(o + delay - declared_delay_ps, jitter, window_ps) for o in offs) / len(offs)
+        point = sum(float(grid_capture(o + d0 - declared_delay_ps, j0, window_ps)) for o in offs) / len(offs)
+        out.append((draws, point))
+    return out
 
 
 def _dead_times(
@@ -152,11 +211,16 @@ def corrected_visibility(
     policy: Policy | None = None,
     seed: int = 0,
     n_draws: int = N_MC,
+    window_ps: int | None = None,
+    declared_delay_ps: float = 0.0,
 ) -> Corrected:
     """Corrected two-point visibility for `analysis` ("hom_visibility" or "bell_visibility").
 
     `high` is the acquisition with more signal (HOM reference delay, fringe maximum), `low` the
-    other (HOM dip, fringe minimum).
+    other (HOM dip, fringe minimum). With `window_ps` (the fixed-grid width) and a delay-jitter
+    artifact for the channel pair, each acquisition's grid capture is modelled from the
+    calibrated delay and jitter, `declared_delay_ps` (b - a, the window's) and the runs'
+    `pair_offsets_ps`.
     """
     if analysis not in ("hom_visibility", "bell_visibility"):
         raise ValueError(f"no forward model for {analysis!r}")
@@ -169,6 +233,12 @@ def corrected_visibility(
         corrections.append("dead_time")
     policy.check_correction(analysis, "accidental_subtraction")
     corrections.append("accidental_subtraction")
+    capture = _capture(calibrations, channels, (high, low), window_ps, declared_delay_ps, n_draws, seed)
+    if capture is not None:
+        policy.check_correction(analysis, "window_capture")
+        corrections.append("window_capture")
+    elif any(any(o != 0 for o in run.pair_offsets_ps) for run in (high, low)):
+        labels.append(CAPTURE_UNMODELLED)
     if calibrations is not None:
         labels += [lab for lab in calibrations.labels if lab not in labels]
 
@@ -214,17 +284,18 @@ def corrected_visibility(
         off = rng.gamma(run.offpeak_sum + 0.5, size=n_draws)
         return c, off
 
+    (kh, kh0), (kl, kl0) = capture if capture is not None else ((1.0, 1.0), (1.0, 1.0))
     ch, oh = counts_draw(high)
     cl, ol = counts_draw(low)
-    joint = value(_signal(high, ch, oh, ta, tb), _signal(low, cl, ol, ta, tb))
+    joint = value(_signal(high, ch, oh, ta, tb, kh), _signal(low, cl, ol, ta, tb, kl))
     point = float(value(
-        _signal(high, high.coincidences, high.offpeak_sum, pa, pb),
-        _signal(low, low.coincidences, low.offpeak_sum, pa, pb),
+        _signal(high, high.coincidences, high.offpeak_sum, pa, pb, kh0),
+        _signal(low, low.coincidences, low.offpeak_sum, pa, pb, kl0),
     ))
-    stat = value(_signal(high, ch, oh, pa, pb), _signal(low, cl, ol, pa, pb))
+    stat = value(_signal(high, ch, oh, pa, pb, kh0), _signal(low, cl, ol, pa, pb, kl0))
     calib = value(
-        _signal(high, high.coincidences, high.offpeak_sum, ta, tb),
-        _signal(low, low.coincidences, low.offpeak_sum, ta, tb),
+        _signal(high, high.coincidences, high.offpeak_sum, ta, tb, kh),
+        _signal(low, low.coincidences, low.offpeak_sum, ta, tb, kl),
     )
     joint = joint[np.isfinite(joint)]
     if joint.size < n_draws // 2:
@@ -236,7 +307,7 @@ def corrected_visibility(
         lo,
         hi,
         stderr_statistical=float(np.std(stat[np.isfinite(stat)])),
-        stderr_calibration=float(np.std(calib)) if dead is not None else 0.0,
+        stderr_calibration=float(np.std(calib)) if dead is not None or capture is not None else 0.0,
     )
     ids = calibrations.artifact_ids if calibrations is not None else ()
     return Corrected(est, tuple(corrections), tuple(labels), ids)
@@ -250,6 +321,8 @@ def bound_range(
     *,
     calibrations: CalibrationSet,
     policy: Policy | None = None,
+    window_ps: int | None = None,
+    declared_delay_ps: float = 0.0,
 ) -> Mapping[str, float] | None:
     """Decision D3: when a dead time is known only as an upper limit, the corrected value at zero
     and at the bound (point values), or None when every dead time is a posterior."""
@@ -258,6 +331,9 @@ def bound_range(
     if not bounded:
         return None
 
+    cap = _capture(calibrations, channels, (high, low), window_ps, declared_delay_ps, 1, 0)
+    kh, kl = (cap[0][1], cap[1][1]) if cap is not None else (1.0, 1.0)
+
     def at(scale: float) -> float:
         taus = []
         for c in darks:
@@ -265,8 +341,8 @@ def bound_range(
                 taus.append(scale * c.estimates["dead_time_ps"].high * 1e-12)
             else:
                 taus.append(c.estimates["dead_time_ps"].value * 1e-12)
-        sh = _signal(high, high.coincidences, high.offpeak_sum, taus[0], taus[1])
-        sl = _signal(low, low.coincidences, low.offpeak_sum, taus[0], taus[1])
+        sh = _signal(high, high.coincidences, high.offpeak_sum, taus[0], taus[1], kh)
+        sl = _signal(low, low.coincidences, low.offpeak_sum, taus[0], taus[1], kl)
         v = 1.0 - sl / sh if analysis == "hom_visibility" else (sh - sl) / (sh + sl)
         return float(v)
 
@@ -274,6 +350,7 @@ def bound_range(
 
 
 __all__ = [
+    "CAPTURE_UNMODELLED",
     "DEAD_FRACTION_HIGH",
     "DEAD_TIME_BOUND",
     "FORWARD_MODEL",
@@ -282,6 +359,7 @@ __all__ = [
     "RunCounts",
     "bound_range",
     "corrected_visibility",
+    "grid_capture",
     "live_fraction",
 ]
 

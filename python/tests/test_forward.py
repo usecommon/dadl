@@ -14,10 +14,11 @@ from dadl.artifact import write_artifact
 from dadl.calibration.dark import calibrate_dark
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal
-from dadl.forward import DEAD_TIME_BOUND, FORWARD_MODEL, RunCounts, corrected_visibility, live_fraction
+from dadl.calibration.delay import calibrate_delay
+from dadl.forward import CAPTURE_UNMODELLED, DEAD_TIME_BOUND, FORWARD_MODEL, RunCounts, corrected_visibility, grid_capture, live_fraction
 from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import CalibrationSet, DatasetContext
-from dadl.sim import DetectorParams, PairSource, simulate_chsh_setting, simulate_dark, simulate_hom
+from dadl.sim import DetectorParams, PairSource, simulate_chsh_setting, simulate_dark, simulate_hom, simulate_pairs
 
 UTC = dt.timezone.utc
 CA, CB = ChannelId("sim", 1), ChannelId("sim", 2)
@@ -209,3 +210,42 @@ def test_fringe_refuses_unequal_exposures(fringe_setup):
     cut = {"A": runs["min"]["A"][: runs["min"]["A"].size // 2], "B": runs["min"]["B"][: runs["min"]["B"].size // 2]}
     with pytest.raises(ValueError, match="same time"):
         fringe_from_tags({"max": runs["max"], "min": cut}, FRINGE_WINDOW)
+
+
+# --- Window capture ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("offset,sigma,width", [(0, 35.4, 200), (15, 35.4, 200), (-40, 14, 1000), (300, 100, 200), (0, 5, 20)])
+def test_grid_capture_closed_form_matches_the_integral(offset, sigma, width):
+    from dadl.cli import _grid_capture
+
+    assert float(grid_capture(offset, sigma, width)) == pytest.approx(_grid_capture(offset, sigma, width), rel=1e-9)
+
+
+def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_path):
+    runs, _ = setup
+    rng = np.random.default_rng(31)
+    a, b = simulate_pairs(SRC.pair_rate_per_s, DET, DET, 0.05, rng)
+    write_artifact(
+        calibrate_delay(a, b, (CA, CB), backend="sim", seed=1, n_draws=400), tmp_path, created=dt.datetime(2026, 11, 1, tzinfo=UTC)
+    )
+    ctx = DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC))
+    policy = Policy.default().allow("hom_visibility", "window_capture", "delay and jitter from a pair run")
+    cset = CalibrationSet.load(tmp_path, analysis="hom_visibility", dataset=ctx, policy=policy)
+    kw = {"calibrations": cset, "channels": (CA, CB), "seed": 3}
+    r, _ = hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=20.0, **kw)
+    assert r.corrections == ("accidental_subtraction", "window_capture")
+    assert CAPTURE_UNMODELLED not in r.labels
+    # The reference run's split pairs at +-20 ps lose more to the grid than the dip's: modelling it
+    # raises V by C_dip/C_ref * (1 - capture ratio), here about 0.08 * 0.01.
+    r0, _ = hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=0.0, **kw)
+    assert r.corrected.value - r0.corrected.value == pytest.approx(0.0008, abs=0.0003)
+    # Not in the default HOM rule, like dead time (D10).
+    with pytest.raises(GuardrailRefusal, match="window_capture"):
+        hom_from_tags(runs, WINDOW, reference_delay_ps=20.0, **kw)
+
+
+def test_reference_delay_without_a_delay_artifact_is_labelled(setup):
+    runs, cset = setup
+    r, _ = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
+    assert CAPTURE_UNMODELLED in r.labels and "window_capture" not in r.corrections

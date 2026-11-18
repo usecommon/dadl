@@ -94,7 +94,7 @@ def test_quickstart_simulate_analyze(tmp_path, capsys):
     assert "Raw V = 0.9" in out and "Closed-form expectation" in out
     # Phase 3: the corrected line comes from the forward model with simulated dark calibrations;
     # 100 cps of dark counts only bound an SNSPD's dead time, and the quickstart says so.
-    assert "Corrected (forward model: accidental subtraction)" in out and "Dead time not corrected" in out
+    assert "Corrected (forward model: accidental subtraction, then window capture)" in out and "Dead time not corrected" in out
     tags = tmp_path / "hom.npz"
     assert main(["simulate", "hom-snspd", "--out", str(tags)]) == 0
     assert main(["analyze", "hom-snspd", "--tags", str(tags)]) == 0
@@ -123,15 +123,20 @@ def test_analyze_with_calibrations(tmp_path, capsys):
     dark, tags, art = tmp_path / "dark.npz", tmp_path / "hom.npz", tmp_path / "art"
     assert main(["simulate", str(setup), "--dark", "--duration-s", "2", "--out", str(dark)]) == 0
     assert main(["calibrate", "dark", str(setup), "--tags", str(dark), "--out", str(art)]) == 0
+    her = tmp_path / "pairs.npz"
+    assert main(["simulate", str(setup), "--heralding", "--duration-s", "0.2", "--out", str(her)]) == 0
+    assert main(["calibrate", "pairs", str(setup), "--tags", str(her), "--no-analysers", "--herald", "A", "--signal", "B", "--out", str(art)]) == 0
     assert main(["simulate", str(setup), "--out", str(tags)]) == 0
     capsys.readouterr()
     # Dead time is not in the default HOM rule (decision D10): refused without --allow.
     assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art)]) == 1
     assert "dead_time" in capsys.readouterr().err
     args = ["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art), "--allow", "dead_time=calibrated from dark runs"]
-    assert main(args) == 0
+    assert main(args) == 1  # the delay-jitter artifact brings window capture, also an explicit override
+    assert "window_capture" in capsys.readouterr().err
+    assert main([*args, "--allow", "window_capture=delay and jitter from a pair run"]) == 0
     out = capsys.readouterr().out
-    assert "Corrected (forward model: dead time, then accidental subtraction): V = 0.9" in out
+    assert "Corrected (forward model: dead time, then accidental subtraction, then window capture): V = 0.9" in out
     assert "Calibrations: " in out and "(modified)" in out
     # Corrected CHSH waits for M3; --allow needs a reason.
     assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art)]) == 1

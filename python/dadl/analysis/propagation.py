@@ -2,8 +2,8 @@
 
     python -m dadl.analysis.propagation hom --replicates 1000 --jobs 4
 
-Each replicate simulates its own calibration runs (dark acquisitions per channel), calibrates
-them, writes and loads the artifacts as an analysis would, simulates the analysed acquisitions,
+Each replicate simulates its own calibration runs (dark acquisitions per channel and a pair run
+for the channel pair's delay and jitter), calibrates them, writes and loads the artifacts as an analysis would, simulates the analysed acquisitions,
 and checks whether the corrected value's 95% interval (statistical plus calibration, by joint
 Monte Carlo) covers the injected truth. The accepted range is the binomial band of the phase 2
 coverage gate (`dadl.calibration.coverage.gate`).
@@ -32,15 +32,21 @@ from dadl.analysis.hom import hom_from_tags
 from dadl.artifact import write_artifact
 from dadl.calibration.coverage import CoverageResult, _children, gate
 from dadl.calibration.dark import calibrate_dark
+from dadl.calibration.delay import KIND as DELAY_KIND
+from dadl.calibration.delay import calibrate_delay
 from dadl.closed_form import hom_visibility_expected
 from dadl.data import ChannelId
 from dadl.guardrails import Policy
 from dadl.propagate import CalibrationSet, DatasetContext
-from dadl.sim import DetectorParams, PairSource, simulate_dark, simulate_hom
+from dadl.sim import DetectorParams, PairSource, simulate_dark, simulate_hom, simulate_pairs
 
 UTC = dt.timezone.utc
 CHANNELS = (ChannelId("sim", 0), ChannelId("sim", 1))
-POLICY = Policy.default().allow("hom_visibility", "dead_time", "propagation gate: dead time from simulated dark runs")
+POLICY = (
+    Policy.default()
+    .allow("hom_visibility", "dead_time", "propagation gate: dead time from simulated dark runs")
+    .allow("hom_visibility", "window_capture", "propagation gate: delay and jitter from simulated pair runs")
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,8 @@ class HomRegime:
     reference_delay_ps: float
     duration_s: float
     dark_duration_s: float
+    #: The pair run (no beamsplitter) that calibrates the channel pair's delay and jitter.
+    pairs_duration_s: float
     #: Whether the dark calibration can identify the dead time here; if not (an SNSPD's 100 cps),
     #: the dark artifacts are not loaded and only the accidentals are corrected.
     dead_time_from_dark: bool
@@ -67,13 +75,15 @@ HOM_REGIMES: dict[str, HomRegime] = {
     "hom-snspd": HomRegime(
         PairSource(pair_rate_per_s=2.0e5, visibility=0.92, coherence_time_ps=1.5),
         DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0),
-        window_ps=200, reference_delay_ps=15.0, duration_s=0.5, dark_duration_s=2.0, dead_time_from_dark=False,
+        window_ps=200, reference_delay_ps=15.0, duration_s=0.5, dark_duration_s=2.0, pairs_duration_s=0.1,
+        dead_time_from_dark=False,
     ),
     # Bright background on SPADs: accidentals and dead time both matter, dead time from dark runs.
     "hom-bright": HomRegime(
         PairSource(pair_rate_per_s=2.0e6, visibility=0.92, coherence_time_ps=2.0),
         DetectorParams(efficiency=0.5, dark_rate_cps=20_000.0, dead_time_ps=60_000, jitter_sigma_ps=10.0),
-        window_ps=1_000, reference_delay_ps=20.0, duration_s=0.2, dark_duration_s=1.0, dead_time_from_dark=True,
+        window_ps=1_000, reference_delay_ps=20.0, duration_s=0.2, dark_duration_s=1.0, pairs_duration_s=0.05,
+        dead_time_from_dark=True,
     ),
 }
 
@@ -91,19 +101,25 @@ def _replicate(regime: HomRegime, child: np.random.SeedSequence) -> tuple[bool, 
         for ch in CHANNELS:
             cal = calibrate_dark(simulate_dark(regime.detector, regime.dark_duration_s, cal_rng), ch, backend="sim", seed=fit_seed, n_draws=400)
             write_artifact(cal, tmp, accept_misfit=True, created=created)
+        a, b = simulate_pairs(regime.source.pair_rate_per_s, regime.detector, regime.detector, regime.pairs_duration_s, cal_rng)
+        delay = calibrate_delay(a, b, CHANNELS, backend="sim", seed=fit_seed, n_draws=400)
+        write_artifact(delay, tmp, accept_misfit=True, created=created)
         cset = CalibrationSet.load(
             tmp,
             analysis="hom_visibility",
             policy=POLICY,
             dataset=DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC)),
-            kinds=None if regime.dead_time_from_dark else (),
+            kinds=None if regime.dead_time_from_dark else (DELAY_KIND,),
         )
     runs = {
         name: simulate_hom(regime.source, regime.detector, regime.detector, delay, regime.duration_s, run_rng)
         for name, delay in (("dip", 0.0), ("reference", regime.reference_delay_ps))
     }
     window = Window(width_ps=regime.window_ps, source="plan")
-    result, _ = hom_from_tags(runs, window, policy=POLICY, calibrations=cset, channels=CHANNELS, seed=fit_seed)
+    result, _ = hom_from_tags(
+        runs, window, policy=POLICY, calibrations=cset, channels=CHANNELS, seed=fit_seed,
+        reference_delay_ps=regime.reference_delay_ps,
+    )
     c, truth = result.corrected, regime.truth
     half = 1.959964 * c.stderr_statistical
     return c.low <= truth <= c.high, c.value - half <= truth <= c.value + half

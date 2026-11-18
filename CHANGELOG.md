@@ -45,10 +45,17 @@ and is versioned separately from the packages.
 - A dead time known only as an upper limit so loose that, at the recorded rate, it would be a
   dead fraction above 20% is refused: the range "between zero and the bound" carries no
   information (100 cps of SNSPD dark counts bound a 30 ns dead time only below about 10 us).
+- Window capture: the fixed grid splits more pairs at a HOM reference delay (photons +-d apart)
+  than at the dip, so V read about 1 sigma low and the corrected intervals undercovered (90.5%
+  and 91.5% at 200 replicates). With a delay-jitter artifact for the channel pair and
+  `hom_from_tags(..., reference_delay_ps=)`, the forward model now includes each acquisition's
+  capture (closed form, `dadl.forward.grid_capture`), with delay and jitter drawn from the
+  artifact. It is a new correction, `window_capture`, not in the default HOM rule (like dead
+  time); without the artifact the corrected value is labelled.
 - `dadl analyze SETUP --tags F --calibrations DIR [--allow dead_time=REASON] [--acquired T]
-  [--condition K=V]`: HOM setups print the corrected value from the forward model with its
+  [--condition K=V]`: HOM setups (reference delay from setup.yaml) print the corrected value from the forward model with its
   corrections in order and the artifact IDs. CHSH setups refuse `--calibrations` until M3.
-- `dadl quickstart hom-snspd` calibrates simulated dark runs and prints the corrected line from
+- `dadl quickstart hom-snspd` calibrates simulated dark and pair runs and prints the corrected line from
   the forward model, saying why the SNSPD's dead time is not corrected.
 - `python -m dadl.analysis.propagation hom`: the HOM regimes of the `propagation` gate
   (hom-snspd, bright-background SPADs), with the calibration-uncertainty-off control reported. A

@@ -98,7 +98,8 @@ def fringe_from_tags(
         high = run_counts(runs["max"], c_max, side_max, t_max)
         low = run_counts(runs["min"], c_min, side_min, t_min)
         fwd, extra = forward_from_counts(
-            "bell_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed
+            "bell_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed,
+            window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
         labels = tuple(dict.fromkeys(labels + fwd.labels + threshold_labels("bell_visibility", result.raw, fwd.estimate)))

@@ -70,6 +70,7 @@ def hom_from_tags(
     calibrations: CalibrationSet | None = None,
     channels: tuple[ChannelId, ChannelId] | None = None,
     seed: int = 0,
+    reference_delay_ps: float | None = None,
 ) -> tuple[LabelledValue, dict[str, float]]:
     """HOM visibility from `runs["dip"]` and `runs["reference"]` (each {"A": tags, "B": tags}).
 
@@ -78,6 +79,11 @@ def hom_from_tags(
     `channels` naming its channels for A and B), the corrected value comes from the forward model
     (`dadl.forward`) with calibration uncertainty; asking for the subtraction as well is refused,
     since one model must not count the accidentals twice.
+
+    `reference_delay_ps` is the path delay of the reference acquisition (setup.yaml's
+    `reference_delay_ps`). With it and a delay-jitter artifact for the channel pair, the forward
+    model includes the fixed grid's capture at the dip and at the reference delay, where pairs
+    arrive split by +-delay; without one, the corrected value is labelled.
 
     Returns the labelled result and the counts it used.
     """
@@ -134,10 +140,12 @@ def hom_from_tags(
         side_ref = shifted_coincidences(
             np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
         )
-        high = run_counts(runs["reference"], c_max, side_ref, t_ref)
+        d_ref = float(reference_delay_ps or 0.0)
+        high = run_counts(runs["reference"], c_max, side_ref, t_ref, offsets=(d_ref, -d_ref) if d_ref else (0.0,))
         low = run_counts(runs["dip"], c_min, side, t_dip)
         fwd, extra = forward_from_counts(
-            "hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed
+            "hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed,
+            window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
