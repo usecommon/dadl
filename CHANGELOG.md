@@ -61,6 +61,28 @@ and is versioned separately from the packages.
   (hom-snspd, bright-background SPADs), with the calibration-uncertainty-off control reported. A
   new CI job runs them on the fast tier (200 replicates).
 
+### Phase 3, M3: corrected CHSH and the `propagation` gate
+
+- `chsh(..., calibrations=, channels=)` adds a corrected S from the forward model
+  (`dadl.forward.corrected_chsh`) as a labelled secondary value; the headline stays raw. Each
+  setting pair's four outcome combinations get their own accidentals (off-peak bins), live
+  fraction and grid capture. The live fraction's conditional term models dead-time selection:
+  at 3e6 pairs/s and 50 ns, raw S read 1.6 sigma high on average over 12 runs and the corrected
+  S 0.26 sigma (+-0.29). Efficiencies are not corrected (fair sampling stays assumed).
+- The default CHSH rule allows no correction: each of `dead_time`, `accidental_subtraction` and
+  `window_capture` needs `Policy.allow("chsh", ...)`. Delay-jitter artifacts must cover all four
+  channel pairs, and dark artifacts every channel, or the corrected value is refused rather than
+  half-modelled.
+- `dadl analyze` takes `--calibrations` for CHSH setups. `dadl quickstart` prints a corrected S
+  from simulated pair runs under a separately reported, loosened policy; the raw headline keeps
+  the default policy. Quickstart artifacts have a fixed creation time, so their IDs repeat.
+- `python -m dadl.analysis.propagation {hom,chsh,all} --jobs N`: regimes hom-snspd, hom-bright,
+  chsh-spad and chsh-dead-time, the last also the control regime (calibration uncertainty off
+  must undercover). Misfit artifacts are accepted, labelled and counted (at most 2% of
+  replicates).
+  `--shard k/n --out FILE` runs one slice of the replicates and `merge FILES` gates the sum;
+  CI runs chsh-dead-time in four shards. Progress is printed per finished chunk.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

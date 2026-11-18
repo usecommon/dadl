@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime as _datetime
 import math
 import os
 import re
@@ -57,9 +58,9 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
     # review, cycle 10).
-    from dadl.forward import FORWARD_MODEL
+    from dadl.forward import ACCIDENTALS_MODELLED, FORWARD_MODEL
 
-    raw_labels = [lab for lab in result.labels if lab not in (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL)]
+    raw_labels = [lab for lab in result.labels if lab not in (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL, ACCIDENTALS_MODELLED)]
     print(f"  Labels: {'; '.join(raw_labels) or 'none'}")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
@@ -123,6 +124,9 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
         )
 
 
+#: Creation and acquisition time of the quickstart's simulated calibrations: fixed, so the artifact
+#: IDs it prints are the same on every run.
+QUICKSTART_CREATED = _datetime.datetime(2026, 1, 1, tzinfo=_datetime.timezone.utc)
 #: Length of the simulated dark run per channel that the quickstart calibrates from.
 QUICKSTART_DARK_S = 10.0
 #: Length of the simulated pair run (no beamsplitter) that calibrates the delay and jitter.
@@ -152,7 +156,7 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
     dark = simulate_setup_dark(setup, QUICKSTART_DARK_S)[setup.setting_keys[0]]
     pairs = simulate_setup_heralding(setup, QUICKSTART_PAIRS_S)[setup.setting_keys[0]]
     channels = (setup.channel_id("A"), setup.channel_id("B"))
-    acquired = dt.datetime.now(dt.timezone.utc)
+    acquired = QUICKSTART_CREATED
     dataset = DatasetContext(acquired=acquired)
     policy = (
         Policy.default()
@@ -175,6 +179,43 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
         without_dark = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset, kinds=(DELAY_KIND,))
         result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=without_dark, **common)
     return result, counts, note
+
+
+QUICKSTART_CHSH_DARK_CPS_NOTE = "dark counts of a few hundred per second do not identify it"
+
+
+def _quickstart_chsh_corrected(runs: dict, setup: Setup) -> LabelledValue:
+    """CHSH with a corrected S from the forward model: each channel pair's delay and jitter from a
+    simulated pair run (no analysers), accidentals from the off-peak bins. The policy is loosened
+    for both corrections, as any corrected CHSH must be, and the result says so."""
+    import datetime as dt
+    import tempfile
+
+    from dadl.artifact import write_artifact
+    from dadl.calibration.delay import calibrate_delay
+    from dadl.guardrails import Policy
+    from dadl.propagate import CalibrationSet, DatasetContext
+    from dadl.sim import simulate_pairs
+
+    ids = {name: setup.channel_id(name) for name in ("A+", "A-", "B+", "B-")}
+    policy = (
+        Policy.default()
+        .allow("chsh", "accidental_subtraction", "quickstart: accidentals from the off-peak bins")
+        .allow("chsh", "window_capture", "quickstart: delay and jitter from simulated pair runs")
+    )
+    rng = np.random.default_rng(np.random.SeedSequence(setup.seed, spawn_key=(0x434855,)))
+    acquired = QUICKSTART_CREATED
+    with tempfile.TemporaryDirectory() as tmp:
+        for x in "+-":
+            for y in "+-":
+                a, b = "A" + x, "B" + y
+                ta, tb = simulate_pairs(setup.source.pair_rate_per_s, setup.detectors[a], setup.detectors[b], QUICKSTART_PAIRS_S, rng)
+                cal = calibrate_delay(ta, tb, (ids[a], ids[b]), backend="sim", seed=setup.seed)
+                write_artifact(cal, tmp, accept_misfit=True, created=acquired)
+        cset = CalibrationSet.load(tmp, analysis="chsh", policy=policy, dataset=DatasetContext(acquired=acquired))
+    return chsh(
+        runs, setup.window, policy, settings_deg=setup.settings_deg, calibrations=cset, channels=ids, seed=setup.seed
+    )
 
 
 def _quickstart_hom(path: Path, setup: Setup) -> int:
@@ -214,6 +255,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
         return _quickstart_hom(path, setup)
     runs = _simulate(setup)
     result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
+    corrected = _quickstart_chsh_corrected(runs, setup)
     det = setup.detectors["A+"]
     same = all(d == det for d in setup.detectors.values())
     print(f"DADL {__version__} quickstart: {setup.name} (simulated data, seed {setup.seed})")
@@ -230,6 +272,12 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     _warn_angles(setup)
     print()
     _print_result(result)
+    _print_forward(corrected, {}, "S")
+    print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}: " + "; ".join(corrected.overrides))
+    worst = max(d.dead_time_ps * 1e-12 * (setup.source.pair_rate_per_s * d.efficiency / 2 + d.dark_rate_cps) for d in setup.detectors.values())
+    print(
+        f"  Dead time not corrected: {QUICKSTART_CHSH_DARK_CPS_NOTE}; at these rates about {worst:.2%} of the time is dead."
+    )
     if same:
         expected = chsh_expected_grid(
             pair_rate_per_s=setup.source.pair_rate_per_s,
@@ -248,7 +296,6 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a heralding run (no")
     print("  analysers): `dadl simulate chsh-spad --heralding --duration-s 2 --out her.npz`, then")
     print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out artifacts/`.")
-    print("  Corrected S arrives with phase 3 (M3); a corrected HOM visibility: `dadl quickstart hom-snspd`.")
     print(f"  Overview: {SITE}")
     return 0
 
@@ -747,7 +794,8 @@ def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, ana
 def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> None:
     """The corrected line of a forward-model result: value, corrections in order, artifacts."""
     order = ", then ".join(c.replace("_", " ") for c in result.corrections)
-    print(f"  Corrected (forward model: {order}): {symbol} = {result.corrected}")
+    note = "  (secondary; not a Bell claim)" if result.analysis == "chsh" else ""
+    print(f"  Corrected (forward model: {order}): {symbol} = {result.corrected}{note}")
     if "corrected_at_zero_dead_time" in counts:
         print(
             f"  Dead time known only as an upper limit: {symbol} = {counts['corrected_at_zero_dead_time']:.4f} at zero, "
@@ -767,8 +815,6 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     extra = {"inputs": _input_hashes(_resolve(args.setup), args.tags)}
     simulated = tags_are_simulated(args.tags)
     analysis = "hom_visibility" if setup.analysis_type == "hom" else "chsh"
-    if args.calibrations and analysis == "chsh":
-        raise DadlError("--calibrations: corrected CHSH is not available yet (phase 3, M3); HOM setups take them now")
     policy = _policy(analysis, args.allow)
     cset = _calibration_set(args, runs, _resolve(args.setup), analysis, policy) if args.calibrations else None
     if setup.analysis_type == "hom":
@@ -788,12 +834,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         _print_result(result, "V")
         _print_hom_extras(result, counts, setup)
         return 0
-    result = chsh(runs, setup.window, settings_deg=setup.settings_deg, policy=policy)
+    ids = {name: setup.channel_id(name) for name in ("A+", "A-", "B+", "B-")} if cset is not None else None
+    result = chsh(
+        runs, setup.window, settings_deg=setup.settings_deg, policy=policy, calibrations=cset, channels=ids, seed=setup.seed
+    )
     result = dataclasses.replace(result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra)
     _warn_angles(setup)
-    print("  The tags are trusted as given; raw S only.")
+    print("  The tags are trusted as given; the headline is raw S." if cset is not None else "  The tags are trusted as given; raw S only.")
     print()
     _print_result(result)
+    if result.corrected is not None:
+        _print_forward(result, {}, "S")
     print("  Inputs: " + ", ".join(f"{k} {v[:12]}" for k, v in result.inputs.items()))
     print(
         "  Choosing the window, delays or run after seeing the data inflates false violations (best of 72 "
