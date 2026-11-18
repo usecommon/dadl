@@ -218,7 +218,8 @@ jobs:
       fail-fast: false
       matrix:
         part:
-          - {name: hom, args: "hom"}
+          - {name: hom, args: "hom --regimes hom-snspd hom-bright"}
+          - {name: hom-crosstalk (misspecified), args: "hom --regimes hom-crosstalk"}
           - {name: chsh-spad, args: "chsh --regimes chsh-spad"}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
