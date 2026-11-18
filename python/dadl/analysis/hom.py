@@ -33,10 +33,10 @@ import math
 import numpy as np
 
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
+from dadl.analysis._twopoint import check_calibration_args, forward_from_counts, run_counts, span_ps
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
-from dadl.errors import GuardrailRefusal
 from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
 from dadl.propagate import CalibrationSet
 from dadl.stationarity import interrupted
@@ -58,10 +58,7 @@ HOM_SETTINGS: tuple[str, ...] = ("dip", "reference")
 
 def _span_ps(run: dict[str, np.ndarray]) -> float:
     """An acquisition's span: first to last tag over both channels."""
-    arrays = [np.asarray(run[ch]) for ch in HOM_CHANNELS if np.asarray(run[ch]).size]
-    if not arrays:
-        return 0.0
-    return float(max(int(a.max()) for a in arrays) - min(int(a.min()) for a in arrays))
+    return span_ps(run, HOM_CHANNELS)
 
 
 def hom_from_tags(
@@ -85,13 +82,7 @@ def hom_from_tags(
     Returns the labelled result and the counts it used.
     """
     if calibrations is not None:
-        if subtract_accidentals:
-            raise GuardrailRefusal(
-                "subtract_accidentals and calibrations both correct the accidentals: use the forward model "
-                "(calibrations) alone, so no correction is counted twice"
-            )
-        if channels is None or len(channels) != 2:
-            raise ValueError("with calibrations, pass channels=(channel of A, channel of B)")
+        check_calibration_args(subtract_accidentals, channels)
     elif subtract_accidentals is None:
         subtract_accidentals = True
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
@@ -140,31 +131,15 @@ def hom_from_tags(
     counts["subtracted"] = float(result.corrected is not None)
     labels = result.labels + (TWO_POINT,)
     if calibrations is not None:
-        from dadl.forward import RunCounts, bound_range, corrected_visibility
-
         side_ref = shifted_coincidences(
             np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
         )
-
-        def run_counts(name: str, c: int, side_counts: np.ndarray, span: float) -> RunCounts:
-            return RunCounts(
-                coincidences=int(c),
-                offpeak_sum=int(side_counts.sum()),
-                offpeak_shifts=int(side_counts.size),
-                duration_s=span / 1e12,
-                singles_a=int(runs[name]["A"].size),
-                singles_b=int(runs[name]["B"].size),
-            )
-
-        high = run_counts("reference", c_max, side_ref, t_ref)
-        low = run_counts("dip", c_min, side, t_dip)
-        fwd = corrected_visibility(
+        high = run_counts(runs["reference"], c_max, side_ref, t_ref)
+        low = run_counts(runs["dip"], c_min, side, t_dip)
+        fwd, extra = forward_from_counts(
             "hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed
         )
-        rng = bound_range("hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy)
-        if rng is not None:
-            counts["corrected_at_zero_dead_time"] = rng["at_zero"]
-            counts["corrected_at_bound_dead_time"] = rng["at_bound"]
+        counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
         labels = tuple(dict.fromkeys(labels + fwd.labels + threshold_labels("hom_visibility", result.raw, fwd.estimate)))
         result = dataclasses.replace(

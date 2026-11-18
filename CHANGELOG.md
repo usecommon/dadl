@@ -37,8 +37,22 @@ and is versioned separately from the packages.
   calibrations are given, and asking for both is refused. Results list `corrections` in the
   order applied and carry the artifact IDs. A dead time known only as an upper limit is
   corrected at the bound, with the value at zero alongside (decision D3).
-- Dead-time correction is not in the default HOM rule: it needs
+- Dead-time correction is not in the default HOM rule (decision D10): it needs
   `Policy.allow("hom_visibility", "dead_time", reason)` and is labelled "policy modified".
+- `dadl.analysis.fringe_from_tags`: Bell-type fringe visibility from a fringe-maximum and a
+  fringe-minimum acquisition, raw under the default policy and corrected by the same forward model
+  when the policy allows it. Acquisitions of unequal length (more than 1%) are refused.
+- A dead time known only as an upper limit so loose that, at the recorded rate, it would be a
+  dead fraction above 20% is refused: the range "between zero and the bound" carries no
+  information (100 cps of SNSPD dark counts bound a 30 ns dead time only below about 10 us).
+- `dadl analyze SETUP --tags F --calibrations DIR [--allow dead_time=REASON] [--acquired T]
+  [--condition K=V]`: HOM setups print the corrected value from the forward model with its
+  corrections in order and the artifact IDs. CHSH setups refuse `--calibrations` until M3.
+- `dadl quickstart hom-snspd` calibrates simulated dark runs and prints the corrected line from
+  the forward model, saying why the SNSPD's dead time is not corrected.
+- `python -m dadl.analysis.propagation hom`: the HOM regimes of the `propagation` gate
+  (hom-snspd, bright-background SPADs), with the calibration-uncertainty-off control reported. A
+  new CI job runs them on the fast tier (200 replicates).
 
 ### Published results as executable tests
 

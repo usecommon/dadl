@@ -41,6 +41,7 @@ import numpy as np
 
 from dadl.calibration.dark import KIND as DARK_KIND
 from dadl.data import ChannelId
+from dadl.errors import GuardrailRefusal
 from dadl.guardrails import Policy
 from dadl.propagate import CalibrationSet
 from dadl.result import Estimate
@@ -50,7 +51,7 @@ N_MC = 4000
 #: Above this dead fraction per channel the first-order live fraction is not trusted.
 MAX_DEAD_FRACTION = 0.2
 
-FORWARD_MODEL = "corrected by the forward model (dead time, accidentals), calibration uncertainty included"
+FORWARD_MODEL = "corrected by the forward model (corrections listed in order), calibration uncertainty included"
 DEAD_FRACTION_HIGH = "dead fraction above 20%: the live-fraction model is first order"
 DEAD_TIME_BOUND = "dead time known only as an upper limit: corrected at the bound; counts give the value at zero"
 
@@ -79,6 +80,13 @@ class RunCounts:
     @property
     def accidentals(self) -> float:
         return self.offpeak_sum / self.offpeak_shifts
+
+
+def _duration(ps: float) -> str:
+    for unit, scale in (("ms", 1e9), ("us", 1e6), ("ns", 1e3)):
+        if ps >= scale:
+            return f"{ps / scale:.3g} {unit}"
+    return f"{ps:.3g} ps"
 
 
 def live_fraction(
@@ -170,11 +178,27 @@ def corrected_visibility(
         pa = pb = np.array(0.0)
     else:
         ta, tb, pa, pb = dead
-    if dead is not None and any(
-        "dead_time_ps" in c.stand_in or "dead_time_ps" in c.unidentified
-        for c in (calibrations.get(DARK_KIND, ch) for ch in channels)
-    ):
-        labels.append(DEAD_TIME_BOUND)
+    if dead is not None:
+        bounded = [
+            (ch, float(c.estimates["dead_time_ps"].high))
+            for ch, c in ((ch, calibrations.get(DARK_KIND, ch)) for ch in channels)
+            if "dead_time_ps" in c.stand_in or "dead_time_ps" in c.unidentified
+        ]
+        if bounded:
+            labels.append(DEAD_TIME_BOUND)
+        for ch, hi_ps in bounded:
+            side = "singles_a" if ch == channels[0] else "singles_b"
+            worst = max(getattr(run, side) / run.duration_s for run in (high, low)) * hi_ps * 1e-12
+            if worst > MAX_DEAD_FRACTION:
+                # A bound this loose spans "no correction" to a dead fraction the first-order live
+                # fraction cannot describe (above 1 it is negative): the range carries no information.
+                raise GuardrailRefusal(
+                    f"the dead time of {ch} is known only below {_duration(hi_ps)} (the dark data did not identify "
+                    f"it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above "
+                    f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. Calibrate the "
+                    "dead time from data that identify it, or load the calibrations without the dark artifacts "
+                    f"(CalibrationSet.load(..., kinds=...)) to correct the accidentals only."
+                )
     for run in (high, low):
         for n_s, tau in ((run.singles_a, pa), (run.singles_b, pb)):
             if n_s / run.duration_s * float(tau) > MAX_DEAD_FRACTION and DEAD_FRACTION_HIGH not in labels:
