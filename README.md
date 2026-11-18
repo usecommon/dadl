@@ -19,7 +19,8 @@ experiment, its guardrails and its roadmap.
 ## What works today (0.1.0)
 
 - A seeded time-tag simulator with injected efficiency, dark counts,
-  non-paralyzable dead time, jitter, delay and cascading afterpulsing.
+  non-paralyzable dead time (optionally after a paralyzable stage), jitter,
+  delay and cascading afterpulsing.
 - **Calibration (phase 2):** dark rate, afterpulse
   probability and time constant, and dead time fitted from a dark acquisition,
   with 95% intervals whose coverage is checked in CI at a few simulated
@@ -30,7 +31,11 @@ experiment, its guardrails and its roadmap.
   pair-source acquisition, `dadl calibrate pairs` fits the relative delay and
   combined jitter, off-peak accidentals in the declared window and the
   heralding efficiency; `calibrate_dcr_temperature` fits DCR(T) (Arrhenius)
-  from dark calibrations at several temperatures.
+  from dark calibrations at several temperatures. `dadl calibrate deadtime`
+  fits a series dead time (paralyzable, then non-paralyzable) from
+  acquisitions under steady light at two or more rates
+  (`dadl simulate chsh-spad --deadtime-scan --out scan.npz`), with
+  afterpulsing held at the dark artifact (`--dark artifacts/`).
 - `setup.yaml` drives everything: copy it with `dadl init`, edit it, run it.
 - Raw CHSH S from fixed-grid coincidences with a planned window, from
   simulated tags or **your own tags** (`dadl analyze`).
@@ -91,11 +96,15 @@ plainly:
   it leaves V unchanged. Twilight counts are not modelled.
 - **Jitter is a Gaussian sigma.** Datasheets usually quote the FWHM
   (2.355 sigma): convert before entering `jitter_sigma_ps`.
-- **Hard-edge, non-paralyzable dead time.** Valid for actively quenched SPAD
-  modules. The reported value is the effective channel dead time: the longer
-  of detector and tagger dead time, and afterpulses inside it are not seen.
-  Soft recovery (SNSPDs, passive quenching) is not modelled; the series
-  dead-time model is planned.
+- **Hard-edge dead time.** The dark calibration reports one non-paralyzable
+  effective channel dead time (the longer of detector and tagger dead time;
+  afterpulses inside it are not seen), valid for actively quenched SPAD
+  modules. `calibrate deadtime` adds the series model, a paralyzable stage
+  before the non-paralyzable one, from illuminated runs; both stages are
+  still hard edges. Soft (continuous) recovery of SNSPDs and the gradual
+  efficiency recovery of passive quenching are not modelled: such a detector
+  shows as a misfit. The analyses' forward model uses the dark calibration's
+  non-paralyzable dead time only.
 - **Afterpulse time constant near the detection threshold** covers somewhat
   under 95% conditional on detection.
 - **DCR(T)** is Arrhenius only, valid inside the calibrated temperature range

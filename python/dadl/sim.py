@@ -13,6 +13,13 @@ an afterpulse at the end of its dead time plus an exponential delay, so
 afterpulses cascade. An afterpulse that falls inside a later avalanche's dead
 time is lost.
 
+Series dead time (opt-in, `dead_time_p_ps` > 0): a paralyzable stage comes
+first. Every avalanche candidate (photon, dark count, afterpulse or crosstalk)
+restarts it, and a candidate passes only when the previous candidate, passed or
+not, is at least `dead_time_p_ps` earlier; what passes then meets the
+non-paralyzable `dead_time_ps` (design, "Detection process": a paralyzable stage
+followed by a non-paralyzable one, tau_np > tau_p).
+
 Crosstalk (opt-in, `Crosstalk`): with probability `probability`, every
 recorded avalanche on the source channel triggers a crosstalk avalanche
 candidate on the target channel `delay_ps` later (Gaussian jitter
@@ -41,7 +48,7 @@ import numpy as np
 
 from dadl import _checks
 from dadl.analysis.chsh import CHANNELS, SIGNS
-from dadl.deadtime import apply_nonparalyzable
+from dadl.deadtime import apply_nonparalyzable, apply_paralyzable
 
 PS_PER_S = 10**12
 
@@ -78,6 +85,7 @@ class DetectorParams:
     afterpulse_prob: float = 0.0  # per recorded avalanche
     afterpulse_tau_ps: float = 50_000.0  # exponential delay after the dead time
     delay_ps: int = 0  # fixed channel delay
+    dead_time_p_ps: int = 0  # paralyzable stage before the non-paralyzable one (series model)
 
     def __post_init__(self) -> None:
         _checks.finite(self.efficiency, "efficiency", minimum=0.0, maximum=1.0)
@@ -89,6 +97,10 @@ class DetectorParams:
             raise ValueError("afterpulse_prob must be in [0, 1)")
         _checks.finite(self.afterpulse_tau_ps, "afterpulse_tau_ps", minimum=0.0)
         object.__setattr__(self, "delay_ps", _checks.integer(self.delay_ps, "delay_ps"))
+        tau_p = _checks.integer(self.dead_time_p_ps, "dead_time_p_ps", minimum=0)
+        if tau_p > self.dead_time_ps:
+            raise ValueError("dead_time_p_ps must not exceed dead_time_ps (the series model has tau_np >= tau_p)")
+        object.__setattr__(self, "dead_time_p_ps", tau_p)
 
 
 @dataclass(frozen=True)
@@ -154,8 +166,12 @@ def detect(
     """Turn photon arrival times into recorded int64 time tags for one detector."""
     arrivals = _primaries(photon_times_ps, det, duration_s, rng)
     if det.afterpulse_prob == 0:
+        if det.dead_time_p_ps > 0:
+            arrivals = apply_paralyzable(arrivals, det.dead_time_p_ps)
         return apply_nonparalyzable(arrivals, det.dead_time_ps)
-    return _self_exciting(arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng)
+    return _self_exciting(
+        arrivals, det.dead_time_ps, det.afterpulse_prob, det.afterpulse_tau_ps, rng, det.dead_time_p_ps
+    )
 
 
 def _primaries(
@@ -253,6 +269,8 @@ def _coupled(
     prim_t, prim_c = times[order].tolist(), chans[order].tolist()
     # A zero dead time still records at most one tag per ps per channel (as `detect` does).
     dead = [max(int(d.dead_time_ps), 1) for d in dets]
+    para = [int(d.dead_time_p_ps) for d in dets]
+    last_input = [-(1 << 62)] * len(names)
     ap = [(float(d.afterpulse_prob), float(d.afterpulse_tau_ps)) for d in dets]
     draws = _Draws(rng)
     out: list[list[int]] = [[] for _ in names]
@@ -265,6 +283,10 @@ def _coupled(
         else:
             t, c = prim_t[i], prim_c[i]
             i += 1
+        if para[c]:
+            previous, last_input[c] = last_input[c], t
+            if t - previous < para[c]:
+                continue
         if t < next_allowed[c]:
             continue
         out[c].append(t)
@@ -280,15 +302,18 @@ def _coupled(
 
 
 def _self_exciting(
-    arrivals: np.ndarray, dead_time_ps: int, p: float, tau_ps: float, rng: np.random.Generator
+    arrivals: np.ndarray, dead_time_ps: int, p: float, tau_ps: float, rng: np.random.Generator,
+    dead_time_p_ps: int = 0,
 ) -> np.ndarray:
     """Dead time plus cascading afterpulses, event by event.
 
     `arrivals` are sorted primary avalanche candidates (photons and dark
     counts). Each recorded avalanche blocks the next `dead_time_ps` and, with
     probability `p`, adds an afterpulse candidate at its dead-time end plus an
-    exponential delay with mean `tau_ps`.
+    exponential delay with mean `tau_ps`. With `dead_time_p_ps` every candidate
+    first meets the paralyzable stage (see the module docstring).
     """
+    last_input: int | None = None
     out: list[int] = []
     pending: list[int] = []  # afterpulse candidates (min-heap)
     next_allowed: int | None = None
@@ -304,6 +329,10 @@ def _self_exciting(
         else:
             t = primaries[i]
             i += 1
+        if dead_time_p_ps:
+            previous, last_input = last_input, t
+            if previous is not None and t - previous < dead_time_p_ps:
+                continue
         if next_allowed is not None and t < next_allowed:
             continue
         out.append(t)

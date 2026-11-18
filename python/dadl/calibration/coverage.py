@@ -4,7 +4,7 @@ Each replicate simulates one acquisition from known parameters with an
 independent random stream, runs the calibration, and records whether each 95%
 interval contains the truth. Run from the command line:
 
-    python -m dadl.calibration.coverage {dark,pairs,dcr,all} --replicates 1000 [--jobs 4]
+    python -m dadl.calibration.coverage {dark,pairs,dcr,deadtime,all} --replicates 1000 [--jobs 4]
 
 Each calibration is gated at more than one point of parameter space (a
 "regime"), since a method can cover well at one point and fail at another:
@@ -38,12 +38,13 @@ import numpy as np
 from dadl.calibration.accidentals import calibrate_accidentals
 from dadl.calibration.dark import calibrate_dark
 from dadl.calibration.dcr import calibrate_dcr_temperature
+from dadl.calibration.deadtime import calibrate_deadtime_series
 from dadl.calibration.delay import calibrate_delay
 from dadl.calibration.heralding import calibrate_heralding
 from dadl.closed_form import accidentals_expected, arrhenius_dark_rate, heralding_ratio_expected
 from dadl.data import ChannelId
 from dadl.coincidences import occupied_slots
-from dadl.sim import DetectorParams, simulate_dark, simulate_pairs
+from dadl.sim import DetectorParams, detect, poisson_times, simulate_dark, simulate_pairs
 from dadl.stats import coverage_band
 
 #: Simulated detector for the dark calibration gate: a Si SPAD module with
@@ -392,10 +393,72 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
     return CoverageResult("dcr-temperature [five-temperatures]", replicates, covered, gate(replicates, len(truth)))
 
 
+@dataclass(frozen=True)
+class DeadtimeRegime:
+    """Series dead time: illuminated runs at several input rates, and (with afterpulsing) a dark
+    run whose artifact supplies the afterpulse parameters, as `dadl calibrate deadtime` uses them."""
+
+    detector: DetectorParams
+    rates_cps: tuple[float, ...]
+    duration_s: float
+    dark_duration_s: float = 0.0
+
+
+DEADTIME_REGIMES: dict[str, DeadtimeRegime] = {
+    # An actively quenched SPAD whose front end paralyzes: tau_p 20 ns before a 50 ns hold-off.
+    "series-spad": DeadtimeRegime(
+        DetectorParams(efficiency=1.0, dark_rate_cps=1000.0, dead_time_ps=50_000, dead_time_p_ps=20_000,
+                       jitter_sigma_ps=0.0),
+        (2e6, 5e6, 1e7), 0.02,
+    ),
+    # Passive quench: recharge nearly all paralyzable (40 of 45 ns), with 2% afterpulsing at 30 ns
+    # held at a dark artifact's estimates.
+    "passive-quench": DeadtimeRegime(
+        DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=45_000, dead_time_p_ps=40_000,
+                       jitter_sigma_ps=0.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0),
+        (1e6, 3e6, 6e6), 0.02, dark_duration_s=1.0,
+    ),
+}
+
+
+def deadtime_coverage(
+    replicates: int = 1000, seed: int = 20261111, regime: str = "series-spad", part: range | None = None
+) -> list[CoverageResult]:
+    """tau_p (two-sided band, with the misfit share) and tau_np (at least 95%: under light tens of
+    thousands of gaps fall per tick at the edge, so the shortest gap is almost always tau_np itself
+    and its interval is exact to the tick; the 300-replicate pilot covered 100% in series-spad)."""
+    reg = DEADTIME_REGIMES[regime]
+    det = reg.detector
+    truth_p = {"dead_time_p_ps": float(det.dead_time_p_ps)}
+    truth_np = {"dead_time_ps": float(det.dead_time_ps)}
+    covered_p = dict.fromkeys(truth_p, 0)
+    covered_np = dict.fromkeys(truth_np, 0)
+    channel = ChannelId("sim", 0)
+    for child in _children(seed, replicates, part, regime):
+        sim_seq, fit_seq = child.spawn(2)
+        rng = np.random.default_rng(sim_seq)
+        fit_seed = int(fit_seq.generate_state(1)[0])
+        afterpulse = None
+        if reg.dark_duration_s:
+            afterpulse = calibrate_dark(simulate_dark(det, reg.dark_duration_s, rng), channel, backend="sim",
+                                        seed=fit_seed, n_draws=400)
+        runs = [detect(poisson_times(r, reg.duration_s, rng), det, reg.duration_s, rng) for r in reg.rates_cps]
+        cal = calibrate_deadtime_series(runs, channel, afterpulse=afterpulse, backend="sim", seed=fit_seed, n_draws=10)
+        _covered(cal, truth_p, covered_p)
+        iv = cal.estimates.get("dead_time_ps")
+        covered_np["dead_time_ps"] += bool(iv is not None and iv.contains(truth_np["dead_time_ps"]))
+    band = gate(replicates, 2)
+    return [
+        CoverageResult(f"deadtime-series [{regime}]", replicates, covered_p, band),
+        CoverageResult(f"deadtime-series dead_time_ps [{regime}]", replicates, covered_np, band, at_least=True),
+    ]
+
+
 UNITS: dict[str, tuple[str, ...]] = {
     "dark": tuple(DARK_REGIMES),
     "pairs": (*PAIR_REGIMES, "ideal-accidentals"),
     "dcr": ("five-temperatures",),
+    "deadtime": tuple(DEADTIME_REGIMES),
 }
 
 
@@ -411,6 +474,8 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
         return [heralding_ideal_coverage(replicates, seed, part)]
     if name == "pairs":
         return pairs_coverage(replicates, seed, regime, part)
+    if name == "deadtime":
+        return deadtime_coverage(replicates, seed, regime, part)
     return [dcr_coverage(replicates, seed, part)]
 
 
@@ -469,7 +534,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dadl.calibration.coverage")
-    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "all"])
+    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "deadtime", "all"])
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
     parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")

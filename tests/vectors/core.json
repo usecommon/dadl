@@ -5,6 +5,8 @@
     {"name": "paralyzable basic", "op": "paralyzable", "times": [0, 5, 10, 25, 30], "tau": 10, "expect": [0, 25]},
     {"name": "zero dead time keeps duplicates", "op": "nonparalyzable", "times": [0, 0, 1, 2], "tau": 0, "expect": [0, 0, 1, 2]},
     {"name": "paralyzable equal tags", "op": "paralyzable", "times": [5, 5, 5, 20], "tau": 3, "expect": [5, 20]},
+    {"name": "series paralyzable then nonparalyzable", "op": "series", "times": [0, 3, 8, 20, 22, 31, 45, 49, 60], "tau_p": 5, "tau_np": 12, "expect": [0, 20, 45, 60]},
+    {"name": "series chain paralyzed throughout", "op": "series", "times": [0, 4, 8, 12, 16, 40], "tau_p": 5, "tau_np": 10, "expect": [0, 40]},
     {"name": "nonparalyzable empty", "op": "nonparalyzable", "times": [], "tau": 10, "expect": []},
     {"name": "nonparalyzable unsorted", "op": "nonparalyzable", "times": [30, 0, 5, 10], "tau": 10, "expect": {"error": "Unsorted"}},
     {"name": "paralyzable unsorted", "op": "paralyzable", "times": [30, 0, 5, 10], "tau": 10, "expect": {"error": "Unsorted"}},

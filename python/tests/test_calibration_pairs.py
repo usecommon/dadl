@@ -308,9 +308,10 @@ def test_every_regime_has_a_closed_form_truth_and_runs():
         assert t["accidentals"]["accidental_coincidences"] > 0
     results = run("all", replicates=3, jobs=1)
     per_regime = sum(3 - len(r.skip) for r in PAIR_REGIMES.values())
-    from dadl.calibration.coverage import DARK_REGIMES
+    from dadl.calibration.coverage import DARK_REGIMES, DEADTIME_REGIMES
 
-    assert len(results) == len(DARK_REGIMES) + per_regime + 1 + 1  # dark, pairs, ideal heralding, DCR
+    # dark, pairs, ideal heralding, DCR, and two results (tau_p; tau_np at least) per dead-time regime
+    assert len(results) == len(DARK_REGIMES) + per_regime + 1 + 1 + 2 * len(DEADTIME_REGIMES)
     (sparse,) = [r for r in results if r.calibration == "accidentals [sparse-snspd]"]
     assert sparse.at_least and "at least" in str(sparse)
 

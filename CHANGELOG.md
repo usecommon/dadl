@@ -93,6 +93,25 @@ and is versioned separately from the packages.
   passes when the check flags at least 90% of replicates; clean regimes may be flagged in at
   most 1%.
 
+### Phase 3, M4: series dead-time model
+
+- Simulator: `DetectorParams.dead_time_p_ps` (setup.yaml `dead_time_p_ps`, default 0), a
+  paralyzable stage before the non-paralyzable `dead_time_ps`. Every avalanche candidate
+  (photon, dark count, afterpulse, crosstalk) restarts it, in the filter path and both event
+  loops. Two `series` cases join the shared Rust/Python test vectors.
+- `dadl.calibration.deadtime.calibrate_deadtime_series` (kind `deadtime-series`, decision D4;
+  method `series-gap-mle` 1): tau_p and tau_np from two or more illuminated acquisitions at
+  different rates. The gap law of the series chain is exact (a delay equation solved as a finite
+  series, then its dominant mode); afterpulsing is held at the dark artifact's estimates with its
+  uncertainty propagated by a linear sensitivity. tau_p's interval is the profile likelihood's;
+  when the hard-edge model is not rejected, tau_p is an upper limit (unidentified, stand-in
+  draws). The likelihood ratio against the hard-edge model is recorded.
+- CLI: `dadl simulate SETUP --deadtime-scan [--rates R1,R2,...]` (one rate per setting) and
+  `dadl calibrate deadtime SETUP --tags scan.npz [--dark DIR] --out DIR`.
+- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI).
+- Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery; the forward model
+  still uses the dark calibration's non-paralyzable dead time.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

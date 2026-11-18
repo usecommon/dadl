@@ -189,6 +189,8 @@ jobs:
           - {name: pairs 1, args: "pairs --regimes cw-spad sparse-snspd afterpulsing-spad high-rate-snspd"}
           - {name: pairs 2, args: "pairs --regimes bright-background"}
           - {name: pairs 3, args: "pairs --regimes broad-irf ideal-accidentals"}
+          - {name: deadtime series-spad, args: "deadtime --regimes series-spad"}
+          - {name: deadtime passive-quench, args: "deadtime --regimes passive-quench"}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

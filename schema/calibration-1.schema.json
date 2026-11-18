@@ -22,9 +22,10 @@
       "const": "calibration/1"
     },
     "kind": {
-      "description": "What was calibrated. Parameters fitted from the same data share one artifact (one joint posterior).",
+      "description": "What was calibrated. Parameters fitted from the same data share one artifact (one joint posterior). deadtime-series (phase 3, decision D4) is the one kind added after the calibration/1 freeze: readers from 0.1.x refuse it.",
       "enum": [
         "dark-afterpulse-deadtime",
+        "deadtime-series",
         "dcr-temperature",
         "heralding-efficiency",
         "delay-jitter",

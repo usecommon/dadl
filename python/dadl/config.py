@@ -32,7 +32,7 @@ SOURCE_TYPES = ("spdc-cw",)
 HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
-     "afterpulse_tau_ps", "delay_ps"}
+     "afterpulse_tau_ps", "delay_ps", "dead_time_p_ps"}
 )
 SOURCE_KEYS = frozenset({"type", "pair_rate_per_s", "visibility", "coherence_time_ps"})
 ANALYSIS_KEYS = frozenset({"type", "settings_deg", "duration_s_per_setting", "window", "reference_delay_ps"})

@@ -24,6 +24,10 @@ fn run(case: &Value) -> Result<Value, DadlError> {
     Ok(match case["op"].as_str().expect("op") {
         "nonparalyzable" => Value::from(deadtime::apply_nonparalyzable(&ints(&case["times"]), i("tau"))?),
         "paralyzable" => Value::from(deadtime::apply_paralyzable(&ints(&case["times"]), i("tau"))?),
+        "series" => Value::from(deadtime::apply_nonparalyzable(
+            &deadtime::apply_paralyzable(&ints(&case["times"]), i("tau_p"))?,
+            i("tau_np"),
+        )?),
         "grid_coincidences" => Value::from(coincidences::grid_coincidences(
             &ints(&case["a"]),
             &ints(&case["b"]),

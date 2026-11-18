@@ -6,6 +6,8 @@
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S or HOM visibility from your own tags
                  [--calibrations DIR --allow C=REASON]  HOM: corrected by the forward model
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
+    dadl calibrate deadtime SETUP --tags scan.npz --out DIR [--dark DIR]
+                                                        series (paralyzable + non-paralyzable) dead time
     dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR
                                                         delay, jitter, accidentals, heralding efficiency
     dadl version
@@ -140,7 +142,6 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
     them. If the dark data only bound the dead time too loosely to use (an SNSPD's 100 cps), the
     refusal is reported and the accidentals are corrected alone.
     """
-    import datetime as dt
     import tempfile
 
     from dadl.analysis.hom import hom_from_tags
@@ -188,7 +189,6 @@ def _quickstart_chsh_corrected(runs: dict, setup: Setup) -> LabelledValue:
     """CHSH with a corrected S from the forward model: each channel pair's delay and jitter from a
     simulated pair run (no analysers), accidentals from the off-peak bins. The policy is loosened
     for both corrections, as any corrected CHSH must be, and the result says so."""
-    import datetime as dt
     import tempfile
 
     from dadl.artifact import write_artifact
@@ -314,14 +314,27 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
-    if args.duration_s is not None and not (args.dark or args.heralding):
-        raise DadlError("--duration-s applies to --dark and --heralding; a CHSH or HOM run takes its duration from the setup")
-    args.duration_s = 20.0 if args.duration_s is None else args.duration_s
+    if args.duration_s is not None and not (args.dark or args.heralding or args.deadtime_scan):
+        raise DadlError(
+            "--duration-s applies to --dark, --heralding and --deadtime-scan; a CHSH or HOM run takes its duration "
+            "from the setup"
+        )
+    if args.rates is not None and not args.deadtime_scan:
+        raise DadlError("--rates applies to --deadtime-scan")
+    default_s = 0.05 if args.deadtime_scan else 20.0
+    args.duration_s = default_s if args.duration_s is None else args.duration_s
     if not args.duration_s > 0:
         raise DadlError("--duration-s must be positive")
-    if args.dark and args.heralding:
-        raise DadlError("choose one of --dark and --heralding")
-    if args.dark:
+    if sum(map(bool, (args.dark, args.heralding, args.deadtime_scan))) > 1:
+        raise DadlError("choose one of --dark, --heralding and --deadtime-scan")
+    if args.deadtime_scan:
+        from dadl.simsetup import deadtime_scan_rates, simulate_setup_deadtime_scan
+
+        rates = _rates(args.rates) if args.rates is not None else deadtime_scan_rates(setup)
+        runs = simulate_setup_deadtime_scan(setup, rates, args.duration_s)
+        shown = ", ".join(f"{r:.3g}" for r in rates)
+        what = f"dead-time scan tags ({args.duration_s:g} s per rate; photon rates {shown} per s, settings 0-{len(rates) - 1})"
+    elif args.dark:
         runs = simulate_setup_dark(setup, args.duration_s)
         what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
     elif args.heralding:
@@ -356,6 +369,13 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     out = write_tags(args.out, runs, setup.channels, setup.setting_keys, simulated=True)
     print(f"Wrote simulated {what} for {setup.name} to {out}")
     return 0
+
+
+def _rates(text: str) -> tuple[float, ...]:
+    try:
+        return tuple(float(x) for x in text.split(","))
+    except ValueError as exc:
+        raise DadlError(f"--rates: comma-separated photon rates per s, got {text!r}") from exc
 
 
 def _add_record_options(p: argparse.ArgumentParser) -> None:
@@ -592,6 +612,82 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
                 f"  warning: the dark rate is more than 10x the setup's declared {declared:g} cps. Check that the "
                 "source was off and the detector shielded from light."
             )
+        try:
+            path = _write_checked(cal, args.out, args.accept_misfit, **write)
+        except DadlError as exc:
+            print(f"  not written: {exc}")
+            failed.append(name)
+        else:
+            print(f"  artifact: {path}")
+    if failed:
+        raise DadlError(f"{len(failed)} of {len(wanted)} channels not calibrated or not written: {', '.join(failed)}")
+    return 0
+
+
+def _dark_artifact_for(source: str, channel):
+    """The channel's dark artifact from a folder or file, or a refusal naming what is there."""
+    from dadl.artifact import load_calibration
+    from dadl.calibration.dark import KIND as DARK_KIND
+
+    path = Path(source)
+    files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+    found = []
+    for f in files:
+        try:
+            cal = load_calibration(f)
+        except (DadlError, ValueError, OSError):
+            continue
+        if cal.kind == DARK_KIND and tuple(cal.channels) == (channel,):
+            found.append((f, cal))
+    if not found:
+        raise DadlError(f"no dark artifact for {channel} in {source}")
+    if len(found) > 1:
+        raise DadlError(f"{len(found)} dark artifacts for {channel} in {source}; pass the one to use as a file")
+    return found[0]
+
+
+def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
+    from dadl.calibration.deadtime import calibrate_deadtime_series
+
+    setup = load_setup(_resolve(args.setup))
+    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
+    keys = setup.setting_keys
+    settings = args.settings if args.settings else [
+        i for i, k in enumerate(keys) if any(np.asarray(t).size > 1 for t in runs[k].values())
+    ]
+    bad = [i for i in settings if not 0 <= i < len(keys)]
+    if bad:
+        raise DadlError(f"--settings must be in 0..{len(keys) - 1}")
+    number = {name: num for num, name in setup.channels.items()}
+    wanted = args.channel or [setup.channels[n] for n in sorted(setup.channels)]
+    unknown = [c for c in wanted if c not in number]
+    if unknown:
+        raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
+    backend = _backend(setup, args.tags)
+    _check_time_units(runs, setup)
+    print(f"DADL {__version__} calibrate deadtime: {setup.name}, tags from {args.tags} (settings {settings})")
+    write, extra, inputs = _record(args, _resolve(args.setup))
+    failed: list[str] = []
+    for name in wanted:
+        channel = setup.channel_id(name)
+        acquisitions = [runs[keys[i]][name] for i in settings]
+        afterpulse = None
+        try:
+            if args.dark:
+                dark_path, afterpulse = _dark_artifact_for(args.dark, channel)
+                print(f"  {name}: afterpulsing from {dark_path}")
+            cal = calibrate_deadtime_series(
+                acquisitions, channel, afterpulse=afterpulse, backend=backend, seed=setup.seed,
+                conditions={"settings": float(len(settings)), **extra},
+            )
+        except (DadlError, ValueError) as exc:
+            print()
+            print(f"  {name}: not calibrated: {exc}")
+            failed.append(name)
+            continue
+        cal = dataclasses.replace(cal, inputs=cal.inputs + inputs)
+        print()
+        print(cal)
         try:
             path = _write_checked(cal, args.out, args.accept_misfit, **write)
         except DadlError as exc:
@@ -897,8 +993,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="simulate a heralding run: the pair source straight onto one detector per arm (for calibrate pairs)",
     )
     sim.add_argument(
+        "--deadtime-scan", action="store_true",
+        help="steady light on every detector at several rates, one per setting (for calibrate deadtime)",
+    )
+    sim.add_argument(
+        "--rates", default=None, metavar="R1,R2,...",
+        help="--deadtime-scan: photon rates per s at each detector, one per setting (default: rate x dead time 0.05 to 0.5)",
+    )
+    sim.add_argument(
         "--duration-s", type=float, default=None,
-        help="acquisition length for --dark (per channel) or --heralding (default 20); a CHSH or HOM run uses the setup",
+        help="acquisition length for --dark (per channel) or --heralding (default 20), or per rate for --deadtime-scan "
+        "(default 0.05); a CHSH or HOM run uses the setup",
     )
     sim.set_defaults(func=cmd_simulate)
 
@@ -937,6 +1042,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_record_options(dark)
     dark.set_defaults(func=cmd_calibrate_dark)
+
+    dt = cal_sub.add_parser(
+        "deadtime",
+        help="series dead time (paralyzable then non-paralyzable) from illuminated runs at several rates",
+        description="Fit each channel's paralyzable (dead_time_p_ps) and non-paralyzable (dead_time_ps) dead times "
+        "from the gaps of two or more acquisitions under steady light at different rates (simulated: dadl simulate "
+        "SETUP --deadtime-scan). Afterpulsing is held at the channel's dark artifact (--dark). Writes one "
+        "content-addressed artifact per channel, of kind deadtime-series.",
+    )
+    dt.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
+    dt.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, one rate per setting")
+    dt.add_argument("--settings", type=int, nargs="+", help="setting indices holding the runs (default: every non-empty one)")
+    dt.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
+    dt.add_argument("--dark", help="folder or file with the channels' dark artifacts (afterpulsing); default: none")
+    dt.add_argument("--out", required=True, help="directory for the artifacts")
+    dt.add_argument(
+        "--accept-misfit", action="store_true",
+        help="write artifacts whose predictive check fails (p < 0.001), marked misfit; refused otherwise",
+    )
+    _add_record_options(dt)
+    dt.set_defaults(func=cmd_calibrate_deadtime)
 
     pairs = cal_sub.add_parser(
         "pairs",

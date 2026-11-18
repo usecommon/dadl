@@ -11,6 +11,10 @@
     "sha256": "cc7bbf9ba0ee8d995db4aee722ad1e29e9cccd25602c1b7075bb0fb67f53208f",
     "version": "2"
   },
+  "deadtime": {
+    "sha256": "0479554aed2fc6626b73d86af914047876a788845af5487284619a78c432bbc8",
+    "version": "1"
+  },
   "delay": {
     "sha256": "0505711c77f108fae30ceb7c0233fd011d1b341d84cea6f4046496a8d847ded6",
     "version": "8"

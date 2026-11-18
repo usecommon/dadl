@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 TABLE = Path(__file__).with_name("method_versions.json")
-MODULES = ("accidentals", "dark", "dcr", "delay", "heralding")
+MODULES = ("accidentals", "dark", "dcr", "deadtime", "delay", "heralding")
 
 
 def current() -> dict[str, dict[str, str]]:

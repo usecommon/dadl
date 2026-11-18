@@ -31,6 +31,8 @@ def run(case):
         return apply_nonparalyzable(arr(case["times"]), case["tau"]).tolist()
     if op == "paralyzable":
         return apply_paralyzable(arr(case["times"]), case["tau"]).tolist()
+    if op == "series":
+        return apply_nonparalyzable(apply_paralyzable(arr(case["times"]), case["tau_p"]), case["tau_np"]).tolist()
     if op == "grid_coincidences":
         return grid_coincidences(arr(case["a"]), arr(case["b"]), case["width"], case["delay_a"], case["delay_b"])
     if op == "interarrival":
