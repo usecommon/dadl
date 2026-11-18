@@ -81,7 +81,17 @@ and is versioned separately from the packages.
   must undercover). Misfit artifacts are accepted, labelled and counted (at most 2% of
   replicates).
   `--shard k/n --out FILE` runs one slice of the replicates and `merge FILES` gates the sum;
-  CI runs chsh-dead-time in four shards. Progress is printed per finished chunk.
+  CI runs chsh-dead-time in eight shards. Progress is printed per finished chunk.
+- The forward model's predictive check (`dadl.forward_check`): wherever a delay-jitter artifact
+  gives the peak shape (window capture), each analysed coincidence histogram (HOM, fringe, all 16
+  of CHSH) is refitted with that shape (a Gaussian, or the mixture at the declared offsets) on a
+  stepped background over |b - a| < W, and a Bonferroni-adjusted grouped Pearson p below 0.001
+  raises the new `Misspecified` error unless the policy allows `misfit_forward_model` (then
+  labelled). The p-value is in `counts["forward_check_p"]`. A reference run declared without its
+  path delay is caught the same way.
+- Misspecified regime `hom-crosstalk`: hom-bright with 0.1% crosstalk each way at 400 ps. It
+  passes when the check flags at least 90% of replicates; clean regimes may be flagged in at
+  most 1%.
 
 ### Published results as executable tests
 

@@ -19,8 +19,13 @@ A control runs alongside: the same corrected value with the calibration uncertai
 (point +- 1.96 statistical standard deviations). It must fall below the band in at least one
 declared regime (`CONTROL_REGIMES`), or the regimes do not test propagation.
 
-Regimes are declared before the first run (phase 3 plan, M3). Still to come in M3: the
-misspecified regime, which needs the predictive check.
+The forward model's predictive check (`dadl.forward_check`) runs in every replicate. In the clean
+regimes it may flag at most `MAX_FLAG_SHARE` of replicates. The misspecified regime (`MISSPECIFIED`:
+crosstalk between the two HOM detectors, which the model lacks, in the window) passes only if the
+check flags at least `MIN_FLAG_SHARE` of its replicates; its coverage is reported, not gated
+(it is expected to fail: that is what the check is for).
+
+Regimes are declared before the first run (phase 3 plan, M3).
 """
 
 from __future__ import annotations
@@ -46,9 +51,10 @@ from dadl.calibration.dark import calibrate_dark
 from dadl.calibration.delay import calibrate_delay
 from dadl.closed_form import chsh_ideal, hom_visibility_expected
 from dadl.data import ChannelId
+from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
 from dadl.guardrails import Policy
 from dadl.propagate import MISFIT_ACCEPTED, CalibrationSet, DatasetContext
-from dadl.sim import DetectorParams, PairSource, simulate_chsh, simulate_dark, simulate_hom, simulate_pairs
+from dadl.sim import Crosstalk, DetectorParams, PairSource, simulate_chsh, simulate_dark, simulate_hom, simulate_pairs
 
 UTC = dt.timezone.utc
 CREATED = dt.datetime(2026, 11, 1, tzinfo=UTC)
@@ -59,7 +65,7 @@ CHSH_SETTINGS = {"a": 0.0, "a'": 45.0, "b": 22.5, "b'": 67.5}
 #: Corrections the gate allows; misfit artifacts are accepted (labelled) and counted, since the
 #: artifacts' predictive checks flag about 0.1-0.2% of clean calibrations each and a CHSH
 #: replicate writes up to eight.
-CORRECTIONS = ("dead_time", "accidental_subtraction", "window_capture", "misfit_calibration")
+CORRECTIONS = ("dead_time", "accidental_subtraction", "window_capture", "misfit_calibration", "misfit_forward_model")
 
 
 def _policy() -> Policy:
@@ -87,6 +93,13 @@ class Regime:
     #: cps on the example SPADs), the dark artifacts are not loaded and the dead time is not corrected.
     dead_time_from_dark: bool
     reference_delay_ps: float = 0.0
+    #: Crosstalk between the two HOM detectors ("A", "B"), in every acquisition that uses them;
+    #: the forward model lacks it, so a regime with crosstalk is misspecified.
+    crosstalk: tuple[Crosstalk, ...] = ()
+
+    @property
+    def misspecified(self) -> bool:
+        return bool(self.crosstalk)
 
     @property
     def truth(self) -> float:
@@ -113,6 +126,17 @@ REGIMES: dict[str, Regime] = {
         DetectorParams(efficiency=0.5, dark_rate_cps=20_000.0, dead_time_ps=60_000, jitter_sigma_ps=10.0),
         window_ps=1_000, duration_s=0.2, dark_duration_s=1.0, pairs_duration_s=0.05,
         dead_time_from_dark=True, reference_delay_ps=20.0,
+    ),
+    # Misspecified: hom-bright with 0.1% crosstalk each way at 400 ps (inside the 1 ns window),
+    # about 400 extra coincidences on a dip of about 4,000 and V several standard errors low.
+    # The predictive check must flag it (at 0.02% it flagged 73% of trial runs, at 0.05% all).
+    "hom-crosstalk": Regime(
+        "hom",
+        PairSource(pair_rate_per_s=2.0e6, visibility=0.92, coherence_time_ps=2.0),
+        DetectorParams(efficiency=0.5, dark_rate_cps=20_000.0, dead_time_ps=60_000, jitter_sigma_ps=10.0),
+        window_ps=1_000, duration_s=0.2, dark_duration_s=1.0, pairs_duration_s=0.05,
+        dead_time_from_dark=True, reference_delay_ps=20.0,
+        crosstalk=(Crosstalk("A", "B", 0.001, 400.0, 50.0), Crosstalk("B", "A", 0.001, 400.0, 50.0)),
     ),
     # examples/chsh-spad: 25k cps per channel, dead time negligible and not identifiable from 500
     # cps of dark counts; afterpulsing (0.5%) left in, unmodelled (uncorrelated, so in the
@@ -144,6 +168,12 @@ CONTROL_REGIMES = ("chsh-dead-time",)
 CORRECTED = "corrected"
 CONTROL = "control"
 MISFITS = "misfit artifacts"
+FLAGGED = "forward misfit"
+KEYS = (CORRECTED, CONTROL, MISFITS, FLAGGED)
+#: Largest share of clean replicates the predictive check may flag (phase 3 plan, M3 acceptance).
+MAX_FLAG_SHARE = 0.01
+#: Smallest share of misspecified replicates it must flag.
+MIN_FLAG_SHARE = 0.90
 #: Largest share of replicates that may use a misfit artifact (the checks' nominal rate times up
 #: to eight artifacts is about 1.2%).
 MAX_MISFIT_SHARE = 0.02
@@ -161,15 +191,21 @@ def _calibrate(regime: Regime, rng: np.random.Generator, fit_seed: int, tmp: str
     else:
         pairs = [(CHSH_CHANNELS["A" + x], CHSH_CHANNELS["B" + y]) for x in "+-" for y in "+-"]
     for a_id, b_id in pairs:
-        a, b = simulate_pairs(regime.source.pair_rate_per_s, det, det, regime.pairs_duration_s, rng)
+        a, b = simulate_pairs(regime.source.pair_rate_per_s, det, det, regime.pairs_duration_s, rng, _lower(regime.crosstalk))
         delay = calibrate_delay(a, b, (a_id, b_id), backend="sim", seed=fit_seed, n_draws=400)
         write_artifact(delay, tmp, accept_misfit=True, created=CREATED)
     analysis = "hom_visibility" if regime.analysis == "hom" else "chsh"
     return CalibrationSet.load(tmp, analysis=analysis, policy=POLICY, dataset=DatasetContext(acquired=ACQUIRED))
 
 
-def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, bool, bool]:
-    """(corrected interval covers the truth, control interval covers it, a misfit artifact was used)."""
+def _lower(links: tuple[Crosstalk, ...]) -> tuple[Crosstalk, ...]:
+    """The HOM links with channels named as `simulate_pairs` names them ("a", "b")."""
+    return tuple(Crosstalk(x.source.lower(), x.target.lower(), x.probability, x.delay_ps, x.jitter_sigma_ps) for x in links)
+
+
+def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, bool, bool, bool]:
+    """(corrected interval covers the truth, control interval covers it, a misfit artifact was used,
+    the forward model's predictive check flagged the analysis)."""
     cal_seq, run_seq, fit_seq = child.spawn(3)
     cal_rng, run_rng = np.random.default_rng(cal_seq), np.random.default_rng(run_seq)
     fit_seed = int(fit_seq.generate_state(1)[0])
@@ -179,7 +215,7 @@ def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, boo
     det = regime.detector
     if regime.analysis == "hom":
         runs = {
-            name: simulate_hom(regime.source, det, det, delay, regime.duration_s, run_rng)
+            name: simulate_hom(regime.source, det, det, delay, regime.duration_s, run_rng, regime.crosstalk)
             for name, delay in (("dip", 0.0), ("reference", regime.reference_delay_ps))
         }
         result, _ = hom_from_tags(
@@ -192,19 +228,18 @@ def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, boo
         result = chsh(runs, window, POLICY, settings_deg=CHSH_SETTINGS, calibrations=cset, channels=CHSH_CHANNELS, seed=fit_seed)
     c, truth = result.corrected, regime.truth
     half = 1.959964 * c.stderr_statistical
-    return c.low <= truth <= c.high, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels
+    covered = c.low <= truth <= c.high
+    return covered, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.labels
 
 
 def propagation(
     replicates: int = 1000, seed: int = 20261118, regime: str = "hom-bright", part: range | None = None
 ) -> CoverageResult:
     reg = REGIMES[regime]
-    covered = {CORRECTED: 0, CONTROL: 0, MISFITS: 0}
+    covered = dict.fromkeys(KEYS, 0)
     for child in _children(seed, replicates, part, regime):
-        ok, ok_control, misfit = _replicate(reg, child)
-        covered[CORRECTED] += ok
-        covered[CONTROL] += ok_control
-        covered[MISFITS] += misfit
+        for key, hit in zip(KEYS, _replicate(reg, child)):
+            covered[key] += hit
     name = "hom_visibility" if reg.analysis == "hom" else "chsh"
     return CoverageResult(f"{name} [{regime}]", replicates, covered, gate(replicates, 1))
 
@@ -214,9 +249,13 @@ def regime_of(result: CoverageResult) -> str:
 
 
 def passed(result: CoverageResult) -> bool:
-    """The corrected value within the band; in a control regime, the control below it."""
+    """Clean regimes: the corrected value within the band, few misfit artifacts and few flags; in
+    a control regime, the control below the band. The misspecified regime: flagged enough."""
+    if REGIMES[regime_of(result)].misspecified:
+        return result.fraction(FLAGGED) >= MIN_FLAG_SHARE
     lo, hi = result.gate
     ok = lo <= result.fraction(CORRECTED) <= hi and result.fraction(MISFITS) <= MAX_MISFIT_SHARE
+    ok = ok and result.fraction(FLAGGED) <= MAX_FLAG_SHARE
     if regime_of(result) in CONTROL_REGIMES:
         ok = ok and result.fraction(CONTROL) < lo
     return ok
@@ -224,12 +263,22 @@ def passed(result: CoverageResult) -> bool:
 
 def describe(result: CoverageResult) -> str:
     lo, hi = result.gate
+    verdict = "PASS" if passed(result) else "FAIL"
+    if REGIMES[regime_of(result)].misspecified:
+        return "\n".join([
+            f"{result.calibration}: {result.replicates} replicates, misspecified  {verdict}",
+            f"  {FLAGGED:<17} {result.fraction(FLAGGED):.1%}  (predictive check; at least {MIN_FLAG_SHARE:.0%})",
+            f"  {CORRECTED:<17} {result.fraction(CORRECTED):.1%}  (reported: the model lacks the crosstalk)",
+            f"  {CONTROL:<17} {result.fraction(CONTROL):.1%}  (reported)",
+            f"  {MISFITS:<17} {result.fraction(MISFITS):.1%}  (reported)",
+        ])
     control = "must fall below the band" if regime_of(result) in CONTROL_REGIMES else "reported, not gated here"
     return "\n".join([
-        f"{result.calibration}: {result.replicates} replicates, gate {lo:.1%}-{hi:.1%}  {'PASS' if passed(result) else 'FAIL'}",
+        f"{result.calibration}: {result.replicates} replicates, gate {lo:.1%}-{hi:.1%}  {verdict}",
         f"  {CORRECTED:<17} {result.fraction(CORRECTED):.1%}",
         f"  {CONTROL:<17} {result.fraction(CONTROL):.1%}  (calibration uncertainty off; {control})",
         f"  {MISFITS:<17} {result.fraction(MISFITS):.1%}  (at most {MAX_MISFIT_SHARE:.0%})",
+        f"  {FLAGGED:<17} {result.fraction(FLAGGED):.1%}  (predictive check; at most {MAX_FLAG_SHARE:.0%})",
     ])
 
 
@@ -306,7 +355,7 @@ def run(
     out = []
     for r in names:
         mine = [p for t, p in zip(tasks, parts) if t[0] == r]
-        covered = {k: sum(p.covered[k] for p in mine) for k in (CORRECTED, CONTROL, MISFITS)}
+        covered = {k: sum(p.covered[k] for p in mine) for k in KEYS}
         out.append(CoverageResult(mine[0].calibration, replicates, covered, mine[0].gate))
     return out
 
@@ -341,7 +390,7 @@ def merge(records: list[dict]) -> list[CoverageResult]:
             expected_next = hi
         if expected_next != replicates:
             raise ValueError(f"{name}: shards cover replicates 0-{expected_next}, not all {replicates}")
-        covered = {k: sum(c[k] for _, c in mine) for k in (CORRECTED, CONTROL, MISFITS)}
+        covered = {k: sum(c[k] for _, c in mine) for k in KEYS}
         out.append(CoverageResult(name, replicates, covered, gate(replicates, 1)))
     return out
 

@@ -75,6 +75,8 @@ KNOWN_CORRECTIONS = frozenset(
         # a misfit artifact, and one whose validity or conditions do not cover the dataset.
         "misfit_calibration",
         "calibration_outside_validity",
+        # The forward model's predictive check failing on the analysed data (dadl.forward_check).
+        "misfit_forward_model",
     }
 )
 

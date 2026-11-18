@@ -13,9 +13,10 @@ from dadl.analysis.hom import hom_from_tags
 from dadl.artifact import write_artifact
 from dadl.calibration.dark import calibrate_dark
 from dadl.data import ChannelId
-from dadl.errors import GuardrailRefusal
+from dadl.errors import GuardrailRefusal, Misspecified
 from dadl.calibration.delay import calibrate_delay
 from dadl.forward import CAPTURE_UNMODELLED, DEAD_TIME_BOUND, FORWARD_MODEL, RunCounts, corrected_visibility, grid_capture, live_fraction
+from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
 from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import CalibrationSet, DatasetContext
 from dadl.sim import DetectorParams, PairSource, simulate_chsh_setting, simulate_dark, simulate_hom, simulate_pairs
@@ -238,7 +239,13 @@ def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_pa
     assert CAPTURE_UNMODELLED not in r.labels
     # The reference run's split pairs at +-20 ps lose more to the grid than the dip's: modelling it
     # raises V by C_dip/C_ref * (1 - capture ratio), here about 0.08 * 0.01.
-    r0, _ = hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=0.0, **kw)
+    # Declaring no delay for a run that has one is a misfit the predictive check sees (two peaks at
+    # +-20 ps where the model has one); with the override the value can be compared.
+    with pytest.raises(Misspecified, match="reference"):
+        hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=0.0, **kw)
+    loose = policy.allow("hom_visibility", "misfit_forward_model", "comparing a misdeclared delay")
+    r0, _ = hom_from_tags(runs, WINDOW, policy=loose, reference_delay_ps=0.0, **kw)
+    assert FORWARD_MISFIT_ACCEPTED in r0.labels and FORWARD_MISFIT_ACCEPTED not in r.labels
     assert r.corrected.value - r0.corrected.value == pytest.approx(0.0008, abs=0.0003)
     # Not in the default HOM rule, like dead time (D10).
     with pytest.raises(GuardrailRefusal, match="window_capture"):

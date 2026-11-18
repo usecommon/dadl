@@ -33,7 +33,7 @@ import math
 import numpy as np
 
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
-from dadl.analysis._twopoint import check_calibration_args, forward_from_counts, run_counts, span_ps
+from dadl.analysis._twopoint import check_calibration_args, forward_check, forward_from_counts, run_counts, span_ps
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
@@ -141,7 +141,15 @@ def hom_from_tags(
             np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
         )
         d_ref = float(reference_delay_ps or 0.0)
-        high = run_counts(runs["reference"], c_max, side_ref, t_ref, offsets=(d_ref, -d_ref) if d_ref else (0.0,))
+        ref_offsets = (d_ref, -d_ref) if d_ref else (0.0,)
+        check_p, check_labels = forward_check(
+            "hom_visibility", {"reference": (runs["reference"], ref_offsets), "dip": (runs["dip"], (0.0,))},
+            HOM_CHANNELS, tuple(channels), window_ps=window.width_ps, delays_ps=dict(d),
+            calibrations=calibrations, policy=policy,
+        )
+        if check_p is not None:
+            counts["forward_check_p"] = check_p
+        high = run_counts(runs["reference"], c_max, side_ref, t_ref, offsets=ref_offsets)
         low = run_counts(runs["dip"], c_min, side, t_dip)
         fwd, extra = forward_from_counts(
             "hom_visibility", high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed,
@@ -149,7 +157,9 @@ def hom_from_tags(
         )
         counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
-        labels = tuple(dict.fromkeys(labels + fwd.labels + threshold_labels("hom_visibility", result.raw, fwd.estimate)))
+        labels = tuple(dict.fromkeys(
+            labels + fwd.labels + check_labels + threshold_labels("hom_visibility", result.raw, fwd.estimate)
+        ))
         result = dataclasses.replace(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
         )

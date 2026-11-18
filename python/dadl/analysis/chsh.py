@@ -282,7 +282,8 @@ def chsh(
     corrected = None
     extra: dict[str, object] = {}
     if calibrations is not None:
-        corrected, extra, more = _corrected(runs, window, policy, calibrations, channels, seed, raw)
+        corrected, extra, more, check_p = _corrected(runs, window, policy, calibrations, channels, seed, raw)
+        counts["forward_check_p"] = check_p
         labels += tuple(lab for lab in more if lab not in labels)
     return LabelledValue(
         analysis="chsh",
@@ -306,6 +307,7 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         raise ValueError(f"with calibrations, pass channels mapping each of {list(CHANNELS)} to its ChannelId")
     d = window.delays_ps
     offsets = side_offsets(window.width_ps)
+    check_p, check_labels = _forward_check(runs, window, policy, calibrations, channels)
     reduced = {}
     for key in SIGNS:
         tags = runs[key]
@@ -321,5 +323,26 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed,
         window_ps=window.width_ps, delays_ps={k: float(v) for k, v in d.items()},
     )
-    labels = fwd.labels + threshold_labels("chsh", raw, fwd.estimate)
-    return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels
+    labels = fwd.labels + check_labels + threshold_labels("chsh", raw, fwd.estimate)
+    return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels, check_p
+
+
+def _forward_check(runs, window: Window, policy: Policy, calibrations, channels) -> tuple[float, tuple[str, ...]]:
+    """The forward model's predictive check over all 16 histograms (4 settings x 4 outcome pairs)."""
+    from dadl.forward import OUTCOME_SIGNS
+    from dadl.forward_check import PairData, delay_start, enforce, run_check
+
+    d = window.delays_ps
+    pairs = []
+    for key in SIGNS:
+        tags = runs[key]
+        for x, y in OUTCOME_SIGNS:
+            a, b = "A" + x, "B" + y
+            declared = float(d.get(b, 0) - d.get(a, 0))
+            d_cal, jitter = delay_start(calibrations, channels[a], channels[b])
+            pairs.append(PairData(
+                f"{key[0]},{key[1]} {a}/{b}", np.sort(tags[a]), np.sort(tags[b]), declared, window.width_ps,
+                d_cal - declared, jitter,
+            ))
+    result = run_check(pairs)
+    return result.pvalue, enforce(result, "chsh", policy)
