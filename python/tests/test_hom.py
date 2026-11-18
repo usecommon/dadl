@@ -91,7 +91,10 @@ def test_bad_hom_setups_are_refused(change, match):
 def test_quickstart_simulate_analyze(tmp_path, capsys):
     assert main(["quickstart", "hom-snspd"]) == 0
     out = capsys.readouterr().out
-    assert "Raw V = 0.9" in out and "Closed-form expectation" in out and "Accidentals subtracted" in out
+    assert "Raw V = 0.9" in out and "Closed-form expectation" in out
+    # Phase 3: the corrected line comes from the forward model with simulated dark calibrations;
+    # 100 cps of dark counts only bound an SNSPD's dead time, and the quickstart says so.
+    assert "Corrected (forward model: accidental subtraction, then window capture)" in out and "Dead time not corrected" in out
     tags = tmp_path / "hom.npz"
     assert main(["simulate", "hom-snspd", "--out", str(tags)]) == 0
     assert main(["analyze", "hom-snspd", "--tags", str(tags)]) == 0
@@ -111,3 +114,31 @@ def test_accidentals_above_c_min_are_not_subtracted_and_it_is_said(capsys):
     result, counts = hom_from_tags(runs, Window(width_ps=200, source="plan"))
     assert counts["c_min"] == 0 and counts["accidentals"] > 0
     assert result.corrected is None and counts["subtracted"] == 0.0
+
+
+def test_analyze_with_calibrations(tmp_path, capsys):
+    # A HOM setup whose detectors have enough dark counts to identify the dead time.
+    setup = tmp_path / "setup.yaml"
+    setup.write_text(example_path("hom-snspd").read_text(encoding="utf-8").replace("dark_rate_cps: 100", "dark_rate_cps: 20000"), encoding="utf-8")
+    dark, tags, art = tmp_path / "dark.npz", tmp_path / "hom.npz", tmp_path / "art"
+    assert main(["simulate", str(setup), "--dark", "--duration-s", "2", "--out", str(dark)]) == 0
+    assert main(["calibrate", "dark", str(setup), "--tags", str(dark), "--out", str(art)]) == 0
+    her = tmp_path / "pairs.npz"
+    assert main(["simulate", str(setup), "--heralding", "--duration-s", "0.2", "--out", str(her)]) == 0
+    assert main(["calibrate", "pairs", str(setup), "--tags", str(her), "--no-analysers", "--herald", "A", "--signal", "B", "--out", str(art)]) == 0
+    assert main(["simulate", str(setup), "--out", str(tags)]) == 0
+    capsys.readouterr()
+    # Dead time is not in the default HOM rule (decision D10): refused without --allow.
+    assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art)]) == 1
+    assert "dead_time" in capsys.readouterr().err
+    args = ["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art), "--allow", "dead_time=calibrated from dark runs"]
+    assert main(args) == 1  # the delay-jitter artifact brings window capture, also an explicit override
+    assert "window_capture" in capsys.readouterr().err
+    assert main([*args, "--allow", "window_capture=delay and jitter from a pair run"]) == 0
+    out = capsys.readouterr().out
+    assert "Corrected (forward model: dead time, then accidental subtraction, then window capture): V = 0.9" in out
+    assert "Calibrations: " in out and "(modified)" in out
+    # Corrected CHSH waits for M3; --allow needs a reason.
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art)]) == 1
+    assert "M3" in capsys.readouterr().err
+    assert main(["analyze", str(setup), "--tags", str(tags), "--allow", "dead_time"]) == 1

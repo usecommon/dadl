@@ -273,6 +273,13 @@ dadl analyze my-experiment/setup.yaml --tags tags.npz
 `dadl simulate my-experiment/setup.yaml --out tags.npz` writes simulated tags
 in the same format, so you can check the round trip first.
 
+For a HOM setup, `--calibrations artifacts/` (artifacts written by `dadl calibrate`)
+adds a corrected visibility from the forward model, with calibration uncertainty and the
+artifact IDs. Dead-time and window-capture corrections (the latter from a
+delay-jitter artifact, `dadl calibrate pairs`) are explicit policy changes for HOM:
+`--allow dead_time="calibrated from separate dark runs"`, `--allow window_capture="..."`,
+and the result says so.
+
 From Python:
 
 ```python

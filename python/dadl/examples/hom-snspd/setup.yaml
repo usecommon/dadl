@@ -3,8 +3,9 @@
 #
 # `dadl quickstart hom-snspd` simulates two acquisitions, at the dip (zero
 # path delay) and at the reference delay far from it, and reports the raw
-# dip visibility, then the accidental-subtracted value as a labelled
-# secondary result (allowed for HOM, refused for Bell-type claims).
+# dip visibility, then a corrected value from the forward model, with
+# calibrations from simulated dark runs, as a labelled secondary result
+# (allowed for HOM, refused for Bell-type claims).
 # To analyse your own tags: setting 0 = dip, 1 = reference in the tag file,
 # then `dadl analyze setup.yaml --tags tags.npz`.
 #

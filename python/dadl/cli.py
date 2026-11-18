@@ -4,6 +4,7 @@
     dadl init [DIR]                                     copy the example setup.yaml into DIR
     dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S or HOM visibility from your own tags
+                 [--calibrations DIR --allow C=REASON]  HOM: corrected by the forward model
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
     dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR
                                                         delay, jitter, accidentals, heralding efficiency
@@ -56,7 +57,9 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
     # review, cycle 10).
-    raw_labels = [lab for lab in result.labels if lab != ACCIDENTALS_SUBTRACTED]
+    from dadl.forward import FORWARD_MODEL
+
+    raw_labels = [lab for lab in result.labels if lab not in (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL)]
     print(f"  Labels: {'; '.join(raw_labels) or 'none'}")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
@@ -103,7 +106,9 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
             f"  Exposure: dip {counts['duration_dip_s']:.4g} s, reference {counts['duration_reference_s']:.4g} s; "
             "V compares rates."
         )
-    if result.corrected is not None:
+    if result.corrections:
+        _print_forward(result, counts)
+    elif result.corrected is not None:
         print(
             f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
             f"V = {result.corrected}  (secondary; not an indistinguishability claim)"
@@ -118,11 +123,63 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
         )
 
 
-def _quickstart_hom(path: Path, setup: Setup) -> int:
-    from dadl.analysis.hom import hom_from_tags
+#: Length of the simulated dark run per channel that the quickstart calibrates from.
+QUICKSTART_DARK_S = 10.0
+#: Length of the simulated pair run (no beamsplitter) that calibrates the delay and jitter.
+QUICKSTART_PAIRS_S = 0.2
 
+
+def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, dict, str | None]:
+    """HOM through the forward model with calibrations from simulated dark and pair runs.
+
+    The dark runs (dead time) and a pair run (delay and jitter, for the window capture) are calibrated into a temporary folder and loaded as an analysis would load
+    them. If the dark data only bound the dead time too loosely to use (an SNSPD's 100 cps), the
+    refusal is reported and the accidentals are corrected alone.
+    """
+    import datetime as dt
+    import tempfile
+
+    from dadl.analysis.hom import hom_from_tags
+    from dadl.artifact import write_artifact
+    from dadl.calibration import calibrate_dark
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import Policy
+    from dadl.propagate import CalibrationSet, DatasetContext
+
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.calibration.delay import calibrate_delay
+
+    dark = simulate_setup_dark(setup, QUICKSTART_DARK_S)[setup.setting_keys[0]]
+    pairs = simulate_setup_heralding(setup, QUICKSTART_PAIRS_S)[setup.setting_keys[0]]
+    channels = (setup.channel_id("A"), setup.channel_id("B"))
+    acquired = dt.datetime.now(dt.timezone.utc)
+    dataset = DatasetContext(acquired=acquired)
+    policy = (
+        Policy.default()
+        .allow("hom_visibility", "dead_time", "quickstart: dead time from simulated dark runs")
+        .allow("hom_visibility", "window_capture", "quickstart: delay and jitter from a simulated pair run")
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, ch in zip(("A", "B"), channels):
+            cal = calibrate_dark(dark[name], ch, backend="sim", seed=setup.seed)
+            write_artifact(cal, tmp, accept_misfit=True, created=acquired)
+        delay = calibrate_delay(pairs["A"], pairs["B"], channels, backend="sim", seed=setup.seed)
+        write_artifact(delay, tmp, accept_misfit=True, created=acquired)
+        common = {"channels": channels, "seed": setup.seed, "reference_delay_ps": setup.reference_delay_ps}
+        cset = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset)
+        try:
+            result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=cset, **common)
+            return result, counts, None
+        except GuardrailRefusal as exc:
+            note = str(exc).split(", so a correction", 1)[0]
+        without_dark = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset, kinds=(DELAY_KIND,))
+        result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=without_dark, **common)
+    return result, counts, note
+
+
+def _quickstart_hom(path: Path, setup: Setup) -> int:
     runs = _simulate(setup)
-    result, counts = hom_from_tags(runs, setup.window)
+    result, counts, dead_time_note = _quickstart_hom_corrected(runs, setup)
     det = setup.detectors["A"]
     src = setup.source
     print(f"DADL {__version__} quickstart: {setup.name} (simulated data, seed {setup.seed})")
@@ -140,6 +197,8 @@ def _quickstart_hom(path: Path, setup: Setup) -> int:
     print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
     _print_result(result, "V")
     _print_hom_extras(result, counts, setup)
+    if dead_time_note:
+        print(f"  Dead time not corrected: {dead_time_note}")
     expected = hom_visibility_expected(src.visibility, setup.reference_delay_ps, src.coherence_time_ps)
     print(f"  Closed-form expectation (no accidentals, dead time or window losses): V = {expected:.4f}")
     print()
@@ -189,7 +248,8 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a heralding run (no")
     print("  analysers): `dadl simulate chsh-spad --heralding --duration-s 2 --out her.npz`, then")
     print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out artifacts/`.")
-    print(f"  Corrected values arrive in phase 3. Overview: {SITE}")
+    print("  Corrected S arrives with phase 3 (M3); a corrected HOM visibility: `dadl quickstart hom-snspd`.")
+    print(f"  Overview: {SITE}")
     return 0
 
 
@@ -281,15 +341,7 @@ def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str,
     import datetime as dt
     import hashlib
 
-    conditions: dict[str, float] = {}
-    for item in args.condition:
-        key, sep, value = item.partition("=")
-        try:
-            conditions[key.strip()] = float(value)
-        except ValueError:
-            sep = ""
-        if not sep or not key.strip():
-            raise DadlError(f"--condition needs KEY=NUMBER, got {item!r}")
+    conditions = _conditions(args.condition)
     conditions.update(tagger_settings(args.tags))
     tags_path = Path(args.tags)
     files = sorted(tags_path.glob("setting*.ptu")) if tags_path.is_dir() else [tags_path]
@@ -650,6 +702,61 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _conditions(items: list[str]) -> dict[str, float]:
+    conditions: dict[str, float] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        try:
+            conditions[key.strip()] = float(value)
+        except ValueError:
+            sep = ""
+        if not sep or not key.strip():
+            raise DadlError(f"--condition needs KEY=NUMBER, got {item!r}")
+    return conditions
+
+
+def _policy(analysis: str, allow: list[str]):
+    from dadl.guardrails import Policy
+
+    policy = Policy.default()
+    for item in allow:
+        correction, sep, reason = item.partition("=")
+        if not sep or not correction.strip() or not reason.strip():
+            raise DadlError(f"--allow needs CORRECTION=REASON (a reason is recorded), got {item!r}")
+        policy = policy.allow(analysis, correction.strip(), reason.strip())
+    return policy
+
+
+def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, analysis: str, policy):
+    """Artifacts from --calibrations, checked against this dataset (time, conditions, raw inputs)."""
+    import hashlib
+
+    from dadl.data import tags_sha256
+    from dadl.propagate import CalibrationSet, DatasetContext
+
+    hashes = {tags_sha256(np.asarray(a)) for run in runs.values() for a in run.values()}
+    hashes |= set(_input_hashes(setup_path, args.tags).values())
+    tags_path = Path(args.tags)
+    if tags_path.is_file():
+        hashes.add(hashlib.sha256(tags_path.read_bytes()).hexdigest())
+    conditions = {**tagger_settings(args.tags), **_conditions(args.condition)}
+    dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions, input_sha256=frozenset(hashes))
+    return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset)
+
+
+def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> None:
+    """The corrected line of a forward-model result: value, corrections in order, artifacts."""
+    order = ", then ".join(c.replace("_", " ") for c in result.corrections)
+    print(f"  Corrected (forward model: {order}): {symbol} = {result.corrected}")
+    if "corrected_at_zero_dead_time" in counts:
+        print(
+            f"  Dead time known only as an upper limit: {symbol} = {counts['corrected_at_zero_dead_time']:.4f} at zero, "
+            f"{counts['corrected_at_bound_dead_time']:.4f} at the bound (the corrected value uses the bound)"
+        )
+    if result.artifact_ids:
+        print("  Calibrations: " + ", ".join(a[:12] for a in result.artifact_ids))
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
@@ -659,10 +766,19 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # to the setup and tags it read.
     extra = {"inputs": _input_hashes(_resolve(args.setup), args.tags)}
     simulated = tags_are_simulated(args.tags)
+    analysis = "hom_visibility" if setup.analysis_type == "hom" else "chsh"
+    if args.calibrations and analysis == "chsh":
+        raise DadlError("--calibrations: corrected CHSH is not available yet (phase 3, M3); HOM setups take them now")
+    policy = _policy(analysis, args.allow)
+    cset = _calibration_set(args, runs, _resolve(args.setup), analysis, policy) if args.calibrations else None
     if setup.analysis_type == "hom":
         from dadl.analysis.hom import hom_from_tags
 
-        result, counts = hom_from_tags(runs, setup.window)
+        channels = (setup.channel_id("A"), setup.channel_id("B")) if cset is not None else None
+        result, counts = hom_from_tags(
+            runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed,
+            reference_delay_ps=setup.reference_delay_ps,
+        )
         result = dataclasses.replace(
             result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra
         )
@@ -672,7 +788,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         _print_result(result, "V")
         _print_hom_extras(result, counts, setup)
         return 0
-    result = chsh(runs, setup.window, settings_deg=setup.settings_deg)
+    result = chsh(runs, setup.window, settings_deg=setup.settings_deg, policy=policy)
     result = dataclasses.replace(result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra)
     _warn_angles(setup)
     print("  The tags are trusted as given; raw S only.")
@@ -738,6 +854,17 @@ def build_parser() -> argparse.ArgumentParser:
     an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
     an.add_argument("--tags", required=True, help="tag file (.npz or .csv: columns setting, channel, timestamp_ps) or a folder of PTU files setting0.ptu, ...")
+    an.add_argument(
+        "--calibrations", action="append", metavar="DIR",
+        help="calibration artifacts (folder or file, repeatable): HOM gains a corrected value from the forward model",
+    )
+    an.add_argument("--acquired", help="when the tags were taken (ISO 8601 with a UTC offset), checked against each artifact's validity")
+    an.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",
+                    help="a numeric condition of this acquisition (repeatable), checked against each artifact's conditions")
+    an.add_argument(
+        "--allow", action="append", default=[], metavar="CORRECTION=REASON",
+        help="loosen the default policy for this analysis (e.g. dead_time='calibrated from dark runs'); labelled 'policy modified'",
+    )
     an.set_defaults(func=cmd_analyze)
 
     cal = sub.add_parser("calibrate", help="estimate detector parameters and write calibration artifacts")

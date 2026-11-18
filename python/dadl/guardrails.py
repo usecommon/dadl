@@ -68,6 +68,9 @@ KNOWN_CORRECTIONS = frozenset(
         "afterpulse",
         "dead_time",
         "efficiency",
+        # The fixed grid's capture of the signal pairs at each acquisition's offsets, modelled
+        # from a delay-jitter calibration (dadl.forward).
+        "window_capture",
         # Not corrections but overridable refusals when calibrations are used (dadl.propagate):
         # a misfit artifact, and one whose validity or conditions do not cover the dataset.
         "misfit_calibration",

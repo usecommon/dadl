@@ -343,6 +343,7 @@ preference going into M0; the benchmark still has to confirm it.
 | D8 | IRF tail in phase 3 | In phase 3 / 0.2.x | In phase 3: without it SNSPD delay artifacts are refused, so hom-snspd cannot use corrected values on real data |
 | D9 | Should calibration artifacts be signed in phase 3 (design: signing v0.2+) | Plans only / plans and artifacts | Both: same primitive, little extra code; HSM, TPM and QKD attestation stay out |
 | D10 | Dead time in the default HOM correction rule (taken during M2) | Keep an explicit override / add to the default rule | Keep the override: `Policy.allow("hom_visibility", "dead_time", reason)`, labelled "policy modified"; the pinned default policy fingerprint is unchanged |
+| D11 | Window capture (fixed-grid loss at a HOM reference delay, from a delay-jitter artifact) in the default HOM rule (taken during M2) | Keep an explicit override / add to the default rule | Keep the override, as D10: `Policy.allow("hom_visibility", "window_capture", reason)`; the default policy fingerprint is unchanged |
 
 ## Risks
 
