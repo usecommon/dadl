@@ -220,7 +220,6 @@ jobs:
         part:
           - {name: hom, args: "hom"}
           - {name: chsh-spad, args: "chsh --regimes chsh-spad"}
-          - {name: chsh-dead-time, args: "chsh --regimes chsh-dead-time"}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -238,3 +237,61 @@ jobs:
           OMP_NUM_THREADS: "1"
         timeout-minutes: 45
         run: python -m dadl.analysis.propagation ${{ matrix.part.args }} --replicates 1000 --jobs 4
+
+  propagation-shard:
+    # chsh-dead-time is the slow regime (about 5x chsh-spad per replicate): its replicates run in
+    # four shards, each writing partial counts; propagation-merge sums them and applies the gate.
+    name: Propagation gate shard (chsh-dead-time ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "./python[test]"
+      - name: One slice of the replicates
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+        timeout-minutes: 45
+        run: >-
+          python -m dadl.analysis.propagation chsh --regimes chsh-dead-time --replicates 1000 --jobs 4
+          --shard ${{ matrix.shard }}/4 --out shard-${{ matrix.shard }}.json
+      # actions/upload-artifact v7.0.2, pinned by commit SHA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: propagation-shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+
+  propagation-merge:
+    name: Propagation gate (1,000 replicates, chsh-dead-time)
+    needs: propagation-shard
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "./python[test]"
+      # actions/download-artifact v8.0.2, pinned by commit SHA
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: propagation-shard-*
+          merge-multiple: true
+          path: shards/
+      - name: Sum the shards and apply the gate
+        run: python -m dadl.analysis.propagation merge shards/*.json

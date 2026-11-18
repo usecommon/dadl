@@ -80,6 +80,8 @@ and is versioned separately from the packages.
   chsh-spad and chsh-dead-time, the last also the control regime (calibration uncertainty off
   must undercover). Misfit artifacts are accepted, labelled and counted (at most 2% of
   replicates).
+  `--shard k/n --out FILE` runs one slice of the replicates and `merge FILES` gates the sum;
+  CI runs chsh-dead-time in four shards. Progress is printed per finished chunk.
 
 ### Published results as executable tests
 

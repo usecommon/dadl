@@ -1,6 +1,12 @@
 """The `propagation` gate (phase 3): coverage of corrected values with calibration uncertainty.
 
     python -m dadl.analysis.propagation {hom,chsh,all} --replicates 1000 --jobs 4
+    python -m dadl.analysis.propagation chsh --regimes chsh-dead-time --shard 1/4 --out part1.json
+    python -m dadl.analysis.propagation merge part*.json
+
+A shard runs one contiguous slice of the replicates and writes its counts without gating; `merge`
+sums the shards and applies the gate. Replicate i always uses child i of the seed, so shards and
+jobs do not change the result.
 
 Each replicate simulates its own calibration runs (dark acquisitions per channel and a pair run
 per channel pair for the delay and jitter), calibrates them, writes and loads the artifacts as an
@@ -20,12 +26,14 @@ misspecified regime, which needs the predictive check.
 from __future__ import annotations
 
 import argparse
+import json
 import datetime as dt
 import multiprocessing
 import os
 import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import numpy as np
@@ -234,31 +242,67 @@ def _unit(args: tuple[str, int, int, range | None]) -> CoverageResult:
     return propagation(replicates, seed, regime, part)
 
 
+def shard_range(shard: str, replicates: int) -> range:
+    """Shard "k/n" (1-based) as its contiguous slice of the replicates."""
+    try:
+        k, n = (int(x) for x in shard.split("/"))
+    except ValueError:
+        raise ValueError(f"shard must be k/n, got {shard!r}") from None
+    if not 1 <= k <= n:
+        raise ValueError(f"shard {shard!r}: need 1 <= k <= n")
+    return range((k - 1) * replicates // n, k * replicates // n)
+
+
 def run(
-    analysis: str = "all", replicates: int = 1000, seed: int = 20261118, jobs: int = 1, regimes: list[str] | None = None
+    analysis: str = "all",
+    replicates: int = 1000,
+    seed: int = 20261118,
+    jobs: int = 1,
+    regimes: list[str] | None = None,
+    part: range | None = None,
+    progress=None,
 ) -> list[CoverageResult]:
+    """Every regime of `analysis`, or only `regimes`; with `part`, only those replicates (a shard:
+    the counts are partial and the result is not gated). `progress` gets a line per finished chunk."""
     names = [r for r, reg in REGIMES.items() if analysis in ("all", reg.analysis)]
     if regimes is not None:
         unknown = sorted(set(regimes) - set(names))
         if unknown:
             raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
         names = [r for r in names if r in regimes]
+    span = part if part is not None else range(replicates)
+    tasks = [(r, replicates, seed, range(lo, min(lo + CHUNK, span.stop))) for r in names for lo in range(span.start, span.stop, CHUNK)]
+    start = time.monotonic()
+
+    def report(done: int, task) -> None:
+        if progress is not None:
+            r, _, _, rng = task
+            progress(f"{r}: replicates {rng.start}-{rng.stop - 1} done ({done}/{len(tasks)} chunks, {time.monotonic() - start:.0f} s)")
+
     if jobs <= 1:
-        return [propagation(replicates, seed, r) for r in names]
-    tasks = [(r, replicates, seed, range(lo, min(lo + CHUNK, replicates))) for r in names for lo in range(0, replicates, CHUNK)]
-    # One BLAS thread per fresh worker (see dadl.calibration.coverage.run).
-    single = {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")}
-    saved = {k: os.environ.get(k) for k in single}
-    os.environ.update(single)
-    try:
-        with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as ex:
-            parts = list(ex.map(_unit, tasks))
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        parts = []
+        for i, t in enumerate(tasks):
+            parts.append(_unit(t))
+            report(i + 1, t)
+    else:
+        # One BLAS thread per fresh worker (see dadl.calibration.coverage.run).
+        single = {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")}
+        saved = {k: os.environ.get(k) for k in single}
+        os.environ.update(single)
+        try:
+            with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as ex:
+                futures = {ex.submit(_unit, t): i for i, t in enumerate(tasks)}
+                parts = [None] * len(tasks)
+                for done, fut in enumerate(as_completed(futures), 1):
+                    i = futures[fut]
+                    parts[i] = fut.result()
+                    report(done, tasks[i])
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     out = []
     for r in names:
         mine = [p for t, p in zip(tasks, parts) if t[0] == r]
@@ -267,15 +311,70 @@ def run(
     return out
 
 
+def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
+    return {
+        "seed": seed,
+        "replicates": results[0].replicates,
+        "range": [part.start, part.stop],
+        "results": [{"calibration": r.calibration, "covered": r.covered} for r in results],
+    }
+
+
+def merge(records: list[dict]) -> list[CoverageResult]:
+    """Sum shard records; refuses mixed seeds or totals, and a slice missing or run twice."""
+    if not records:
+        raise ValueError("no shards to merge")
+    seeds = {r["seed"] for r in records}
+    totals = {r["replicates"] for r in records}
+    if len(seeds) != 1 or len(totals) != 1:
+        raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    replicates = totals.pop()
+    out = []
+    names = dict.fromkeys(res["calibration"] for r in records for res in r["results"])
+    for name in names:
+        mine = [(r["range"], res["covered"]) for r in records for res in r["results"] if res["calibration"] == name]
+        seen = sorted(tuple(rng) for rng, _ in mine)
+        expected_next = 0
+        for lo, hi in seen:
+            if lo != expected_next:
+                raise ValueError(f"{name}: shards do not tile 0-{replicates} (gap or overlap at {lo})")
+            expected_next = hi
+        if expected_next != replicates:
+            raise ValueError(f"{name}: shards cover replicates 0-{expected_next}, not all {replicates}")
+        covered = {k: sum(c[k] for _, c in mine) for k in (CORRECTED, CONTROL, MISFITS)}
+        out.append(CoverageResult(name, replicates, covered, gate(replicates, 1)))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dadl.analysis.propagation")
-    parser.add_argument("analysis", choices=["hom", "chsh", "all"])
+    parser.add_argument("analysis", choices=["hom", "chsh", "all", "merge"])
+    parser.add_argument("files", nargs="*", help="merge: the shard files")
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261118)
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the analysis)")
+    parser.add_argument("--shard", help="k/n: run only the k-th of n slices of the replicates; not gated")
+    parser.add_argument("--out", help="with --shard: write the partial counts here, for merge")
     args = parser.parse_args(argv)
-    results = run(args.analysis, args.replicates, args.seed, args.jobs, args.regimes)
+    if args.analysis == "merge":
+        if not args.files:
+            parser.error("merge needs the shard files")
+        results = merge([json.loads(open(f, encoding="utf-8").read()) for f in args.files])
+    else:
+        if args.files:
+            parser.error("files are only for merge")
+        if (args.shard is None) != (args.out is None):
+            parser.error("--shard and --out go together")
+        part = shard_range(args.shard, args.replicates) if args.shard else None
+        log = lambda line: print(line, file=sys.stderr, flush=True)  # noqa: E731
+        results = run(args.analysis, args.replicates, args.seed, args.jobs, args.regimes, part, log)
+        if part is not None:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                json.dump(shard_record(results, args.seed, part), fh, indent=1)
+            for r in results:
+                print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
+            return 0
     for r in results:
         print(describe(r))
     return 0 if all(passed(r) for r in results) else 1

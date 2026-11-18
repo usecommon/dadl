@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from dadl.analysis.propagation import CONTROL, CONTROL_REGIMES, CORRECTED, MISFITS, REGIMES, main, propagation, run
+from dadl.analysis.propagation import (
+    CONTROL,
+    CONTROL_REGIMES,
+    CORRECTED,
+    MISFITS,
+    REGIMES,
+    main,
+    merge,
+    propagation,
+    run,
+    shard_range,
+)
 
 
 @pytest.mark.parametrize("regime", sorted(REGIMES))
@@ -30,3 +43,24 @@ def test_unknown_regime_and_cli(capsys):
         run("hom", 2, regimes=["chsh-spad"])
     main(["hom", "--replicates", "2", "--regimes", "hom-snspd"])
     assert CONTROL in capsys.readouterr().out
+
+
+def test_shards_merge_to_the_whole(tmp_path, capsys):
+    whole = run("hom", 3, seed=7, regimes=["hom-snspd"])[0]
+    files = []
+    for k in (1, 2):
+        out = tmp_path / f"part{k}.json"
+        assert main(["hom", "--replicates", "3", "--seed", "7", "--regimes", "hom-snspd", "--shard", f"{k}/2", "--out", str(out)]) == 0
+        files.append(str(out))
+    assert "shard 2/2" in capsys.readouterr().out
+    records = [json.loads(open(f).read()) for f in files]
+    assert merge(records)[0].covered == whole.covered
+    code = main(["merge", *files])
+    assert "hom-snspd" in capsys.readouterr().out and code in (0, 1)
+    with pytest.raises(ValueError, match="tile"):
+        merge(records[:1] + records[:1])
+    with pytest.raises(ValueError, match="not all"):
+        merge(records[:1])
+    with pytest.raises(ValueError, match="k/n"):
+        shard_range("2", 10)
+    assert shard_range("4/4", 1000) == range(750, 1000)
