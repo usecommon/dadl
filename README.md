@@ -279,6 +279,9 @@ artifact IDs. Dead-time and window-capture corrections (the latter from a
 delay-jitter artifact, `dadl calibrate pairs`) are explicit policy changes for HOM:
 `--allow dead_time="calibrated from separate dark runs"`, `--allow window_capture="..."`,
 and the result says so.
+With a delay-jitter artifact the forward model's peak shape is also checked against the
+analysed coincidences; something in the window it lacks (crosstalk, a misdeclared reference
+delay) is refused as `Misspecified` rather than corrected with an interval that does not know it.
 
 From Python:
 

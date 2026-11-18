@@ -239,14 +239,15 @@ jobs:
         run: python -m dadl.analysis.propagation ${{ matrix.part.args }} --replicates 1000 --jobs 4
 
   propagation-shard:
-    # chsh-dead-time is the slow regime (about 5x chsh-spad per replicate): its replicates run in
-    # four shards, each writing partial counts; propagation-merge sums them and applies the gate.
-    name: Propagation gate shard (chsh-dead-time ${{ matrix.shard }}/4)
+    # chsh-dead-time is the slow regime (about 5x chsh-spad per replicate; a 50-replicate chunk
+    # took 14 minutes on a runner before the predictive check): its replicates run in eight
+    # shards, each writing partial counts; propagation-merge sums them and applies the gate.
+    name: Propagation gate shard (chsh-dead-time ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -265,7 +266,7 @@ jobs:
         timeout-minutes: 45
         run: >-
           python -m dadl.analysis.propagation chsh --regimes chsh-dead-time --replicates 1000 --jobs 4
-          --shard ${{ matrix.shard }}/4 --out shard-${{ matrix.shard }}.json
+          --shard ${{ matrix.shard }}/8 --out shard-${{ matrix.shard }}.json
       # actions/upload-artifact v7.0.2, pinned by commit SHA
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:

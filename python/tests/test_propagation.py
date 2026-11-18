@@ -9,8 +9,7 @@ import pytest
 from dadl.analysis.propagation import (
     CONTROL,
     CONTROL_REGIMES,
-    CORRECTED,
-    MISFITS,
+    KEYS,
     REGIMES,
     main,
     merge,
@@ -23,7 +22,7 @@ from dadl.analysis.propagation import (
 @pytest.mark.parametrize("regime", sorted(REGIMES))
 def test_replicates_run_and_parts_reproduce_the_whole(regime):
     whole = propagation(2, seed=7, regime=regime)
-    assert set(whole.covered) == {CORRECTED, CONTROL, MISFITS} and whole.replicates == 2
+    assert set(whole.covered) == set(KEYS) and whole.replicates == 2
     # Replicate i depends only on (seed, regime, i), so a run split into parts adds up exactly.
     parts = [propagation(2, seed=7, regime=regime, part=range(i, i + 1)) for i in (0, 1)]
     assert {k: sum(p.covered[k] for p in parts) for k in whole.covered} == whole.covered
@@ -64,3 +63,12 @@ def test_shards_merge_to_the_whole(tmp_path, capsys):
     with pytest.raises(ValueError, match="k/n"):
         shard_range("2", 10)
     assert shard_range("4/4", 1000) == range(750, 1000)
+
+
+def test_misspecified_regime_is_flagged_and_gated_on_flags():
+    from dadl.analysis.propagation import FLAGGED, MIN_FLAG_SHARE, passed
+
+    assert REGIMES["hom-crosstalk"].misspecified and not REGIMES["hom-bright"].misspecified
+    r = propagation(2, seed=7, regime="hom-crosstalk")
+    assert r.covered[FLAGGED] == 2
+    assert passed(r) == (r.fraction(FLAGGED) >= MIN_FLAG_SHARE)

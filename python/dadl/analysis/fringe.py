@@ -17,7 +17,7 @@ import dataclasses
 
 import numpy as np
 
-from dadl.analysis._twopoint import check_calibration_args, forward_from_counts, run_counts, span_ps
+from dadl.analysis._twopoint import check_calibration_args, forward_check, forward_from_counts, run_counts, span_ps
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
 from dadl.coincidences import grid_coincidences
@@ -95,6 +95,13 @@ def fringe_from_tags(
         result = bell_visibility(c_max, c_min, policy=policy, window=window)
     labels = result.labels
     if calibrations is not None:
+        check_p, check_labels = forward_check(
+            "bell_visibility", {"max": (runs["max"], (0.0,)), "min": (runs["min"], (0.0,))},
+            FRINGE_CHANNELS, tuple(channels), window_ps=window.width_ps, delays_ps=dict(window.delays_ps),
+            calibrations=calibrations, policy=policy,
+        )
+        if check_p is not None:
+            counts["forward_check_p"] = check_p
         high = run_counts(runs["max"], c_max, side_max, t_max)
         low = run_counts(runs["min"], c_min, side_min, t_min)
         fwd, extra = forward_from_counts(
@@ -102,7 +109,9 @@ def fringe_from_tags(
             window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
-        labels = tuple(dict.fromkeys(labels + fwd.labels + threshold_labels("bell_visibility", result.raw, fwd.estimate)))
+        labels = tuple(dict.fromkeys(
+            labels + fwd.labels + check_labels + threshold_labels("bell_visibility", result.raw, fwd.estimate)
+        ))
         result = dataclasses.replace(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
         )

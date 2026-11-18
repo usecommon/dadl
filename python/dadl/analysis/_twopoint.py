@@ -70,3 +70,35 @@ def check_calibration_args(subtract_accidentals: bool | None, channels) -> None:
         )
     if channels is None or len(channels) != 2:
         raise ValueError("with calibrations, pass channels=(channel of A, channel of B)")
+
+
+def forward_check(
+    analysis: str,
+    runs: dict[str, tuple[dict[str, np.ndarray], tuple[float, ...]]],
+    names: tuple[str, str],
+    channels: tuple[ChannelId, ChannelId],
+    *,
+    window_ps: int,
+    delays_ps: dict[str, int],
+    calibrations: CalibrationSet,
+    policy: Policy | None,
+) -> tuple[float | None, tuple[str, ...]]:
+    """The forward model's predictive check on each acquisition's histogram of the channel pair
+    (`dadl.forward_check`): the adjusted p-value and labels; refuses a misfit the policy does not allow.
+
+    Runs only when a delay-jitter calibration gives the peak shape the model uses (window capture);
+    without one the model makes no claim about the shape (p is None)."""
+    from dadl.forward_check import PairData, delay_start, enforce, run_check
+    from dadl.guardrails import Policy as _Policy
+
+    a, b = names
+    declared = float(delays_ps.get(b, 0) - delays_ps.get(a, 0))
+    d_cal, jitter = delay_start(calibrations, *channels)
+    if jitter is None:
+        return None, ()
+    pairs = [
+        PairData(name, np.sort(run[a]), np.sort(run[b]), declared, window_ps, d_cal - declared, jitter, offsets)
+        for name, (run, offsets) in runs.items()
+    ]
+    result = run_check(pairs)
+    return result.pvalue, enforce(result, analysis, policy or _Policy.default())

@@ -24,3 +24,8 @@ class AdapterError(DadlError):
 class StaleCalibration(DadlError):
     """A calibration artifact does not cover the dataset: outside its validity time range, or
     recorded under conditions (tagger settings, temperature, bias) that do not match it."""
+
+
+class Misspecified(DadlError):
+    """The forward model's predictive check fails on the analysed data: the model lacks something
+    the data hold, so a corrected value would carry an interval that does not know it."""
