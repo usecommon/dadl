@@ -14,6 +14,7 @@ Phase 1 limits, stated so nobody over-reads the result:
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -26,6 +27,10 @@ from dadl.errors import InsufficientCounts
 from dadl.guardrails import DEAD_TIME_SELECTION, EFFICIENCY_IMBALANCE, INTERRUPTED, Policy, threshold_labels
 from dadl.stationarity import interrupted
 from dadl.result import Estimate, LabelledValue
+
+if TYPE_CHECKING:
+    from dadl.data import ChannelId
+    from dadl.propagate import CalibrationSet
 
 FAIR_SAMPLING = "fair sampling and fair coincidence assumed (post-selected on coincidences)"
 #: A fixed grid closes the event-centred window loophole but not the fair-coincidence one: a
@@ -224,6 +229,9 @@ def chsh(
     policy: Policy | None = None,
     *,
     settings_deg: dict[str, float] | None = None,
+    calibrations: "CalibrationSet | None" = None,
+    channels: "dict[str, ChannelId] | None" = None,
+    seed: int = 0,
 ) -> LabelledValue:
     """Raw CHSH S from one run per setting pair, with a fixed window from the analysis plan.
 
@@ -232,6 +240,11 @@ def chsh(
 
     `runs` maps each setting pair ("a", "b"), ("a", "b'"), ("a'", "b"),
     ("a'", "b'") to a dict of channel name -> int64 ps tags for A+, A-, B+, B-.
+
+    With `calibrations` (a `dadl.propagate.CalibrationSet`) and `channels` (each channel name's
+    ChannelId), a corrected S from the forward model (`dadl.forward.corrected_chsh`) is added as a
+    labelled secondary value; the headline stays raw. The default policy allows no correction
+    for CHSH, so each one needs `Policy.allow("chsh", correction, reason)`.
     """
     policy = policy or Policy.default()
     policy.check_window("chsh", window.source)
@@ -266,11 +279,47 @@ def chsh(
         labels += (EFFICIENCY_IMBALANCE,)
     if settings_deg is not None:
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
+    corrected = None
+    extra: dict[str, object] = {}
+    if calibrations is not None:
+        corrected, extra, more = _corrected(runs, window, policy, calibrations, channels, seed, raw)
+        labels += tuple(lab for lab in more if lab not in labels)
     return LabelledValue(
         analysis="chsh",
         raw=raw,
+        corrected=corrected,
         labels=labels,
         window=window.as_record(),
         counts=counts,
+        **extra,
         **policy.provenance(),
     )
+
+
+def _corrected(runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate):
+    """The forward-model S, its result fields and its labels (threshold crossing included)."""
+    from dadl.analysis._twopoint import run_counts, span_ps
+    from dadl.calibration.accidentals import shifted_coincidences, side_offsets
+    from dadl.forward import OUTCOME_SIGNS, corrected_chsh
+
+    if channels is None or set(channels) != set(CHANNELS):
+        raise ValueError(f"with calibrations, pass channels mapping each of {list(CHANNELS)} to its ChannelId")
+    d = window.delays_ps
+    offsets = side_offsets(window.width_ps)
+    reduced = {}
+    for key in SIGNS:
+        tags = runs[key]
+        span = max(span_ps(tags, (a, b)) for a, b in (("A+", "B+"), ("A-", "B-")))
+        per = {}
+        for x, y in OUTCOME_SIGNS:
+            a, b = "A" + x, "B" + y
+            c = grid_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0))
+            side = shifted_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0), offsets)
+            per[(x, y)] = run_counts(tags, c, side, span, channels=(a, b))
+        reduced[key] = per
+    fwd = corrected_chsh(
+        reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed,
+        window_ps=window.width_ps, delays_ps={k: float(v) for k, v in d.items()},
+    )
+    labels = fwd.labels + threshold_labels("chsh", raw, fwd.estimate)
+    return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels

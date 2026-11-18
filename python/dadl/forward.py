@@ -164,8 +164,9 @@ def _capture(
     cal = hits[0].calibration
     sign = 1.0 if tuple(cal.channels) == tuple(channels) else -1.0
     joint = calibrations.draws(n, seed)
-    delay = sign * joint.column(DELAY_KIND, "delay_ps", channels[0])
-    jitter = joint.column(DELAY_KIND, "jitter_sigma_ps", channels[0])
+    key = tuple(cal.channels)
+    delay = sign * joint.columns[(DELAY_KIND, "delay_ps", key)]
+    jitter = joint.columns[(DELAY_KIND, "jitter_sigma_ps", key)]
     d0 = sign * float(cal.estimates["delay_ps"].value)
     j0 = float(cal.estimates["jitter_sigma_ps"].value)
     out = []
@@ -349,7 +350,196 @@ def bound_range(
     return {"at_zero": at(0.0), "at_bound": at(1.0)}
 
 
+# --- CHSH ----------------------------------------------------------------------------------------
+
+#: Signs of the four outcome combinations in E = (N++ + N-- - N+- - N-+) / N.
+OUTCOME_SIGNS: Mapping[tuple[str, str], int] = {("+", "+"): 1, ("-", "-"): 1, ("+", "-"): -1, ("-", "+"): -1}
+ACCIDENTALS_MODELLED = (
+    "accidentals and detector effects modelled; secondary, not a Bell claim (the headline is raw S)"
+)
+
+
+def _channel_dead_times(
+    calibrations: CalibrationSet | None, channels: Mapping[str, ChannelId], n: int, seed: int
+) -> dict[str, tuple[np.ndarray, float, float | None]] | None:
+    """Per channel name: (draws in s, point in s, upper limit in ps or None), or None without
+    dark artifacts. With any dark artifact, every channel needs one."""
+    if calibrations is None or not any(m.kind == DARK_KIND for m in calibrations.members):
+        return None
+    joint = calibrations.draws(n, seed)
+    out = {}
+    for name, cid in channels.items():
+        try:
+            cal = calibrations.get(DARK_KIND, cid)
+        except KeyError as exc:
+            raise ValueError(f"dark artifacts are given but none for {name} ({cid}): every channel needs one") from exc
+        if "dead_time_ps" in cal.stand_in or "dead_time_ps" in cal.unidentified:
+            hi = float(cal.estimates["dead_time_ps"].high)
+            out[name] = (np.full(n, hi * 1e-12), hi * 1e-12, hi)
+        else:
+            out[name] = (
+                joint.column(DARK_KIND, "dead_time_ps", cid) * 1e-12,
+                float(cal.estimates["dead_time_ps"].value) * 1e-12,
+                None,
+            )
+    return out
+
+
+def _refuse_loose_bound(name: str, cid: ChannelId, hi_ps: float, rate_cps: float) -> None:
+    worst = rate_cps * hi_ps * 1e-12
+    if worst > MAX_DEAD_FRACTION:
+        raise GuardrailRefusal(
+            f"the dead time of {name} ({cid}) is known only below {_duration(hi_ps)} (the dark data did not identify "
+            f"it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above {MAX_DEAD_FRACTION:.0%}, "
+            "so a correction between zero and the bound says nothing. Calibrate the dead time from data that "
+            "identify it, or load the calibrations without the dark artifacts."
+        )
+
+
+def _pair_capture(
+    calibrations: CalibrationSet | None,
+    a: ChannelId,
+    b: ChannelId,
+    window_ps: int | None,
+    declared_delay_ps: float,
+    n: int,
+    seed: int,
+):
+    """(draws, point) of the grid capture of pairs on channels a and b at zero offset, or None."""
+    if calibrations is None or window_ps is None:
+        return None
+    hits = [m for m in calibrations.members if m.kind == DELAY_KIND and set(m.channels) == {a, b}]
+    if not hits:
+        return None
+    cal = hits[0].calibration
+    sign = 1.0 if tuple(cal.channels) == (a, b) else -1.0
+    joint = calibrations.draws(n, seed)
+    key = tuple(cal.channels)
+    delay = sign * joint.columns[(DELAY_KIND, "delay_ps", key)]
+    jitter = joint.columns[(DELAY_KIND, "jitter_sigma_ps", key)]
+    draws = grid_capture(delay - declared_delay_ps, jitter, window_ps)
+    point = float(grid_capture(sign * cal.estimates["delay_ps"].value - declared_delay_ps, cal.estimates["jitter_sigma_ps"].value, window_ps))
+    return draws, point
+
+
+def corrected_chsh(
+    counts: Mapping[tuple[str, str], Mapping[tuple[str, str], RunCounts]],
+    channels: Mapping[str, ChannelId],
+    signs: Mapping[tuple[str, str], int],
+    *,
+    calibrations: CalibrationSet | None,
+    policy: Policy | None = None,
+    seed: int = 0,
+    n_draws: int = N_MC,
+    window_ps: int | None = None,
+    delays_ps: Mapping[str, float] | None = None,
+) -> Corrected:
+    """Corrected CHSH S from the forward model, per setting pair and outcome combination.
+
+    `counts[setting][(x, y)]` holds the coincidences of channels A{x} and B{y} (with their
+    singles as `singles_a`, `singles_b`), `channels` maps "A+", "A-", "B+", "B-" to their
+    ChannelIds. Each combination's signal is s = (C - A) / (T L capture): accidentals from its
+    own off-peak bins, L the live fraction of that channel pair from the propagated dead times
+    (its conditional term is the dead-time selection: detectors that fire together are dead
+    together), and the grid capture from a delay-jitter artifact of the pair. E is the normalised
+    signed sum of the four signals; S the signed sum of the E. Efficiencies are not corrected:
+    E normalises them out only if they are equal (fair sampling).
+    """
+    policy = policy or Policy.default()
+    delays = dict(delays_ps or {})
+    corrections: list[str] = []
+    labels: list[str] = [FORWARD_MODEL, ACCIDENTALS_MODELLED]
+    dead = _channel_dead_times(calibrations, channels, n_draws, seed)
+    if dead is not None:
+        policy.check_correction("chsh", "dead_time")
+        corrections.append("dead_time")
+        bounded = {name: hi for name, (_, _, hi) in dead.items() if hi is not None}
+        if bounded:
+            labels.append(DEAD_TIME_BOUND)
+        for name, hi in bounded.items():
+            side = "singles_a" if name.startswith("A") else "singles_b"
+            rate = max(getattr(run, side) / run.duration_s for setting in counts.values() for (x, y), run in setting.items() if (("A" + x) if side == "singles_a" else ("B" + y)) == name)
+            _refuse_loose_bound(name, channels[name], hi, rate)
+    policy.check_correction("chsh", "accidental_subtraction")
+    corrections.append("accidental_subtraction")
+    captures = {
+        (x, y): _pair_capture(
+            calibrations, channels["A" + x], channels["B" + y], window_ps,
+            delays.get("B" + y, 0.0) - delays.get("A" + x, 0.0), n_draws, seed,
+        )
+        for (x, y) in OUTCOME_SIGNS
+    }
+    have = [k for k, v in captures.items() if v is not None]
+    if have:
+        if len(have) != len(OUTCOME_SIGNS):
+            missing = [f"A{x}/B{y}" for (x, y), v in captures.items() if v is None]
+            raise ValueError(f"delay-jitter artifacts are given but not for {missing}: every channel pair needs one")
+        policy.check_correction("chsh", "window_capture")
+        corrections.append("window_capture")
+    if calibrations is not None:
+        labels += [lab for lab in calibrations.labels if lab not in labels]
+    for setting in counts.values():
+        for (x, y), run in setting.items():
+            for name, n_s in (("A" + x, run.singles_a), ("B" + y, run.singles_b)):
+                if dead is not None and n_s / run.duration_s * dead[name][1] > MAX_DEAD_FRACTION and DEAD_FRACTION_HIGH not in labels:
+                    labels.append(DEAD_FRACTION_HIGH)
+
+    rng = np.random.default_rng(np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x434853]))
+    zeros = (np.zeros(n_draws), 0.0, None)
+
+    def tau(name):
+        return dead[name] if dead is not None else zeros
+
+    joint = np.zeros(n_draws)
+    stat = np.zeros(n_draws)
+    calib = np.zeros(n_draws)
+    point = 0.0
+    for key, sign in signs.items():
+        if key not in counts:
+            raise ValueError(f"missing counts for setting pair {key}")
+        num = {"j": 0.0, "s": 0.0, "c": 0.0, "p": 0.0}
+        den = {"j": 0.0, "s": 0.0, "c": 0.0, "p": 0.0}
+        for (x, y), o_sign in OUTCOME_SIGNS.items():
+            run = counts[key][(x, y)]
+            (ta, pa, _), (tb, pb, _) = tau("A" + x), tau("B" + y)
+            cap = captures[(x, y)] or (1.0, 1.0)
+            c = rng.gamma(run.coincidences + 0.5, size=n_draws)
+            off = rng.gamma(run.offpeak_sum + 0.5, size=n_draws)
+            sig = {
+                "j": _signal(run, c, off, ta, tb, cap[0]),
+                "s": _signal(run, c, off, pa, pb, cap[1]),
+                "c": _signal(run, run.coincidences, run.offpeak_sum, ta, tb, cap[0]),
+                "p": _signal(run, run.coincidences, run.offpeak_sum, pa, pb, cap[1]),
+            }
+            for k, v in sig.items():
+                num[k] = num[k] + o_sign * v
+                den[k] = den[k] + v
+        e = {k: num[k] / den[k] for k in num}
+        joint = joint + sign * e["j"]
+        stat = stat + sign * e["s"]
+        calib = calib + sign * e["c"]
+        point += sign * float(e["p"])
+    finite = joint[np.isfinite(joint)]
+    if finite.size < n_draws // 2:
+        raise ValueError("accidentals leave no signal in most draws")
+    lo, hi = (float(q) for q in np.quantile(finite, [0.025, 0.975]))
+    calibrated = dead is not None or bool(have)
+    est = Estimate(
+        point,
+        float(np.std(finite)),
+        lo,
+        hi,
+        stderr_statistical=float(np.std(stat[np.isfinite(stat)])),
+        stderr_calibration=float(np.std(calib)) if calibrated else 0.0,
+    )
+    ids = calibrations.artifact_ids if calibrations is not None else ()
+    return Corrected(est, tuple(corrections), tuple(labels), ids)
+
+
 __all__ = [
+    "ACCIDENTALS_MODELLED",
+    "OUTCOME_SIGNS",
+    "corrected_chsh",
     "CAPTURE_UNMODELLED",
     "DEAD_FRACTION_HIGH",
     "DEAD_TIME_BOUND",

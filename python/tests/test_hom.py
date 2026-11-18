@@ -138,7 +138,24 @@ def test_analyze_with_calibrations(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Corrected (forward model: dead time, then accidental subtraction, then window capture): V = 0.9" in out
     assert "Calibrations: " in out and "(modified)" in out
-    # Corrected CHSH waits for M3; --allow needs a reason.
-    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art)]) == 1
-    assert "M3" in capsys.readouterr().err
+    # --allow needs a reason.
     assert main(["analyze", str(setup), "--tags", str(tags), "--allow", "dead_time"]) == 1
+
+
+def test_analyze_chsh_with_calibrations_needs_the_policy_and_every_pair(tmp_path, capsys):
+    tags, dark, her = tmp_path / "chsh.npz", tmp_path / "dark.npz", tmp_path / "her.npz"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(dark)]) == 0
+    assert main(["calibrate", "dark", "chsh-spad", "--tags", str(dark), "--out", str(tmp_path / "dark-art")]) in (0, 1)
+    capsys.readouterr()
+    # The default CHSH rule allows no correction (Bell-type: raw only).
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(tmp_path / "dark-art")]) == 1
+    assert "dead_time" in capsys.readouterr().err
+    # A delay-jitter artifact for one channel pair of four: refused rather than half-modelled.
+    assert main(["simulate", "chsh-spad", "--heralding", "--duration-s", "0.5", "--out", str(her)]) == 0
+    art = tmp_path / "pairs-art"
+    assert main(["calibrate", "pairs", "chsh-spad", "--tags", str(her), "--no-analysers", "--herald", "A+", "--signal", "B+", "--out", str(art)]) == 0
+    allow = ["--allow", "accidental_subtraction=off-peak bins", "--allow", "window_capture=pair runs"]
+    capsys.readouterr()
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 1
+    assert "every channel pair" in capsys.readouterr().err
