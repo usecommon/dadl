@@ -422,8 +422,11 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
 
     if channels is None or set(channels) != set(CHANNELS):
         raise ValueError(f"with calibrations, pass channels mapping each of {list(CHANNELS)} to its ChannelId")
+    from dadl.propagate import check_detectors
+
     d = window.delays_ps
     offsets = side_offsets(window.width_ps)
+    detector_labels = check_detectors(calibrations, channels.values(), analysis="chsh", policy=policy)
     check_p, check_labels = _forward_check(runs, window, policy, calibrations, channels)
     gap_labels, gap_counts = check_dead_time_gaps(calibrations, channels, [runs[k] for k in SIGNS], analysis="chsh", policy=policy)
     reduced = {}
@@ -439,10 +442,10 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         reduced[key] = per
     grid = {"window_ps": window.width_ps, "delays_ps": {k: float(v) for k, v in d.items()}}
     fwd = corrected_chsh(reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed, **grid)
-    counts: dict[str, object] = {"forward_check_p": check_p, **gap_counts}
+    counts: dict[str, object] = {**({"forward_check_p": check_p} if check_p is not None else {}), **gap_counts}
     if calibrations.dataset_record() is not None:
         counts["dataset"] = calibrations.dataset_record()
-    labels = fwd.labels + check_labels + gap_labels
+    labels = fwd.labels + detector_labels + check_labels + gap_labels
     drift_labels, drift_counts = _delay_drift(window, policy, calibrations, channels, seed, capture, fwd.estimate)
     labels += drift_labels
     counts.update(drift_counts)
@@ -515,8 +518,10 @@ def _delay_drift(window: Window, policy: Policy, calibrations, channels, seed: i
     )
 
 
-def _forward_check(runs, window: Window, policy: Policy, calibrations, channels) -> tuple[float, tuple[str, ...]]:
-    """The forward model's predictive check over all 16 histograms (4 settings x 4 outcome pairs)."""
+def _forward_check(runs, window: Window, policy: Policy, calibrations, channels) -> tuple[float | None, tuple[str, ...]]:
+    """The forward model's predictive check over all 16 histograms (4 settings x 4 outcome pairs),
+    or (None, ()) without delay-jitter artifacts: the shape check needs the calibrated jitter, as in
+    HOM and fringe (council round 4; an accidentals-only corrected S was refused)."""
     from dadl.forward import OUTCOME_SIGNS
     from dadl.forward_check import PairData, delay_start, enforce, run_check
 
@@ -528,6 +533,8 @@ def _forward_check(runs, window: Window, policy: Policy, calibrations, channels)
             a, b = "A" + x, "B" + y
             declared = float(d.get(b, 0) - d.get(a, 0))
             d_cal, jitter = delay_start(calibrations, channels[a], channels[b])
+            if jitter is None:
+                return None, ()
             pairs.append(PairData(
                 f"{key[0]},{key[1]} {a}/{b}", np.sort(tags[a]), np.sort(tags[b]), declared, window.width_ps,
                 d_cal - declared, jitter,

@@ -83,8 +83,16 @@ def test_window_width_validated(width):
 
 
 @pytest.mark.slow
-def test_stderr_is_calibrated_by_pull_study():
+def test_stderr_is_calibrated_by_pull_study(monkeypatch):
     """Over 200 seeds the reported stderr must match the scatter of S."""
+    # Raw S and its stderr do not depend on the capture balance (council round 3), whose peak fits
+    # took nearly all of each run's 1.5 s: 337 s here, half the local fast suite. It is skipped for
+    # this study only; test_chsh_corrected checks it.
+    import sys
+
+    chsh_module = sys.modules["dadl.analysis.chsh"]
+
+    monkeypatch.setattr(chsh_module, "capture_balance", lambda runs, window, counts=None: (None, {}, None))
     pulls = []
     for seed in range(200):
         result, expected = run(dark_rate_cps=2e4, seed=1000 + seed, duration_s=0.02, pair_rate_per_s=5e4)

@@ -140,6 +140,14 @@ def test_analyze_with_calibrations(tmp_path, capsys):
     assert "Calibrations: " in out and "(modified)" in out
     # --allow needs a reason.
     assert main(["analyze", str(setup), "--tags", str(tags), "--allow", "dead_time"]) == 1
+    # Council round 4 (S2): a dark artifact for A only gave a KeyError traceback; now the reason.
+    one = tmp_path / "one"
+    assert main(["calibrate", "dark", str(setup), "--tags", str(dark), "--channel", "A", "--out", str(one)]) == 0
+    capsys.readouterr()
+    assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(one), "--allow",
+                 "dead_time=calibrated from dark runs"]) == 1
+    err = capsys.readouterr().err
+    assert "every channel needs one" in err and "Traceback" not in err
 
 
 def test_analyze_chsh_with_calibrations_needs_the_policy_and_every_pair(tmp_path, capsys):

@@ -74,11 +74,16 @@ def use_checks(
     calibrations: CalibrationSet,
     policy: Policy | None,
 ) -> tuple[tuple[str, ...], dict[str, object]]:
-    """The analysed gaps against the dark dead times (`forward.check_dead_time_gaps`) and the
-    dataset context the calibrations were checked against: (labels, counts)."""
+    """The artifacts' detectors against the analysis channels (`propagate.check_detectors`), the
+    analysed gaps against the dark dead times (`forward.check_dead_time_gaps`) and the dataset
+    context the calibrations were checked against: (labels, counts)."""
     from dadl.forward import check_dead_time_gaps
+    from dadl.propagate import check_detectors
 
-    labels, counts = check_dead_time_gaps(calibrations, dict(zip(names, channels)), runs, analysis=analysis, policy=policy)
+    labels = check_detectors(calibrations, channels, analysis=analysis, policy=policy)
+    gap_labels, counts = check_dead_time_gaps(calibrations, dict(zip(names, channels)), runs, analysis=analysis,
+                                              policy=policy)
+    labels = tuple(dict.fromkeys(labels + gap_labels))
     record = calibrations.dataset_record()
     if record is not None:
         counts["dataset"] = record

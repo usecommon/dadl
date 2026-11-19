@@ -30,6 +30,30 @@ and tests the sdist and wheel.
 
 Record user-visible changes in `CHANGELOG.md`.
 
+## Gates
+
+Two statistical gates check that 95% intervals cover the injected truth over
+1,000 simulated replicates per regime (binomial 99.9% band). They are slow and
+are not part of `pytest`:
+
+- calibrations: `python -m dadl.calibration.coverage FAMILY --replicates 1000 --jobs N`
+  (FAMILY is dark, pairs, dcr, deadtime or all; CI seed 20261111);
+- corrected values: `python -m dadl.analysis.propagation hom|chsh --replicates 1000 --jobs N`
+  (CI seed 20261118).
+
+`--jobs` runs replicates in parallel processes; the result does not depend on
+it. `--regimes` picks regimes. Slow regimes run in CI as shards
+(`--shard k/n --out FILE`), summed and gated by `merge FILES`.
+
+Run the gate of a calibration or analysis whose statistics you change, on the
+CI seed, before opening the pull request. A change to a pinned calibration
+module (`python/dadl/calibration/*.py`) also needs a new `METHOD_VERSION`;
+then `python python/tests/test_method_versions.py` regenerates the table that
+`test_method_versions.py` checks. Never loosen a gate to make it pass.
+
+The CI job `gates` passes only when every coverage and propagation job
+passed. Once it is a required check on `main`, a failed gate blocks the merge.
+
 ## Licence of contributions
 
 Unless you state otherwise, any contribution you submit is dual-licensed

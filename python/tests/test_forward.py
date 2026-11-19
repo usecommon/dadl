@@ -227,11 +227,21 @@ def test_fringe_refuses_unequal_exposures(fringe_setup):
 # --- Window capture ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("offset,sigma,width", [(0, 35.4, 200), (15, 35.4, 200), (-40, 14, 1000), (300, 100, 200), (0, 5, 20)])
+@pytest.mark.parametrize(
+    "offset,sigma,width", [(0, 35.4, 200), (15, 35.4, 200), (-40, 14, 1000), (300, 100, 200), (0, 5, 20), (500, 20, 10000)]
+)
 def test_grid_capture_closed_form_matches_the_integral(offset, sigma, width):
-    from dadl.cli import _grid_capture
+    # E[max(0, 1 - |D| / W)], D ~ N(offset, sigma), integrated on a fine grid around the peak. The
+    # CLI's own quad integral read 2.4e-12 for (500, 20, 10000) (council round 4): it now calls this.
+    from scipy import stats
 
-    assert float(grid_capture(offset, sigma, width)) == pytest.approx(_grid_capture(offset, sigma, width), rel=1e-9)
+    import dadl.cli
+
+    d = np.linspace(offset - 12 * sigma, offset + 12 * sigma, 400_001)
+    f = np.maximum(0.0, 1.0 - np.abs(d) / width) * stats.norm(offset, sigma).pdf(d)
+    expected = float(np.sum(f) * (d[1] - d[0]))
+    assert float(grid_capture(offset, sigma, width)) == pytest.approx(expected, rel=1e-6)
+    assert not hasattr(dadl.cli, "_grid_capture")
 
 
 def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_path):
@@ -417,3 +427,59 @@ def test_a_rate_drift_between_fringe_acquisitions_is_labelled():
         assert TWO_POINT in r.labels
         assert (SINGLES_DRIFT in r.labels) == labelled
         assert counts["singles_ratio_a"] == pytest.approx(1 + drift, abs=0.02)
+
+
+# --- Council round 4 ----------------------------------------------------------------------------
+
+def test_a_partial_dark_set_gives_the_named_error():
+    # Council round 4 (S2): a dark artifact for A only gave a bare KeyError (a CLI traceback).
+    from dadl.forward import bound_range
+
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    high = RunCounts(10_000, 500, 10, 1.0, 100_000, 100_000)
+    low = RunCounts(3_000, 500, 10, 1.0, 100_000, 100_000)
+    partial = _member_set("hom_visibility", [_dark(CA)])
+    with pytest.raises(ValueError, match="none for B"):
+        corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=partial, policy=policy)
+    with pytest.raises(ValueError, match="none for B"):
+        bound_range("hom_visibility", high, low, (CA, CB), calibrations=partial)
+
+
+def test_hom_checks_the_dark_dead_times_against_the_analysed_gaps(setup):
+    # Council round 4 (S4): no test failed with the HOM gap check removed. A 1 us dead time on
+    # 60 ns detectors is refused downward, a 22 ns one upward; a matched one passes.
+    from dadl.errors import StaleCalibration
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    runs, _ = setup
+    kw = {"channels": (CA, CB), "reference_delay_ps": 20.0}
+    long = _member_set("hom_visibility", [_dark(CA, 1e6), _dark(CB, 1e6, seed=1)])
+    with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
+        hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=long, **kw)
+    loose = POLICY.allow("hom_visibility", "calibration_outside_validity", "checking")
+    r, counts = hom_from_tags(runs, WINDOW, policy=loose, calibrations=long, **kw)
+    assert OUTSIDE_VALIDITY in r.labels and 55_000 < counts["min_gap_ps"]["A"] < 61_000
+    short = _member_set("hom_visibility", [_dark(CA, 22_000, 500), _dark(CB, 22_000, 500, seed=1)])
+    with pytest.raises(StaleCalibration, match="longer than its upper end"):
+        hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=short, **kw)
+    matched = _member_set("hom_visibility", [_dark(CA, 60_000, 300), _dark(CB, 60_000, 300, seed=1)])
+    r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=matched, **kw)
+    assert OUTSIDE_VALIDITY not in r.labels and counts["gap_check_floor_ps"]["A"] == pytest.approx(58_200)
+    # The forward model subtracts the accidentals (council round 4, S8: 0.0 was recorded).
+    assert "accidental_subtraction" in r.corrections and counts["subtracted"] == 1.0
+
+
+def test_hom_refuses_another_detector_s_artifacts(setup):
+    # Council round 4 (S3): hom_from_tags took another detector's artifacts on the API path.
+    from dadl.errors import StaleCalibration
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    runs, _ = setup
+    old = [ChannelId(c.device, c.input, role=n, detector=f"X{n}") for n, c in (("A", CA), ("B", CB))]
+    new = tuple(ChannelId(c.device, c.input, role=n, detector=f"NEW{n}") for n, c in (("A", CA), ("B", CB)))
+    cset = _member_set("hom_visibility", [_dark(old[0], 60_000, 300), _dark(old[1], 60_000, 300, seed=1)])
+    with pytest.raises(StaleCalibration, match="calibrated on detector XA, analysing NEWA"):
+        hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=new, reference_delay_ps=20.0)
+    loose = POLICY.allow("hom_visibility", "calibration_outside_validity", "same detectors, renamed")
+    r, _ = hom_from_tags(runs, WINDOW, policy=loose, calibrations=cset, channels=new, reference_delay_ps=20.0)
+    assert OUTSIDE_VALIDITY in r.labels

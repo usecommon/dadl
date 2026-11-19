@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its running checks; pushes to main all run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
     name: Rust core (${{ matrix.os }})
@@ -210,9 +215,10 @@ jobs:
         run: python -m dadl.calibration.coverage ${{ matrix.part.args }} --replicates 1000 --jobs 4
 
   coverage-shard:
-    # passive-quench fits afterpulsing and searches both rate branches (about 8 s a replicate
-    # locally, several times that on a runner): its replicates run in twelve shards that
-    # coverage-merge sums and gates.
+    # passive-quench fits afterpulsing and searches both rate branches to decide each run's branch:
+    # under 13 s CPU a replicate locally after council round 4 (12,900 s for the 1,000 replicates of
+    # both deadtime regimes; 16.7 s a replicate before, about 19 s on a runner). Its replicates run
+    # in twelve shards that coverage-merge sums and gates.
     name: Calibration coverage shard (deadtime passive-quench ${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
     strategy:
@@ -280,7 +286,6 @@ jobs:
         part:
           - {name: hom, args: "hom --regimes hom-snspd hom-bright"}
           - {name: hom-crosstalk (misspecified), args: "hom --regimes hom-crosstalk"}
-          - {name: chsh-spad, args: "chsh --regimes chsh-spad"}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -300,15 +305,28 @@ jobs:
         run: python -m dadl.analysis.propagation ${{ matrix.part.args }} --replicates 1000 --jobs 4
 
   propagation-shard:
-    # chsh-dead-time is the slow regime (about 5x chsh-spad per replicate; a 50-replicate chunk
-    # took 14 minutes on a runner before the predictive check): its replicates run in eight
-    # shards, each writing partial counts; propagation-merge sums them and applies the gate.
-    name: Propagation gate shard (chsh-dead-time ${{ matrix.shard }}/8)
+    # The slow regimes run in shards, each writing partial counts; propagation-merge sums each
+    # regime's shards and applies the gate. chsh-dead-time is about 5x chsh-spad per replicate (a
+    # 50-replicate chunk took 14 minutes on a runner before the predictive check); chsh-spad took
+    # 27-41 of its 45 minutes whole and timed out on 926560b.
+    name: Propagation gate shard (${{ matrix.regime }} ${{ matrix.shard }}/${{ matrix.of }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        include:
+          - {regime: chsh-dead-time, of: 8, shard: 1}
+          - {regime: chsh-dead-time, of: 8, shard: 2}
+          - {regime: chsh-dead-time, of: 8, shard: 3}
+          - {regime: chsh-dead-time, of: 8, shard: 4}
+          - {regime: chsh-dead-time, of: 8, shard: 5}
+          - {regime: chsh-dead-time, of: 8, shard: 6}
+          - {regime: chsh-dead-time, of: 8, shard: 7}
+          - {regime: chsh-dead-time, of: 8, shard: 8}
+          - {regime: chsh-spad, of: 4, shard: 1}
+          - {regime: chsh-spad, of: 4, shard: 2}
+          - {regime: chsh-spad, of: 4, shard: 3}
+          - {regime: chsh-spad, of: 4, shard: 4}
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -326,18 +344,22 @@ jobs:
           OMP_NUM_THREADS: "1"
         timeout-minutes: 45
         run: >-
-          python -m dadl.analysis.propagation chsh --regimes chsh-dead-time --replicates 1000 --jobs 4
-          --shard ${{ matrix.shard }}/8 --out shard-${{ matrix.shard }}.json
+          python -m dadl.analysis.propagation chsh --regimes ${{ matrix.regime }} --replicates 1000 --jobs 4
+          --shard ${{ matrix.shard }}/${{ matrix.of }} --out shard-${{ matrix.regime }}-${{ matrix.shard }}.json
       # actions/upload-artifact v7.0.2, pinned by commit SHA
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: propagation-shard-${{ matrix.shard }}
-          path: shard-${{ matrix.shard }}.json
+          name: propagation-shard-${{ matrix.regime }}-${{ matrix.shard }}
+          path: shard-${{ matrix.regime }}-${{ matrix.shard }}.json
 
   propagation-merge:
-    name: Propagation gate (1,000 replicates, chsh-dead-time)
+    name: Propagation gate (1,000 replicates, ${{ matrix.regime }})
     needs: propagation-shard
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        regime: [chsh-dead-time, chsh-spad]
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -352,8 +374,29 @@ jobs:
       # actions/download-artifact v8.0.2, pinned by commit SHA
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: propagation-shard-*
+          pattern: propagation-shard-${{ matrix.regime }}-*
           merge-multiple: true
           path: shards/
       - name: Sum the shards and apply the gate
         run: python -m dadl.analysis.propagation merge shards/*.json
+
+  gates:
+    # One check for every coverage and propagation gate, to be required on main (owner item,
+    # council round 4). It runs even when a gate job fails, and fails unless every one passed: a
+    # failed shard leaves its merge job skipped, which alone would count as passing.
+    name: Statistical gates
+    if: always()
+    needs: [coverage, coverage-shard, coverage-merge, propagation, propagation-shard, propagation-merge]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every gate job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "gate jobs: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a gate job did not succeed ($r)"
+              exit 1
+            fi
+          done

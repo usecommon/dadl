@@ -129,6 +129,14 @@ plainly:
   (by about 1 sd at 3%). In the simulator, avalanche candidates blocked by
   the dead time restart the paralyzable stage but neither afterpulse nor
   emit crosstalk.
+  Each scan run is taken below the count-rate maximum (n tau_p < 1, the
+  designed scan) unless the fit with each run on its better branch is better
+  by more than 3 in NLL (a likelihood ratio of about 20); then those runs are
+  fitted past it. Within that margin the interval spans both fits and a note
+  names the runs. Below the maximum the high branch fits worse in expectation
+  and won by at most 2.1 on 256 simulated scans; past it (1/3/60 Mcps) the
+  margin is passed in 36 of 48 and the union covers the rest but one. Past
+  the maximum, coverage is checked by probes only, not by a CI regime.
   The analyses' forward model uses the dark calibration's non-paralyzable
   dead time only. With paralysis the live fraction is overestimated: for
   tau_p close to tau_np by about 0.5% at a 10% dead fraction and 3-4% at the
@@ -368,8 +376,27 @@ every channel and delay-jitter artifacts all four channel pairs.
 
 One artifact per kind and channel set (in any order): with calibrations before and after the run,
 pass the one to use; the drift between them is not propagated. An artifact recorded for another
-detector serial than the setup names, or a dark dead time that more than a few of the analysed
-gaps undercut, is refused as outside its validity (overridable).
+detector serial than the setup names (also through the Python API), or a dark dead time the
+analysed gaps contradict, is refused as outside its validity (overridable).
+
+The dead-time check refuses a dark dead time that the analysed gaps contradict in either
+direction: gaps shorter than its floor (the point minus three lower half-widths, about 7% below
+the point for a 1 s dark run at 50 kcps), or a shortest analysed gap more than
+9 / (edge density) above its upper end (chance about 1e-4 per channel). A dead time between the
+floor and the truth passes (live-fraction error up to about 1.5% at 5 Mcps for a 1 s dark run);
+at low analysed rates (about 1,000 gaps) the upward test has no power.
+
+Corrected results add these keys to `counts`:
+
+| Key | What |
+| --- | --- |
+| `capture_offsets_ps` | each outcome pair's peak offset from its declared delay (CHSH) |
+| `capture_sd_data` | standard deviation of S reweighted by the captures, from the peak fits (CHSH) |
+| `delay_drift_diff`, `delay_drift_z` | analysed minus calibrated capture-reweighted S, and over its noise (CHSH) |
+| `min_gap_ps` | the shortest analysed gap per channel |
+| `gap_check_floor_ps` | the dead-time floor per channel; None when not checked downward |
+| `dataset` | the dataset context the calibrations were checked against |
+| `forward_check_p` | the predictive check's p-value; absent without delay-jitter artifacts |
 
 From Python:
 

@@ -44,20 +44,24 @@ of gaps, recorded as `afterpulse_pending_max`); above 0.5% a note says tau_p is 
 
 **Two rates per gap law.** Without afterpulsing the law depends on n only through
 a = n exp(-n tau_p), which takes each value twice (n tau_p below and above 1): past the count-rate
-maximum the gaps do not tell which rate it is. With afterpulsing the high-rate branch can fit
-better. Each run's rate is fitted from both branches and the lower NLL kept (council round 3: a
-run at 6e7 cps stayed on the low branch and biased tau_p to tau_np).
+maximum the gaps do not tell which rate it is. With afterpulsing the branches differ a little.
+Each run is taken below the count-rate maximum (n tau_p < 1, the designed scan) unless the fit
+with each run on its better branch is better by more than `BRANCH_MARGIN` = 3 in NLL (a likelihood
+ratio of about 20); then those runs are fitted past it. Within the margin the interval spans both
+fits and a note names the runs. Below the maximum the high branch fits worse in expectation
+(Asimov: 2.5-5.6 NLL for the CI and CHANGELOG scans) and wins by at most 2.1 on 256 simulated
+scans; past it (1/3/60 Mcps) the margin is passed in 36 of 48 and the union covers the rest but
+one. Refits for the afterpulse sensitivity hold each run's branch. Past the maximum, coverage is
+checked by probes only (no CI regime; M10).
 
 **Fit.** tau_np is the shortest gap over all runs, with the dark fit's exact tick-quantile
 interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge. The gaps
 past it are binned (fine uniform bins, then geometric ones) and fitted by multinomial maximum
 likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the profile
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
-likelihood's (chi-square(1)), from the lowest to the highest tau_p inside it when the profile has
-two minima (one run on each branch; `_fit_tau`), joined with the interval of the fit held to the
-low branch (the branches are told apart only by the afterpulses, not reliably); when it reaches tau_p = 0 the hard-edge model is not rejected and
-tau_p is an upper limit (unidentified; draws uniform below it, a stand-in). tau_p's point, upper
-end and draws are capped at tau_np's. The likelihood ratio against the hard-edge model is
+likelihood's (chi-square(1)) on the decided branches (above); when it reaches tau_p = 0 the
+hard-edge model is not rejected and tau_p is an upper limit (unidentified; draws uniform below
+it, a stand-in). tau_p's point, upper end and draws are capped at tau_np's. The likelihood ratio against the hard-edge model is
 recorded (`lr_hard_edge`).
 
 **Predictive check.** A Pearson chi-square over all runs' bins, merged until each expects at
@@ -91,7 +95,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "3"
+METHOD_VERSION = "4"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -111,6 +115,8 @@ PROFILE_GRID = 30
 F0_SAMPLES = 4000
 #: Above this fraction of gaps starting with an afterpulse still pending (not modelled), a note.
 PENDING_MAX = 0.005
+#: NLL by which the fit with runs past the count-rate maximum must beat the one below it (2 ln LR = 6).
+BRANCH_MARGIN = 3.0
 PS_PER_S = 1e12
 
 UNITS = {"dead_time_p_ps": "ps", "dead_time_ps": "ps"}
@@ -264,7 +270,9 @@ class _Fit:
         """The run's input rate maximizing the likelihood at this tau_p: Newton from the cached
         low-branch rate and, when tau > 0, from the other branch's rate (`_other_branch`); the
         lower NLL is kept. The low-branch rate is cached (a warm start keeps the branch); a
-        high-branch rate moves fast with tau, so it always starts from the low one."""
+        high-branch rate moves fast with tau, so it always starts from the low one. With
+        `both_branches` False (the decided fit and the afterpulse refits) only the cached branch is
+        searched; both are searched for the branch decision and the p = 0 rate notes."""
         n, f0 = self._newton(run_index, tau, self._n_cache[run_index])
         self.other[run_index] = None
         if tau <= 0.0 or not self.both_branches:
@@ -334,7 +342,8 @@ def _minimize(fit: _Fit, grid: np.ndarray, vals: list[float], k: int) -> tuple[f
     return (math.exp(float(res.x)), float(res.fun)) if res.fun < vals[k] else (float(grid[k]), vals[k])
 
 
-def _fit_tau(fit: _Fit, tau_hi: float) -> tuple[float, float, float, list[tuple[float, float]]]:
+def _fit_tau(fit: _Fit, tau_hi: float, held_min: tuple[float, float] | None = None,
+             nll0: float | None = None) -> tuple[float, float, float, list[tuple[float, float]]]:
     """(tau_p MLE, its NLL, the NLL at tau_p = 0, the profile at grid points and minima).
 
     The profile can have two minima: a run whose rate may lie on either branch can fit about as
@@ -343,14 +352,19 @@ def _fit_tau(fit: _Fit, tau_hi: float) -> tuple[float, float, float, list[tuple[
     profile itself (every local minimum of a `PROFILE_GRID`-point grid) and with every run on the
     low branch (unimodal; its minimum is then refined on the profile). The lowest is the MLE; the
     interval spans every minimum inside it (`_profile_interval`). A fit held to the low branch
-    (`both_branches` False) has the one minimum."""
-    nll0 = fit.profile(0.0)
+    (`both_branches` False) has the one minimum: that is the decided fit below the count-rate
+    maximum. The both-branch search runs only to decide the branch (p > 0); `held_min` and `nll0`
+    pass in the held fit's minimum and hard-edge NLL so they are not searched again."""
+    nll0 = fit.profile(0.0) if nll0 is None else nll0
     both = fit.both_branches
-    fit.both_branches = False
-    coarse = np.geomspace(max(tau_hi * 1e-3, 1.0), tau_hi, 12)
-    low_vals = [fit.profile(float(t)) for t in coarse]
-    tau_low, low_best = _minimize(fit, coarse, low_vals, int(np.argmin(low_vals)))
-    fit.both_branches = both
+    if held_min is not None and both:
+        tau_low, low_best = held_min
+    else:
+        fit.both_branches = False
+        coarse = np.geomspace(max(tau_hi * 1e-3, 1.0), tau_hi, 12)
+        low_vals = [fit.profile(float(t)) for t in coarse]
+        tau_low, low_best = _minimize(fit, coarse, low_vals, int(np.argmin(low_vals)))
+        fit.both_branches = both
     if not both:
         points = [(float(t), v) for t, v in zip(coarse, low_vals)] + [(tau_low, low_best)]
         if low_best >= nll0:
@@ -483,11 +497,29 @@ def calibrate_deadtime_series(
         _checks.check_span(t, f"runs[{i}]")
         tags.append(t)
     gaps = [np.diff(t) for t in tags]
+    for i, g in enumerate(gaps):
+        if g.size and int(g.min()) <= 0:
+            raise ValueError(f"duplicate timestamps in runs[{i}]: a detector channel records one event per tag")
+    digests = [tags_sha256(t) for t in tags]
+    for i, d in enumerate(digests):
+        if d in digests[:i]:
+            raise ValueError(f"runs[{i}] is the same acquisition as runs[{digests.index(d)}]: each run needs its own "
+                             "rate")
+    if afterpulse is not None:
+        if afterpulse.kind != "dark-afterpulse-deadtime":
+            raise ValueError(f"afterpulse must be a dark artifact (kind dark-afterpulse-deadtime), not "
+                             f"{afterpulse.kind}")
+        if channel not in afterpulse.channels:
+            have = ", ".join(str(c) for c in afterpulse.channels)
+            raise ValueError(f"the afterpulse artifact is for channel(s) {have}, not {channel}")
+    notes: list[str] = []
+    if afterpulse is not None and afterpulse.status == "misfit":
+        notes.append(f"the afterpulse artifact for {channel} is a misfit (predictive p = {afterpulse.ppc_pvalue:.2g}): "
+                     "its p and tau_a are used as given")
     short = [i for i, g in enumerate(gaps) if g.size < MIN_GAPS]
     if short:
         raise InsufficientCounts(f"need at least {MIN_GAPS} gaps per acquisition; run(s) {short} have fewer")
     tick = tag_tick(*tags)
-    notes: list[str] = []
     rng = draws_rng(seed, *tags)
     p, tau_a, ap_draws = _afterpulse_params(afterpulse, notes)
 
@@ -500,28 +532,35 @@ def calibrate_deadtime_series(
             s = np.delete(s, int(np.argmin(s)))
         shifted.append(s)
     binned = [_Run(s, tick, tau_a) for s in shifted]
+    # The branch of each run is decided once (council round 4): the low branch (n tau_p < 1, the
+    # designed scan) unless the fit with each run on its better branch is better by more than
+    # BRANCH_MARGIN in NLL; within the margin, the interval spans both fits.
     fit = _Fit(binned, p, tau_a)
-    # Without afterpulsing the branches fit equally: the low one is fitted, and both are noted.
-    fit.both_branches = p > 0
+    fit.both_branches = False
     tau_hi = float(m)  # tau_p <= tau_np
     tau, nll_min, nll0, points = _fit_tau(fit, tau_hi)
     lr = 2.0 * (nll0 - nll_min)
     low, high = _profile_interval(fit, tau, nll_min, nll0, tau_hi, points)
-    if p > 0:
-        # The branches differ only through the afterpulses, and the high branch at a lower tau_p
-        # can fit better by up to a few NLL on runs below the count-rate maximum (2.0 for a scan
-        # to 1e7 cps at tau_p 30 ns), as the low branch does on runs past it: the interval spans
-        # the fit held to the low branch too.
-        held = _Fit(binned, p, tau_a)
-        held.both_branches = False
-        t_h, nll_h, nll0_h, pts_h = _fit_tau(held, tau_hi)
-        low_h, high_h = _profile_interval(held, t_h, nll_h, nll0_h, tau_hi, pts_h)
-        if low_h < low or high_h > high:
-            notes.append(f"a run's rate fits on either branch of n exp(-n tau_p): the interval spans the fit with "
-                         f"every run below the count-rate maximum ({low_h:.4g} to {high_h:.4g} ps) and the "
-                         f"best fit ({low:.4g} to {high:.4g} ps)")
-            low, high = min(low, low_h), max(high, high_h)
     rates = fit.rates(tau)
+    branch_gain = 0.0
+    if p > 0:
+        glob = _Fit(binned, p, tau_a)
+        t_g, nll_g, nll0_g, pts_g = _fit_tau(glob, tau_hi, held_min=(tau if tau > 0 else 1.0, nll_min), nll0=nll0)
+        rates_g = glob.rates(t_g)
+        past = [i for i, n in enumerate(rates_g) if n * t_g > 1.0]
+        branch_gain = max(nll_min - nll_g, 0.0) if past else 0.0
+        if past:
+            low_g, high_g = _profile_interval(glob, t_g, nll_g, nll0_g, tau_hi, pts_g)
+            if branch_gain > BRANCH_MARGIN:
+                notes.append(f"run(s) {past} fitted past the count-rate maximum (n tau_p > 1): that fit is better "
+                             f"by {branch_gain:.1f} in NLL than every run below it")
+                tau, nll_min, nll0, low, high, rates = t_g, nll_g, nll0_g, low_g, high_g, rates_g
+                lr = 2.0 * (nll0 - nll_min)
+            else:
+                notes.append(f"run(s) {past} fit about as well past the count-rate maximum ({branch_gain:.1f} in "
+                             f"NLL, margin {BRANCH_MARGIN:g}): the interval spans that fit ({low_g:.4g} to "
+                             f"{high_g:.4g} ps) and the one below it ({low:.4g} to {high:.4g} ps)")
+                low, high = min(low, low_g), max(high, high_g)
     identified = low > 0.0
 
     # Afterpulse uncertainty: d tau_p / d(p, tau_a) by refitting at shifted values; for an upper
@@ -536,7 +575,8 @@ def calibrate_deadtime_series(
             step = sd[k]
             p_k, ta_k = (p + step, tau_a) if k == 0 else (p, tau_a + step)
             other = _Fit(binned, p_k, ta_k)
-            other._n_cache = list(fit._n_cache)
+            other.both_branches = False  # each run held on its decided branch (council round 4, DT1)
+            other._n_cache = list(rates)
             if identified:
                 sens[k] = (_refit_near(other, tau, tau_hi) - tau) / step
             else:
@@ -600,8 +640,9 @@ def calibrate_deadtime_series(
 
     probs = [r.probs(n, tau, p, tau_a) for r, n in zip(binned, rates)]
     ppc = with_interruption_check_runs(_pearson(binned, probs), notes, tags)
-    fit.both_branches = True
-    fit.rates(tau)  # each run's other branch, for the notes
+    if p == 0.0:
+        fit.both_branches = True
+        fit.rates(tau)  # each run's other branch, for the notes
     for i, n in enumerate(rates):
         other = fit.other[i]
         if p == 0.0 and other is not None and other[1] < 0.5:
@@ -612,7 +653,8 @@ def calibrate_deadtime_series(
             notes.append(f"run {i}: input rate {n * PS_PER_S:.4g} cps (fitted), {binned[i].n_gaps} gaps")
     cond = {"runs": float(len(runs)), "lr_hard_edge": lr, "gaps": float(sizes.sum())}
     if p > 0:
-        cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a)})
+        cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a),
+                     "branch_nll_gain": branch_gain})
         pending = max(p * n * tau_a / (1.0 + n * tau_a) for n in rates)
         cond["afterpulse_pending_max"] = pending
         if pending > PENDING_MAX:
@@ -632,7 +674,7 @@ def calibrate_deadtime_series(
         sample_params=("dead_time_p_ps", "dead_time_ps"),
         converged=True,
         ppc_pvalue=ppc,
-        inputs=tuple((tags_sha256(t), "raw-tags", str(channel)) for t in tags),
+        inputs=tuple((d, "raw-tags", str(channel)) for d in digests),
         backend=backend,
         conditions={**cond, **(conditions or {})},
         unidentified=unidentified,

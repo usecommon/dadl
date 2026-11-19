@@ -346,7 +346,7 @@ def test_another_detector_s_artifact_is_outside_its_validity(tmp_path):
 
 def test_a_dead_time_longer_than_the_analysed_gaps_is_refused():
     # R1: another detector's dark artifact applied a 1 us dead time to a run whose gaps go down to
-    # 30 ns. A dead time known only as an upper limit is not checked.
+    # 30 ns.
     import dataclasses
 
     from dadl.forward import check_dead_time_gaps
@@ -365,3 +365,64 @@ def test_a_dead_time_longer_than_the_analysed_gaps_is_refused():
     assert labels == (OUTSIDE_VALIDITY,) and 29_000 < counts["min_gap_ps"]["A"] < 31_000
     slow = {"A": simulate_dark(det, 1.0, rng)}
     assert check_dead_time_gaps(s, {"A": A}, [slow], analysis=ANALYSIS)[0] == ()
+
+
+def _gap_check(cal_tau: int, true_tau: int, rate: float, rng, policy=None):
+    """Calibrate a 1 s, 50 kcps dark run at cal_tau; check it on 0.05 s at rate with true_tau."""
+    import dataclasses
+
+    from dadl.forward import check_dead_time_gaps
+
+    base = DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=cal_tau, jitter_sigma_ps=0.0)
+    cal = calibrate_dark(simulate_dark(base, 1.0, rng), A, backend="sim", seed=1, n_draws=50)
+    run = {"A": simulate_dark(dataclasses.replace(base, dead_time_ps=true_tau, dark_rate_cps=rate), 0.05, rng)}
+    s = CalibrationSet(ANALYSIS, (Member("x" * 64, cal, {}),), ())
+    return check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS, policy=policy)
+
+
+def test_the_gap_check_refuses_in_both_directions():
+    # Council round 4 (DT4): the 0.9 factor passed a dead time up to about 16% too long, and a
+    # dead time shorter than the detector's was never checked (22 ns on a 50 ns detector).
+    rng = np.random.default_rng(3)
+    with pytest.raises(StaleCalibration, match="longer than its upper end by"):
+        _gap_check(22_000, 50_000, 1e6, rng)
+    with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
+        _gap_check(50_000, 46_000, 5e6, rng)
+    for rate in (1e6, 5e6):
+        labels, counts = _gap_check(50_000, 50_000, rate, rng)
+        assert labels == () and 40_000 < counts["gap_check_floor_ps"]["A"] < 50_000
+    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "checking")
+    assert _gap_check(22_000, 50_000, 1e6, rng, policy)[0] == (OUTSIDE_VALIDITY,)
+
+
+def test_the_upward_gap_test_applies_to_an_upper_limit():
+    from dadl.forward import check_dead_time_gaps
+
+    import dataclasses
+
+    det = DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=50_000, jitter_sigma_ps=0.0)
+    cal = calibrate_dark(simulate_dark(det, 0.2, np.random.default_rng(4)), A, backend="sim", seed=1, n_draws=50)
+    bound = dataclasses.replace(cal, unidentified=("dead_time_ps",), stand_in=("dead_time_ps",))
+    s = CalibrationSet(ANALYSIS, (Member("x" * 64, bound, {}),), ())
+    hi = bound.estimates["dead_time_ps"].high
+    rng = np.random.default_rng(4)
+    run = {"A": np.cumsum(int(hi) + 1_000_000 + rng.integers(0, 10_000, 5_000)).astype(np.int64)}
+    with pytest.raises(StaleCalibration, match="dead time below"):
+        check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS)
+    near = {"A": np.cumsum(int(hi) + rng.integers(1, 10_000, 5_000)).astype(np.int64)}
+    labels, counts = check_dead_time_gaps(s, {"A": A}, [near], analysis=ANALYSIS)
+    assert labels == () and counts["gap_check_floor_ps"]["A"] is None
+
+
+def test_validity_without_from_starts_at_creation():
+    # Council round 4 (S8): the schema allows valid_for without from (or to); _check raised KeyError.
+    from dadl.propagate import _check
+
+    cal = make_cal(A, seed=1)
+    member = Member("x" * 64, cal, {"created": "2026-11-01T00:00:00Z", "valid_for": {"to": "2026-11-03T00:00:00Z"}})
+    assert _check(member, ANALYSIS, Policy.default(), ctx(), {}) == []
+    early = DatasetContext(acquired=dt.datetime(2026, 10, 1, tzinfo=UTC))
+    with pytest.raises(StaleCalibration, match="outside 2026-11-01T00:00:00Z to 2026-11-03"):
+        _check(member, ANALYSIS, Policy.default(), early, {})
+    open_end = Member("x" * 64, cal, {"created": "2026-11-01T00:00:00Z", "valid_for": {"conditions": {}}})
+    assert _check(open_end, ANALYSIS, Policy.default(), ctx(), {}) == []

@@ -4,7 +4,7 @@
     dadl init [DIR]                                     copy the example setup.yaml into DIR
     dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S or HOM visibility from your own tags
-                 [--calibrations DIR --allow C=REASON]  HOM: corrected by the forward model
+                 [--calibrations DIR --allow C=REASON]  HOM and CHSH: corrected by the forward model
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
     dadl calibrate deadtime SETUP --tags scan.npz --out DIR [--dark DIR]
                                                         series (paralyzable + non-paralyzable) dead time
@@ -194,7 +194,9 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
     return result, counts, note
 
 
-QUICKSTART_CHSH_DARK_CPS_NOTE = "dark counts of a few hundred per second do not identify it"
+#: Council round 4: the old note ("a few hundred per second do not identify it") was fixed text
+#: whatever the setup's dark rate; the quickstart simply does not calibrate it for CHSH.
+QUICKSTART_CHSH_DARK_CPS_NOTE = "a dark calibration is not attempted in the quickstart"
 
 
 def _quickstart_chsh_corrected(runs: dict, setup: Setup) -> LabelledValue:
@@ -716,17 +718,6 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
     return 0
 
 
-def _grid_capture(offset_ps: float, sigma_ps: float, width_ps: int) -> float:
-    """Probability that a pair lands in one fixed-grid slot: E[max(0, 1 - |D| / W)], D ~ N(offset, sigma)."""
-    from scipy import integrate, stats
-
-    if sigma_ps <= 0:
-        return max(0.0, 1.0 - abs(offset_ps) / width_ps)
-    pdf = stats.norm(offset_ps, sigma_ps).pdf
-    value, _ = integrate.quad(lambda d: (1.0 - abs(d) / width_ps) * pdf(d), -width_ps, width_ps, points=[0.0], limit=200)
-    return float(value)
-
-
 def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_accidentals, calibrate_delay, calibrate_heralding
 
@@ -825,7 +816,11 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             f"  The fitted delay ({fitted:.0f} ps) differs from the declared one ({d_b - d_a} ps) by more than a "
             "quarter window. Declare it in the plan before analysis; DADL never moves the window to fit the data."
         )
-    capture = _grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps)
+    from dadl.forward import grid_capture
+
+    # The forward model's closed form (council round 4: a quad integral read about 0 for a narrow
+    # peak in a wide window).
+    capture = float(grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps))
     eta = cals[2].estimates["heralding_efficiency"].value
     print()
     if cals[0].status == "misfit":
@@ -1032,7 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--tags", required=True, help="tag file (.npz or .csv: columns setting, channel, timestamp_ps) or a folder of PTU files setting0.ptu, ...")
     an.add_argument(
         "--calibrations", action="append", metavar="DIR",
-        help="calibration artifacts (folder or file, repeatable): HOM gains a corrected value from the forward model",
+        help="calibration artifacts (folder or file, repeatable): HOM and CHSH gain a corrected value from the "
+        "forward model",
     )
     an.add_argument("--acquired", help="when the tags were taken (ISO 8601 with a UTC offset), checked against each artifact's validity")
     an.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",

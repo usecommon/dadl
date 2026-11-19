@@ -208,6 +208,38 @@ and is versioned separately from the packages.
     note when this widens it. Without afterpulsing a run past the maximum notes both rates;
     `survival` and `gap_cdf` accept an integer tau_p.
 
+- Review council round 4 (method `series-gap-mle` 4):
+  - deadtime method version 4: the round-3 joined interval is removed; intervals on
+    below-maximum scans are narrower (pq p90 5.1 ns from 12.9; s30 2.4 from 15.2), tau_p and the
+    fitted rates no longer jump to the high branch (about 5% of scans in round 3). Each run is
+    taken below the count-rate maximum unless the fit with runs past it is better by more than
+    `BRANCH_MARGIN` = 3 in NLL; within the margin the interval spans both fits and a note names
+    the runs (`branch_nll_gain` in the conditions). Round 3's reason for the join was wrong:
+    below the maximum the high branch fits worse in expectation (Asimov: by 2.5-5.6 NLL), not
+    better by a few. The afterpulse-sensitivity refits hold each run's branch (they jumped to the
+    other minimum: a shift sd up to 1.5e4 ps). The calibration refuses duplicate timestamps, the
+    same run twice, and an afterpulse artifact of another kind or channel, and notes a misfit one;
+  - the dead-time gap check drops its 0.9 factor (a dead time up to about 16% too long passed)
+    and adds an upward test: a shortest analysed gap more than 9 mean edge spacings above the
+    dead time's upper end is refused (22 ns calibrated on a 50 ns detector passed), for upper
+    limits too. The floor per channel is in the counts (`gap_check_floor_ps`);
+  - the detector-serial check runs on the API paths (`chsh`, `hom_from_tags`, `fringe_from_tags`
+    with calibrations), not only through `CalibrationSet.load(channels=)`;
+  - corrected CHSH runs the predictive check only with delay-jitter artifacts, as HOM and fringe
+    do (an accidentals-only corrected S was refused as a misfit);
+  - a dark artifact for only some channels gives the named error in HOM and fringe (a bare
+    `KeyError`, a CLI traceback, before);
+  - `calibrate pairs` prints the window capture from the forward model's closed form (its own
+    integral read about 0 for a narrow peak in a wide window); HOM's forward path records
+    `subtracted` 1.0; `valid_for` without `from` starts at acquisition or creation, and without
+    `to` has no end (a `KeyError` before); the schema says validity is enforced; the CLI help names
+    CHSH; the README lists the counts keys;
+  - CI: a `gates` job fails unless every coverage and propagation job passed (a failed shard
+    left its merge job skipped, which counts as passing); chsh-spad propagation runs in four
+    shards (it timed out at 45 minutes); propagation chunks keep every worker busy; the coverage
+    gate prints a line per finished chunk; a newer push to a pull request cancels its running
+    checks.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

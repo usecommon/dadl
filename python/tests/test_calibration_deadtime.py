@@ -241,6 +241,7 @@ def _afterpulse_artifact(p: float, tau_a: float, rel_sd: float):
     return SimpleNamespace(
         estimates={"afterpulse_prob": Interval(p, p * 0.9, p * 1.1), "afterpulse_tau_ps": Interval(tau_a, tau_a * 0.9, tau_a * 1.1)},
         stand_in=(), sample_params=("afterpulse_prob", "afterpulse_tau_ps"), samples=samples,
+        kind="dark-afterpulse-deadtime", channels=(CH,), status="ok", ppc_pvalue=0.5,
     )
 
 
@@ -339,6 +340,75 @@ def test_a_run_past_the_count_rate_maximum_is_fitted_on_its_branch(seed):
     cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, seed=1, n_draws=10)
     assert cal.estimates["dead_time_p_ps"].contains(40_000.0)
     assert any("input rate 5" in n or "input rate 6" in n for n in cal.notes if n.startswith("run 2"))
+    # Council round 4: the branch is decided once, and the note names the run past the maximum.
+    assert any(n.startswith("run(s) [2]") and "count-rate maximum" in n for n in cal.notes)
+    assert cal.conditions["branch_nll_gain"] > 0
+
+
+def _passive_quench_scan(i: int):
+    """The council round 4 scan (tau_p 40 ns, tau_np 45 ns, 1/3/6 Mcps), seeds [777, i, 1]."""
+    det = _det(40_000, 45_000, dark_rate_cps=50_000.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0)
+    rng = np.random.default_rng([777, i, 1])
+    ap = calibrate_dark(simulate_dark(det, 1.0, rng), CH, backend="sim", seed=1, n_draws=400)
+    runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in (1e6, 3e6, 6e6)]
+    return calibrate_deadtime_series(runs, CH, afterpulse=ap, backend="sim", seed=1, n_draws=10)
+
+
+def _afterpulse_shift_ps(cal) -> float:
+    note = next(n for n in cal.notes if n.startswith("afterpulse uncertainty adds"))
+    return float(note.split()[3])
+
+
+@pytest.mark.slow
+def test_afterpulse_refits_hold_the_decided_branch():
+    # Council round 4 (DT1): the sensitivity refits searched both branches and jumped to the
+    # other minimum: a shift sd of 1.36e4 ps on this seed, and an interval of [16, 45] ns.
+    cal = _passive_quench_scan(20)
+    assert _afterpulse_shift_ps(cal) < 1_000.0
+    assert cal.estimates["dead_time_p_ps"].low > 35_000.0
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("i", [36, 119])
+def test_a_scan_below_the_maximum_stays_on_the_low_branch(i):
+    # Council round 4 (DT2): with both branches searched, these scans put the 6 Mcps run at about
+    # 9e7 cps with tau_p near 31 ns and a false "afterpulse still pending" note. The high branch
+    # fits better by 2.1 and 1.5 in NLL, inside the margin: the point stays on the low branch and
+    # the interval spans both fits.
+    from dadl.calibration.deadtime import BRANCH_MARGIN
+
+    cal = _passive_quench_scan(i)
+    assert abs(cal.estimates["dead_time_p_ps"].value - 40_000.0) < 2_000.0
+    assert 0 < cal.conditions["branch_nll_gain"] <= BRANCH_MARGIN
+    assert any("fit about as well past the count-rate maximum" in n for n in cal.notes)
+    assert not any("afterpulse still pending" in n for n in cal.notes)
+    assert all("input rate 1e+08" not in n and "input rate 9" not in n for n in cal.notes if n.startswith("run 2"))
+
+
+def test_series_refusals_of_inputs():
+    # Council round 4 (S7).
+    from types import SimpleNamespace
+
+    runs = _runs(_det(20_000, 50_000), (2e6, 5e6), 0.01, 11)
+    dup = np.sort(np.concatenate([runs[0], runs[0][:1]]))
+    with pytest.raises(ValueError, match=r"duplicate timestamps in runs\[0\]"):
+        calibrate_deadtime_series([dup, runs[1]], CH)
+    with pytest.raises(ValueError, match="same acquisition"):
+        calibrate_deadtime_series([runs[0], runs[0].copy()], CH)
+    ap = _afterpulse_artifact(0.02, 30_000.0, 0.02)
+    with pytest.raises(ValueError, match="dark artifact"):
+        calibrate_deadtime_series(runs, CH, afterpulse=SimpleNamespace(**{**vars(ap), "kind": "delay-jitter"}))
+    with pytest.raises(ValueError, match="for channel"):
+        calibrate_deadtime_series(runs, CH, afterpulse=SimpleNamespace(**{**vars(ap), "channels": (ChannelId("sim", 1),)}))
+
+
+def test_a_misfit_afterpulse_artifact_is_named():
+    from types import SimpleNamespace
+
+    runs = _runs(_det(20_000, 50_000, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0), (2e6, 5e6), 0.01, 11)
+    ap = SimpleNamespace(**{**vars(_afterpulse_artifact(0.02, 30_000.0, 0.02)), "status": "misfit", "ppc_pvalue": 1e-4})
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, backend="sim", seed=1, n_draws=10)
+    assert any("afterpulse artifact for" in n and "misfit" in n for n in cal.notes)
 
 
 def test_without_afterpulsing_a_rate_past_the_maximum_is_ambiguous():

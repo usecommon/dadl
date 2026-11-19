@@ -87,7 +87,7 @@
       "pattern": "Z$"
     },
     "valid_for": {
-      "description": "Intended time range and conditions for the artifact. Recorded only: DADL does not yet enforce it.",
+      "description": "Intended time range and conditions for the artifact. Enforced when the calibration is used (from acquisition, or creation, to `to`).",
       "type": "object",
       "properties": {
         "from": {

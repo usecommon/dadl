@@ -183,6 +183,8 @@ def hom_from_tags(
         result = dataclasses.replace(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
         )
+        # The forward model subtracts the accidentals itself (council round 4: 0.0 was recorded).
+        counts["subtracted"] = float("accidental_subtraction" in fwd.corrections)
     if interrupted(*([np.sort(runs[k][ch]) for ch in HOM_CHANNELS] for k in HOM_SETTINGS)):
         # SNSPD specialist review: a latch in 20% of the dip run raised V by 13 sigma, unlabelled.
         labels += (INTERRUPTED,)

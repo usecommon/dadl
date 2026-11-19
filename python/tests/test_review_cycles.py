@@ -644,6 +644,30 @@ def test_ci_coverage_matrix_runs_every_regime():
                    for r in m.split()}
     for family, regimes in UNITS.items():
         assert family in whole or set(regimes) <= listed, family
+    # Council round 4 (C6): the propagation regimes too, and every sharded gate merged and gated.
+    import yaml
+
+    from dadl.analysis.propagation import REGIMES
+
+    jobs = yaml.safe_load(text)["jobs"]
+    runs = [step.get("run", "") for job in jobs.values() for step in job.get("steps", [])]
+    matrix = [part for job in jobs.values() for part in job.get("strategy", {}).get("matrix", {}).get("part", [])]
+    shards = jobs["propagation-shard"]["strategy"]["matrix"]["include"]
+    sharded = {s["regime"] for s in shards}
+    covered = {r for p in matrix if p["args"].split()[0] in ("hom", "chsh") for r in p["args"].split("--regimes")[1].split()}
+    assert set(REGIMES) <= covered | sharded and not covered & sharded
+    for regime in sharded:
+        mine = [s for s in shards if s["regime"] == regime]
+        of = {s["of"] for s in mine}
+        assert len(of) == 1 and sorted(s["shard"] for s in mine) == list(range(1, of.pop() + 1)), regime
+    assert sharded == set(jobs["propagation-merge"]["strategy"]["matrix"]["regime"])
+    assert any("dadl.analysis.propagation merge" in r for r in runs)
+    for merge_job, shard_job in (("coverage-merge", "coverage-shard"), ("propagation-merge", "propagation-shard")):
+        assert jobs[merge_job]["needs"] in (shard_job, [shard_job]), merge_job
+    gates = jobs["gates"]
+    assert gates["if"] == "always()"
+    gate_jobs = {"coverage", "coverage-shard", "coverage-merge", "propagation", "propagation-shard", "propagation-merge"}
+    assert gate_jobs <= set(gates["needs"])
 
 
 # --- Cycle 7 -----------------------------------------------------------------------------------

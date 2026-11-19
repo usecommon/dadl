@@ -327,7 +327,10 @@ def run(
             raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
         names = [r for r in names if r in regimes]
     span = part if part is not None else range(replicates)
-    tasks = [(r, replicates, seed, range(lo, min(lo + CHUNK, span.stop))) for r in names for lo in range(span.start, span.stop, CHUNK)]
+    # Chunks no larger than a worker's share, so a shard keeps every worker busy (council round 4:
+    # 125 replicates in chunks of 50 left one of four workers idle).
+    chunk = max(1, min(CHUNK, -(-len(span) // max(jobs, 1))))
+    tasks = [(r, replicates, seed, range(lo, min(lo + chunk, span.stop))) for r in names for lo in range(span.start, span.stop, chunk)]
     start = time.monotonic()
 
     def report(done: int, task) -> None:

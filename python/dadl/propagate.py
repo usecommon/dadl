@@ -156,6 +156,22 @@ def detector_mismatches(member: Member, setup: Mapping[ChannelId, ChannelId]) ->
     return out
 
 
+def check_detectors(
+    calibrations: "CalibrationSet", channels: Iterable[ChannelId], *, analysis: str, policy: Policy | None = None
+) -> tuple[str, ...]:
+    """The detector check of `CalibrationSet.load(channels=)` on the analysis channels, for sets
+    loaded without them (council round 4: the API paths skipped it). Refuses an artifact
+    calibrated on another detector (`StaleCalibration`), or labels it under the
+    `calibration_outside_validity` override."""
+    setup = {c: c for c in channels}
+    rule = (policy or Policy.default()).rule_for(analysis)
+    labels: list[str] = []
+    for m in calibrations.members:
+        if set(m.channels) & set(setup):
+            labels += _outside(detector_mismatches(m, setup), m.calibration.kind, m.artifact_id[:12], analysis, rule)
+    return tuple(dict.fromkeys(labels))
+
+
 def _check(
     member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None, setup: Mapping[ChannelId, ChannelId]
 ) -> list[str]:
@@ -188,9 +204,15 @@ def _check(
         if dataset.acquired is None:
             problems.append("the artifact has a validity range but the dataset's acquisition time was not given")
         else:
-            lo, hi = _parse_utc(valid["from"]), _parse_utc(valid["to"])
-            if not lo <= dataset.acquired <= hi:
-                problems.append(f"acquired {dataset.acquired.isoformat()} is outside {valid['from']} to {valid['to']}")
+            # `from` and `to` are optional in the schema: validity starts at acquisition, or creation,
+            # without `from`, and has no end without `to` (council round 4: a bare KeyError).
+            start = valid.get("from") or member.manifest.get("acquired") or member.manifest.get("created")
+            end = valid.get("to")
+            if (start is not None and dataset.acquired < _parse_utc(start)) or (
+                end is not None and dataset.acquired > _parse_utc(end)
+            ):
+                problems.append(f"acquired {dataset.acquired.isoformat()} is outside {start or 'any time'} to "
+                                f"{end or 'any time'}")
     problems += condition_mismatches(cal.conditions, dataset.conditions)
     return labels + _outside(problems, cal.kind, aid, analysis, rule)
 
@@ -371,5 +393,6 @@ __all__ = [
     "JointDraws",
     "Member",
     "condition_mismatches",
+    "check_detectors",
     "detector_mismatches",
 ]

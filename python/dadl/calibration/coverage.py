@@ -35,8 +35,9 @@ import math
 import multiprocessing
 import os
 import sys
+import time
 import zlib
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -502,13 +503,14 @@ def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
 
 def run(
     name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None,
-    part: range | None = None,
+    part: range | None = None, progress=None,
 ) -> list[CoverageResult]:
     """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
     the named `regimes` (CI splits the gate across runners this way).
 
     With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
-    always uses child i of `seed`, so the result does not depend on `jobs`.
+    always uses child i of `seed`, so the result does not depend on `jobs`. `progress` gets a line
+    per finished chunk (council round 4: the gate printed nothing until done).
     """
     names = list(UNITS) if name == "all" else [name]
     if any(n not in UNITS for n in names):
@@ -517,8 +519,19 @@ def run(
     unknown = sorted(set(regimes or ()) - {r for _, r in units})
     if unknown:
         raise ValueError(f"unknown regime(s) {unknown} for {name!r}")
+    start = time.monotonic()
+
+    def report(done: int, total: int, n: str, r: str, rng: range | None) -> None:
+        if progress is not None:
+            what = f"replicates {rng.start}-{rng.stop - 1}" if rng is not None else "all replicates"
+            progress(f"{n} {r}: {what} done ({done}/{total} chunks, {time.monotonic() - start:.0f} s)")
+
     if jobs <= 1:
-        return [res for n, r in units for res in _unit((n, r, replicates, seed, part))]
+        out1 = []
+        for i, (n, r) in enumerate(units, 1):
+            out1 += _unit((n, r, replicates, seed, part))
+            report(i, len(units), n, r, part)
+        return out1
     span = part if part is not None else range(replicates)
     # Chunks no larger than a worker's share of a regime, so a shard keeps every worker busy.
     chunk = max(1, min(CHUNK, -(-len(span) // jobs)))
@@ -535,7 +548,12 @@ def run(
     os.environ.update(single)
     try:
         with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as ex:
-            parts = list(ex.map(_unit, tasks))
+            futures = {ex.submit(_unit, t): i for i, t in enumerate(tasks)}
+            parts: list = [None] * len(tasks)
+            for done, fut in enumerate(as_completed(futures), 1):
+                i = futures[fut]
+                parts[i] = fut.result()
+                report(done, len(tasks), tasks[i][0], tasks[i][1], tasks[i][4])
     finally:
         for k, v in saved.items():
             if v is None:
@@ -624,7 +642,8 @@ def main(argv: list[str] | None = None) -> int:
         if (args.shard is None) != (args.out is None):
             parser.error("--shard and --out go together")
         part = shard_range(args.shard, args.replicates) if args.shard else None
-        results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes, part)
+        log = lambda line: print(line, file=sys.stderr, flush=True)  # noqa: E731
+        results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes, part, log)
         if part is not None:
             with open(args.out, "w", encoding="utf-8") as fh:
                 json.dump(shard_record(results, args.seed, part), fh, indent=1)

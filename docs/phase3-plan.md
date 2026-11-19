@@ -334,6 +334,8 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
 | Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
 | Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M10, next to rotating seeds (owner's agreement) |
+| User declaration of scan runs past the count-rate maximum | M4 council round 4 (DT3) | M10, with the past-maximum regime |
+| Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M10, checked on the past-maximum regime |
 
 ## Decisions
 

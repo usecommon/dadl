@@ -297,3 +297,122 @@ def test_a_corrected_s_without_dark_artifacts_says_so(tmp_path):
     assert label.startswith("accidentals modelled; dead time (no dark artifacts) and window capture") and label in r.labels
     assert DEAD_TIME_SELECTION in r.labels and DEAD_TIME_UNCORRECTED in r.labels
     assert r.counts["dataset"] == {"acquired": CTX.acquired.isoformat(), "conditions": {}}
+
+
+# --- Council round 4 ----------------------------------------------------------------------------
+
+def test_a_crosstalk_peak_fails_the_forward_check(tmp_path):
+    # Council round 4 (S4): no test failed with the CHSH shape check removed.
+    from dadl.errors import Misspecified
+    from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
+    from dadl.sim import Crosstalk
+
+    rng = np.random.default_rng(3000)
+    _calibrate(tmp_path, _late(0), rng)
+    strict = _policy("accidental_subtraction", "window_capture", "misfit_calibration")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=strict, dataset=CTX)
+    runs = simulate_chsh(MISDECLARED_SRC, _late(0), 0.5, rng, SETTINGS, crosstalk=(Crosstalk("A+", "B+", 0.01, 600.0, 50.0),))
+    window = Window(width_ps=1000, source="plan")
+    with pytest.raises(Misspecified, match="does not fit the analysed coincidences"):
+        chsh(runs, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    loose = strict.allow("chsh", "misfit_forward_model", "checking")
+    r = chsh(runs, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    assert FORWARD_MISFIT_ACCEPTED in r.labels and r.counts["forward_check_p"] < 1e-3
+
+
+def test_an_accidentals_only_corrected_s_runs_no_shape_check(tmp_path):
+    # Council round 4 (S1): with no delay-jitter artifact CHSH still ran the shape check (HOM and
+    # fringe skip it) and refused an IRF tail it cannot model without the calibrated jitter.
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=150.0)
+    rng = np.random.default_rng(11)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=2e5, visibility=0.7), dict.fromkeys(IDS, det), 1.0, rng, SETTINGS)
+    for r in runs.values():
+        for ch in ("B+", "B-"):
+            t = r[ch].copy()
+            late = rng.random(t.size) < 0.3
+            t[late] += rng.exponential(400, late.sum()).astype(np.int64)
+            r[ch] = np.unique(t)
+    policy = _policy("accidental_subtraction")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=policy, dataset=CTX)
+    r = chsh(runs, Window(1000, "plan"), policy, settings_deg=SETTINGS, calibrations=cset, channels=IDS)
+    assert r.corrections == ("accidental_subtraction",) and "forward_check_p" not in r.counts
+
+
+def _with_darks(cset, darks):
+    """`cset`'s delay artifacts with these dark artifacts in place of its own."""
+    from test_forward import _member_set
+
+    from dadl.calibration.delay import KIND as DELAY_KIND
+
+    delays = [m.calibration for m in cset.members if m.kind == DELAY_KIND]
+    return _member_set("chsh", delays + darks)
+
+
+def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
+    # Council round 4 (S4, DT4): no test failed with the CHSH gap check removed. A 1 us dead time
+    # on 50 ns detectors is refused downward, a 22 ns one upward.
+    from test_forward import _dark
+
+    from dadl.errors import StaleCalibration
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    runs, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    long = _with_darks(cset, [_dark(cid, 1e6, seed=i) for i, cid in enumerate(IDS.values())])
+    with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
+        chsh(runs, WINDOW, POLICY, calibrations=long, channels=IDS, seed=1)
+    loose = POLICY.allow("chsh", "calibration_outside_validity", "checking")
+    r = chsh(runs, WINDOW, loose, calibrations=long, channels=IDS, seed=1)
+    assert OUTSIDE_VALIDITY in r.labels and 45_000 < r.counts["min_gap_ps"]["A+"] < 51_000
+    short = _with_darks(cset, [_dark(cid, 22_000, 500, seed=i) for i, cid in enumerate(IDS.values())])
+    with pytest.raises(StaleCalibration, match="longer than its upper end"):
+        chsh(runs, WINDOW, POLICY, calibrations=short, channels=IDS, seed=1)
+
+
+def test_chsh_refuses_another_detector_s_artifacts(data):
+    # Council round 4 (S3): the detector check ran only through CalibrationSet.load(channels=).
+    import dataclasses
+
+    from test_forward import _member_set
+
+    from dadl.errors import StaleCalibration
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    runs, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    other = {n: ChannelId(c.device, c.input, role=n, detector=f"NEW-{n}") for n, c in IDS.items()}
+    recorded = {n: ChannelId(c.device, c.input, role=n, detector=f"OLD-{n}") for n, c in IDS.items()}
+    by_channel = {c: n for n, c in IDS.items()}
+    cals = [dataclasses.replace(m.calibration, channels=tuple(recorded[by_channel[c]] for c in m.channels))
+            for m in cset.members]
+    old = _member_set("chsh", cals)
+    with pytest.raises(StaleCalibration, match="calibrated on detector OLD-"):
+        chsh(runs, WINDOW, POLICY, calibrations=old, channels=other, seed=1)
+    loose = POLICY.allow("chsh", "calibration_outside_validity", "same detectors, renamed")
+    assert OUTSIDE_VALIDITY in chsh(runs, WINDOW, loose, calibrations=old, channels=other, seed=1).labels
+    assert OUTSIDE_VALIDITY not in chsh(runs, WINDOW, POLICY, calibrations=old, channels=recorded, seed=1).labels
+
+
+def test_the_capture_balance_carries_the_peak_fits_noise():
+    # Council round 4 (S4): no test failed with capture_sd_data set to 0. It shrinks as the run
+    # grows (about 1/sqrt(duration)).
+    import dataclasses
+
+    det = dataclasses.replace(MISDECLARED_DET, jitter_sigma_ps=150.0)
+    sds = []
+    for duration in (0.25, 1.0):
+        runs = simulate_chsh(MISDECLARED_SRC, dict.fromkeys(IDS, det), duration, np.random.default_rng(40), SETTINGS)
+        sds.append(chsh(runs, WINDOW, settings_deg=SETTINGS).counts["capture_sd_data"])
+    assert sds[0] > 0 and 0.3 < sds[1] / sds[0] < 0.7
+
+
+def test_the_peak_fits_noise_can_decide_the_capture_label():
+    # A shift of 0.6 statistical se, within 3.29 sd of the peak fits: not labelled; with no fit
+    # noise it would be.
+    from dadl.analysis.chsh import CAPTURE_IMBALANCE, capture_labels
+    from dadl.result import Estimate
+
+    raw = Estimate(2.0, 0.02)
+    balance = {(x, y): (0.0, 300.0, 0.9, 5.0, 5.0) for x in "+-" for y in "+-"}
+    assert capture_labels(raw, 2.012, balance, 0.005) == ()
+    assert capture_labels(raw, 2.012, balance, 0.0)[0] == CAPTURE_IMBALANCE.format(dS=-0.012)
