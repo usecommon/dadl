@@ -321,6 +321,7 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Item | Source | Where |
 | --- | --- | --- |
 | IRF with exponential tail (Gaussian core plus tail) in the delay fit and forward model | phase 2 review round 2; README "Gaussian timing response" | Own PR after M2, **Decision D8** |
+| Common-vs-confined misfit test for CHSH: a timing tail common to all channels does not bias S, so the predictive check need not refuse it | M4 council round 2 (B5) | With the IRF-tail PR (D8) |
 | `grid_origin_ps` declared rather than fixed at 0 | cycle 1.18 | M7 |
 | Pair-labelled simulation truth for the heralding gate | cycle 7.14; summary of cycles | M3 (the propagation simulator labels pairs) |
 | Rotating seeds for the coverage gates | expert review Q11 | M10, if the owner agrees to change the gate rule before running |
@@ -328,6 +329,8 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Afterpulse pending at the next gap modelled in the series gap law (now only a note above 0.5%) | M4 council round 1 (S4) | M10; 0.2.x if not done (new gap law, regime and gate re-run) |
 | Coarse grouped predictive check, Bonferroni-combined with the fine one, for the series dead time | M4 council round 1 (S5) | M10 (changes the misfit share; gate re-run) |
 | Count-variance (Fano) stationarity check for dead-time scans | M4 council round 1 (D1) | M10 (needs the model's renewal Fano factor; gate re-run) |
+| Opt-in per-detector efficiency normalisation for corrected S (new correction name, policy line and a gate regime) | M4 council round 2 (B4) | M10; 0.2.x if not done |
+| D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a chsh-dead-time regime whose dark runs identify the dead time or that gates the range | M4 council round 2 (B2, G) | M10, next to rotating seeds (regimes were declared before the first run; needs the owner's agreement) |
 | Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
 | Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
 

@@ -33,7 +33,14 @@ import math
 import numpy as np
 
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
-from dadl.analysis._twopoint import check_calibration_args, forward_check, forward_from_counts, run_counts, span_ps
+from dadl.analysis._twopoint import (
+    check_calibration_args,
+    forward_check,
+    forward_from_counts,
+    range_ends,
+    run_counts,
+    span_ps,
+)
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
@@ -46,8 +53,8 @@ from dadl.result import LabelledValue
 #: 0.882 for 0.919) or a pump drift between them (+-5% gave +-3 sigma) moves it, unlabelled
 #: before (expert review).
 TWO_POINT = (
-    "two-point visibility at the declared delays: a lower bound if the dip is off-centre; "
-    "not normalised for rate drift between the acquisitions"
+    "two-point visibility at the declared delays: a lower bound if the dip is off-centre or the reference delay "
+    "is not many coherence times; not normalised for rate drift between the acquisitions"
 )
 
 #: Channel names of a HOM setup: the two beamsplitter outputs.
@@ -81,14 +88,20 @@ def hom_from_tags(
     since one model must not count the accidentals twice.
 
     `reference_delay_ps` is the path delay of the reference acquisition (setup.yaml's
-    `reference_delay_ps`). With it and a delay-jitter artifact for the channel pair, the forward
-    model includes the fixed grid's capture at the dip and at the reference delay, where pairs
-    arrive split by +-delay; without one, the corrected value is labelled.
+    `analysis.reference_delay_ps`), required with calibrations: the forward model needs the
+    reference's split. With a delay-jitter artifact for the channel pair, the forward model
+    includes the fixed grid's capture at the dip and at the reference delay, where pairs arrive
+    split by +-delay; without one, the corrected value is labelled.
 
     Returns the labelled result and the counts it used.
     """
     if calibrations is not None:
         check_calibration_args(subtract_accidentals, channels)
+        if not reference_delay_ps:
+            raise ValueError(
+                "with calibrations, pass reference_delay_ps (setup.yaml's analysis.reference_delay_ps): the forward "
+                "model needs the reference's split"
+            )
     elif subtract_accidentals is None:
         subtract_accidentals = True
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
@@ -158,7 +171,7 @@ def hom_from_tags(
         counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
         labels = tuple(dict.fromkeys(
-            labels + fwd.labels + check_labels + threshold_labels("hom_visibility", result.raw, fwd.estimate)
+            labels + fwd.labels + check_labels + threshold_labels("hom_visibility", result.raw, fwd.estimate, range_ends(extra))
         ))
         result = dataclasses.replace(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids

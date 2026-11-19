@@ -8,7 +8,12 @@ Phase 1 limits, stated so nobody over-reads the result:
 - the window's `source` is declared by the caller, not verified; signed
   analysis plans (phase 3) will bind it to a plan fixed before acquisition;
 - the tags are trusted as given (no dataset ID yet);
-- the error is statistical only and Gaussian.
+- the raw error is statistical only and Gaussian (the corrected value's includes calibration).
+
+A delay error on some channels changes the window capture of some outcome pairs and not others
+and moves S. Each outcome pair's peak is fitted over the four settings (`capture_balance`); S
+reweighted by those captures is in the counts, and `CAPTURE_IMBALANCE` is added when it differs
+from raw S by more than half a standard error or a capture is below `MIN_CAPTURE`.
 """
 
 from __future__ import annotations
@@ -37,6 +42,15 @@ FAIR_SAMPLING = "fair sampling and fair coincidence assumed (post-selected on co
 #: local model that records every photon and shifts timing with the setting reached S = 2.8
 #: (expert review). Static settings leave locality and freedom of choice open.
 STATIC_SETTINGS = "static settings: locality, freedom-of-choice and memory loopholes open; not a loophole-free test"
+
+#: A delay error on some channels changes the window capture of some outcome pairs and not others,
+#: which moves S (A+ and B+ 400 ps late, declared 0: S = 2.20 for a 1.98 source; council round 2).
+CAPTURE_IMBALANCE = (
+    "unequal window capture across outcome pairs: the declared delays miss the pair peaks (offsets in counts), "
+    "shifting S by about {dS:+.3f}; declare the delays from a pair calibration"
+)
+#: Smallest window capture of an outcome pair before the declared delays are labelled.
+MIN_CAPTURE = 0.5
 
 #: Below this many coincidences per setting the Gaussian error is not trusted.
 MIN_COUNTS_PER_SETTING = 100
@@ -223,6 +237,49 @@ def setting_counts(tags: dict[str, np.ndarray], window: Window) -> dict[str, flo
     }
 
 
+def _pair_name(x: str, y: str) -> str:
+    return f"A{x}/B{y}"
+
+
+def reweighted_s(runs, window: Window, captures: Mapping[tuple[str, str], float]) -> float:
+    """S with each outcome combination's raw count divided by its window capture."""
+    from dadl.forward import OUTCOME_SIGNS
+
+    d = window.delays_ps
+    s = 0.0
+    for key, sign in SIGNS.items():
+        n = {
+            (x, y): grid_coincidences(runs[key]["A" + x], runs[key]["B" + y], window.width_ps, d.get("A" + x, 0), d.get("B" + y, 0))
+            / captures[(x, y)]
+            for x, y in OUTCOME_SIGNS
+        }
+        s += sign * sum(o * n[k] for k, o in OUTCOME_SIGNS.items()) / sum(n.values())
+    return s
+
+
+def capture_balance(runs, window: Window) -> tuple[float | None, dict[tuple[str, str], tuple[float, float, float]]]:
+    """S reweighted by each outcome pair's window capture, and per pair (offset, jitter, capture).
+
+    Each outcome pair's peak is fitted once (`forward_check.pooled_peak`) to its histogram summed
+    over the four settings, and its capture is `forward.grid_capture(offset, jitter, W)`. A pair
+    below `forward_check.MIN_COUNTS` is skipped; then the reweighted S is None."""
+    from dadl.forward import OUTCOME_SIGNS, grid_capture
+    from dadl.forward_check import PairData, pooled_peak
+
+    d = window.delays_ps
+    out: dict[tuple[str, str], tuple[float, float, float]] = {}
+    for x, y in OUTCOME_SIGNS:
+        a, b = "A" + x, "B" + y
+        declared = float(d.get(b, 0) - d.get(a, 0))
+        fit = pooled_peak([PairData(f"{k[0]},{k[1]} {a}/{b}", runs[k][a], runs[k][b], declared, window.width_ps) for k in SIGNS])
+        if fit is not None:
+            offset, sigma = fit
+            out[(x, y)] = (offset, sigma, float(grid_capture(offset, sigma, window.width_ps)))
+    if len(out) != len(OUTCOME_SIGNS):
+        return None, out
+    return reweighted_s(runs, window, {k: v[2] for k, v in out.items()}), out
+
+
 def chsh(
     runs: dict[tuple[str, str], dict[str, np.ndarray]],
     window: Window,
@@ -277,13 +334,21 @@ def chsh(
     m_b = float(np.mean([counts[f"{k[0]},{k[1]}"]["imbalance_b"] for k in SIGNS]))
     if 2.0 * abs(m_a * m_b) > 0.5 * raw.stderr:
         labels += (EFFICIENCY_IMBALANCE,)
+    s_balanced, balance = capture_balance(runs, window)
+    counts["capture_offsets_ps"] = {_pair_name(*k): v[0] for k, v in balance.items()}
+    counts["capture_reweighted_s"] = s_balanced
+    shift = raw.value - s_balanced if s_balanced is not None else 0.0
+    if abs(shift) > 0.5 * raw.stderr or any(v[2] < MIN_CAPTURE for v in balance.values()):
+        labels += (CAPTURE_IMBALANCE.format(dS=shift),)
     if settings_deg is not None:
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     corrected = None
     extra: dict[str, object] = {}
     if calibrations is not None:
-        corrected, extra, more, check_p = _corrected(runs, window, policy, calibrations, channels, seed, raw)
-        counts["forward_check_p"] = check_p
+        corrected, extra, more, more_counts = _corrected(
+            runs, window, policy, calibrations, channels, seed, raw, s_balanced, balance
+        )
+        counts.update(more_counts)
         labels += tuple(lab for lab in more if lab not in labels)
     return LabelledValue(
         analysis="chsh",
@@ -297,11 +362,12 @@ def chsh(
     )
 
 
-def _corrected(runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate):
-    """The forward-model S, its result fields and its labels (threshold crossing included)."""
+def _corrected(runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate, s_balanced, balance):
+    """The forward-model S, its result fields, its labels (threshold crossing included) and the
+    counts it adds."""
     from dadl.analysis._twopoint import run_counts, span_ps
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
-    from dadl.forward import OUTCOME_SIGNS, corrected_chsh
+    from dadl.forward import DEAD_TIME_RANGE_WIDE, OUTCOME_SIGNS, chsh_bound_range, corrected_chsh
 
     if channels is None or set(channels) != set(CHANNELS):
         raise ValueError(f"with calibrations, pass channels mapping each of {list(CHANNELS)} to its ChannelId")
@@ -319,12 +385,59 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
             side = shifted_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0), offsets)
             per[(x, y)] = run_counts(tags, c, side, span, channels=(a, b))
         reduced[key] = per
-    fwd = corrected_chsh(
-        reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed,
-        window_ps=window.width_ps, delays_ps={k: float(v) for k, v in d.items()},
+    grid = {"window_ps": window.width_ps, "delays_ps": {k: float(v) for k, v in d.items()}}
+    fwd = corrected_chsh(reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed, **grid)
+    counts: dict[str, object] = {"forward_check_p": check_p}
+    labels = fwd.labels + check_labels
+    labels += _delay_drift(runs, window, policy, calibrations, channels, s_balanced, balance, fwd.estimate)
+    ends: tuple[float, ...] = ()
+    rng = chsh_bound_range(reduced, channels, SIGNS, calibrations=calibrations, **grid)
+    if rng is not None:
+        counts["corrected_at_zero_dead_time"] = rng["at_zero"]
+        counts["corrected_at_bound_dead_time"] = rng["at_bound"]
+        ends = (rng["at_zero"], rng["at_bound"])
+        if abs(rng["at_bound"] - rng["at_zero"]) > fwd.estimate.stderr:
+            labels += (DEAD_TIME_RANGE_WIDE,)
+    labels += threshold_labels("chsh", raw, fwd.estimate, ends)
+    labels = tuple(dict.fromkeys(labels))
+    return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels, counts
+
+
+def _delay_drift(runs, window: Window, policy: Policy, calibrations, channels, s_balanced, balance, corrected: Estimate):
+    """Compare S reweighted by the analysed peaks' captures with S reweighted by the delay-jitter
+    artifacts' point captures. A drift since calibration changes the window capture, and the
+    predictive check refits the delay, so it does not see it. Refused (`Misspecified`) when they
+    differ by more than half the corrected value's statistical error, unless the policy allows
+    `misfit_forward_model`; then labelled."""
+    from dadl.errors import Misspecified
+    from dadl.forward import OUTCOME_SIGNS, _pair_capture
+    from dadl.forward_check import FORWARD_MISFIT_ACCEPTED, OVERRIDE, delay_start
+
+    if s_balanced is None:
+        return ()
+    d = window.delays_ps
+    artifact = {}
+    for x, y in OUTCOME_SIGNS:
+        a, b = "A" + x, "B" + y
+        cap = _pair_capture(calibrations, channels[a], channels[b], window.width_ps, float(d.get(b, 0) - d.get(a, 0)), 1, 0)
+        if cap is None:
+            return ()
+        artifact[(x, y)] = cap[1]
+    s_artifact = reweighted_s(runs, window, artifact)
+    if abs(s_balanced - s_artifact) <= 0.5 * corrected.stderr_statistical:
+        return ()
+    if OVERRIDE in policy.rule_for("chsh").allowed_corrections:
+        return (FORWARD_MISFIT_ACCEPTED,)
+    worst = max(OUTCOME_SIGNS, key=lambda k: abs(artifact[k] - balance[k][2]))
+    a, b = "A" + worst[0], "B" + worst[1]
+    declared = float(d.get(b, 0) - d.get(a, 0))
+    calibrated = delay_start(calibrations, channels[a], channels[b])[0]
+    raise Misspecified(
+        f"the calibrated delays do not match the analysed pair peaks ({a}/{b}: calibrated {calibrated:.0f}, analysed "
+        f"{declared + balance[worst][0]:.0f} ps; S {s_artifact:.4f} with the calibrated captures, {s_balanced:.4f} "
+        "with the analysed): a drift since calibration changes the window capture. Recalibrate the delays, or "
+        f"override with Policy.allow('chsh', {OVERRIDE!r}, reason)."
     )
-    labels = fwd.labels + check_labels + threshold_labels("chsh", raw, fwd.estimate)
-    return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels, check_p
 
 
 def _forward_check(runs, window: Window, policy: Policy, calibrations, channels) -> tuple[float, tuple[str, ...]]:

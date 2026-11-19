@@ -15,7 +15,18 @@ from dadl.calibration.dark import calibrate_dark
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal, Misspecified
 from dadl.calibration.delay import calibrate_delay
-from dadl.forward import CAPTURE_UNMODELLED, DEAD_TIME_BOUND, FORWARD_MODEL, RunCounts, corrected_visibility, grid_capture, live_fraction
+from dadl.forward import (
+    AFTERPULSING_UNMODELLED,
+    CAPTURE_UNMODELLED,
+    CORRECTED_ABOVE_ONE,
+    DEAD_TIME_BOUND,
+    FORWARD_MODEL,
+    JITTER_BOUND,
+    RunCounts,
+    corrected_visibility,
+    grid_capture,
+    live_fraction,
+)
 from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
 from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import CalibrationSet, DatasetContext
@@ -50,7 +61,7 @@ def setup(tmp_path_factory):
 def test_corrected_hom_recovers_the_injected_visibility(setup):
     runs, cset = setup
     raw_only, _ = hom_from_tags(runs, WINDOW, subtract_accidentals=False)
-    r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3)
+    r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3, reference_delay_ps=20.0)
     c = r.corrected
     # Raw is biased low by the accidentals: its exact interval excludes the truth, the corrected
     # one contains it. Dead time nearly cancels in this ratio (live fractions 0.914 and 0.913:
@@ -72,7 +83,7 @@ def test_corrected_hom_recovers_the_injected_visibility(setup):
 def test_dead_time_correction_needs_the_policy(setup):
     runs, cset = setup
     with pytest.raises(GuardrailRefusal, match="dead_time"):
-        hom_from_tags(runs, WINDOW, calibrations=cset, channels=(CA, CB))
+        hom_from_tags(runs, WINDOW, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
 
 
 def test_stacked_corrections_are_refused(setup):
@@ -134,7 +145,7 @@ def test_unidentified_dead_time_is_corrected_at_the_bound_and_reported_as_a_rang
     cset, policy, rng = _bounded_set(tmp_path, 3_000.0)
     src = PairSource(pair_rate_per_s=2.0e5, visibility=TRUE_V, coherence_time_ps=2.0)
     runs = {k: simulate_hom(src, DET, DET, d, 0.5, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
-    r, counts = hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB))
+    r, counts = hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
     assert DEAD_TIME_BOUND in r.labels
     assert counts["corrected_at_zero_dead_time"] != counts["corrected_at_bound_dead_time"]
 
@@ -145,7 +156,7 @@ def test_an_uninformative_dead_time_bound_is_refused(tmp_path):
     cset, policy, rng = _bounded_set(tmp_path, 30.0)
     runs = {k: simulate_hom(SRC, DET, DET, d, 0.1, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
     with pytest.raises(GuardrailRefusal, match="known only below"):
-        hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB))
+        hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
 
 
 # --- Fringe visibility from tags -------------------------------------------------------------
@@ -239,12 +250,17 @@ def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_pa
     assert CAPTURE_UNMODELLED not in r.labels
     # The reference run's split pairs at +-20 ps lose more to the grid than the dip's: modelling it
     # raises V by C_dip/C_ref * (1 - capture ratio), here about 0.08 * 0.01.
-    # Declaring no delay for a run that has one is a misfit the predictive check sees (two peaks at
-    # +-20 ps where the model has one); with the override the value can be compared.
+    # No reference delay with calibrations is refused: the forward model needs the split (council
+    # round 2: the reference was treated as unsplit and V read 10 sigma low, unlabelled).
+    for missing in (None, 0.0):
+        with pytest.raises(ValueError, match="reference_delay_ps"):
+            hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=missing, **kw)
+    # Declaring about no delay for a run that has one is a misfit the predictive check sees (two
+    # peaks at +-20 ps where the model has one); with the override the value can be compared.
     with pytest.raises(Misspecified, match="reference"):
-        hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=0.0, **kw)
+        hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=1.0, **kw)
     loose = policy.allow("hom_visibility", "misfit_forward_model", "comparing a misdeclared delay")
-    r0, _ = hom_from_tags(runs, WINDOW, policy=loose, reference_delay_ps=0.0, **kw)
+    r0, _ = hom_from_tags(runs, WINDOW, policy=loose, reference_delay_ps=1.0, **kw)
     assert FORWARD_MISFIT_ACCEPTED in r0.labels and FORWARD_MISFIT_ACCEPTED not in r.labels
     assert r.corrected.value - r0.corrected.value == pytest.approx(0.0008, abs=0.0003)
     # Not in the default HOM rule, like dead time (D10).
@@ -256,3 +272,148 @@ def test_reference_delay_without_a_delay_artifact_is_labelled(setup):
     runs, cset = setup
     r, _ = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
     assert CAPTURE_UNMODELLED in r.labels and "window_capture" not in r.corrections
+
+
+# --- Council round 2 ----------------------------------------------------------------------------
+
+def _member_set(analysis, cals):
+    from types import MappingProxyType
+
+    from dadl.propagate import Member
+
+    members = tuple(Member(f"{i:064x}", c, MappingProxyType({})) for i, c in enumerate(cals, start=7))
+    return CalibrationSet(analysis, members, ())
+
+
+def _dark(ch, tau_ps=50_000.0, sd_ps=2_000.0, bound=None, seed=0, afterpulse=False):
+    """A dark artifact holding the dead time only (or, with `afterpulse`, a fitted afterpulse
+    probability as well); with `bound`, the dead time is a stand-in upper limit."""
+    from dadl.calibration import dark
+    from dadl.calibration.base import Calibration
+    from dadl.stats import Interval
+
+    rng = np.random.default_rng(seed)
+    if bound is not None:
+        col, est, flags = rng.uniform(0, bound, 2000), Interval(bound, 0.0, bound), ("dead_time_ps",)
+    else:
+        col, est, flags = rng.normal(tau_ps, sd_ps, 2000), Interval(tau_ps, tau_ps - 2 * sd_ps, tau_ps + 2 * sd_ps), ()
+    estimates, units, samples, params = {"dead_time_ps": est}, {"dead_time_ps": "ps"}, [col], ["dead_time_ps"]
+    if afterpulse:
+        estimates["afterpulse_prob"] = Interval(0.01, 0.008, 0.012)
+        units["afterpulse_prob"] = "1"
+        samples.append(rng.normal(0.01, 0.001, 2000))
+        params.append("afterpulse_prob")
+    return Calibration(
+        kind=dark.KIND, method=dark.METHOD, method_version=dark.METHOD_VERSION, channels=(ch,), estimates=estimates,
+        units=units, samples=np.column_stack(samples), sample_params=tuple(params), converged=True, ppc_pvalue=0.5,
+        inputs=(("x" * 64, "raw-tags", str(ch)),), backend="sim", unidentified=flags, stand_in=flags,
+    )
+
+
+def test_a_bounded_dead_time_gives_value_and_interval_at_the_bound():
+    # Council round 2 (R1): the point was at zero and the interval at the bound, so with unequal
+    # singles the value fell outside its own interval (0.9009 against [0.9045, 0.9072]).
+    from dadl.forward import bound_range
+
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    high = RunCounts(200_000, 4_000, 20, 1.0, 1_500_000, 1_500_000)
+    low = RunCounts(20_000, 4_000, 20, 1.0, 1_200_000, 1_200_000)
+    cset = _member_set("hom_visibility", [_dark(CA, bound=100_000), _dark(CB, bound=100_000)])
+    c = corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy, seed=1)
+    assert c.estimate.low <= c.estimate.value <= c.estimate.high
+    ends = bound_range("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy)
+    assert c.estimate.value == pytest.approx(ends["at_bound"])
+    assert DEAD_TIME_BOUND in c.labels
+
+
+def test_a_threshold_crossed_only_at_the_bound_is_labelled():
+    from dadl.forward import bound_range
+    from dadl.guardrails import THRESHOLD_AFTER_CORRECTION, threshold_labels
+    from dadl.result import Estimate
+
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    high = RunCounts(400_000, 400, 20, 1.0, 1_500_000, 1_500_000)
+    low = RunCounts(201_000, 400, 20, 1.0, 1_200_000, 1_200_000)
+    cset = _member_set("hom_visibility", [_dark(CA, bound=100_000), _dark(CB, bound=100_000)])
+    c = corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy, seed=1).estimate
+    ends = bound_range("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy)
+    raw = Estimate(1 - 201_000 / 400_000, 0.0015, 0.4945, 0.5005)
+    assert ends["at_zero"] < 0.5 < ends["at_bound"]
+    assert THRESHOLD_AFTER_CORRECTION in threshold_labels("hom_visibility", raw, c, tuple(ends.values()))
+    # The ends alone carry the crossing when the value does not.
+    below = Estimate(0.499, 0.001, 0.497, 0.501)
+    assert THRESHOLD_AFTER_CORRECTION in threshold_labels("hom_visibility", raw, below, (0.4975, 0.501))
+    assert THRESHOLD_AFTER_CORRECTION not in threshold_labels("hom_visibility", raw, below)
+
+
+def test_a_stand_in_jitter_is_used_at_its_bound(tmp_path):
+    # Council round 2 (R3): an 80 ps tagger leaves the jitter a stand-in upper limit; every
+    # corrected analysis raised KeyError on the missing jitter draws.
+    rng = np.random.default_rng(11)
+    t = np.sort(rng.uniform(0, 1e12, 20_000))
+    a = (np.floor((t + 17 + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64)
+    b = (np.floor((t + 1030 + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64)
+    cal = calibrate_delay(np.sort(a), np.sort(b), (CA, CB), bin_width_ps=80, tick_ps=80, backend="sim")
+    assert "jitter_sigma_ps" in cal.stand_in and cal.status == "ok"
+    write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 1, tzinfo=UTC))
+    policy = Policy.default().allow("hom_visibility", "window_capture", "test")
+    cset = CalibrationSet.load(
+        tmp_path, analysis="hom_visibility", dataset=DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC)), policy=policy
+    )
+    high = RunCounts(200_000, 4_000, 20, 1.0, 1_000_000, 1_000_000, (20.0, -20.0))
+    low = RunCounts(20_000, 4_000, 20, 1.0, 1_000_000, 1_000_000)
+    c = corrected_visibility(
+        "hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy, window_ps=800, declared_delay_ps=1013
+    )
+    assert np.isfinite(c.estimate.value) and "window_capture" in c.corrections
+    # A window narrow against the bound: the capture at the bound differs from that at zero jitter.
+    c = corrected_visibility(
+        "hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy, window_ps=80, declared_delay_ps=1013
+    )
+    assert JITTER_BOUND in c.labels
+
+
+def test_a_corrected_visibility_above_one_is_labelled_and_kept():
+    high = RunCounts(500, 1_600, 200, 1.0, 10_000, 10_000)
+    low = RunCounts(5, 1_600, 200, 1.0, 10_000, 10_000)
+    c = corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=None)
+    assert c.estimate.value > 1 and CORRECTED_ABOVE_ONE in c.labels
+
+
+def test_only_the_artifacts_the_model_read_are_cited():
+    # Council round 2 (R6): a deadtime-series artifact was cited though the model never read it,
+    # and afterpulsing reported by a dark calibration went unlabelled (R7).
+    import dataclasses
+
+    from dadl.calibration import deadtime
+
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    series = dataclasses.replace(
+        _dark(CA, seed=3), kind=deadtime.KIND, method=deadtime.METHOD, method_version=deadtime.METHOD_VERSION
+    )
+    cset = _member_set("hom_visibility", [_dark(CA, seed=1), _dark(CB, seed=2), series])
+    high = RunCounts(200_000, 4_000, 20, 1.0, 1_500_000, 1_500_000)
+    low = RunCounts(20_000, 4_000, 20, 1.0, 1_200_000, 1_200_000)
+    c = corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=policy, seed=1)
+    assert len(c.artifact_ids) == 2 and cset.members[2].artifact_id not in c.artifact_ids
+    assert AFTERPULSING_UNMODELLED not in c.labels
+    fitted = _member_set("hom_visibility", [_dark(CA, seed=1, afterpulse=True), _dark(CB, seed=2)])
+    c = corrected_visibility("hom_visibility", high, low, (CA, CB), calibrations=fitted, policy=policy, seed=1)
+    assert AFTERPULSING_UNMODELLED in c.labels
+
+
+def test_a_rate_drift_between_fringe_acquisitions_is_labelled():
+    # Council round 2 (H1): +6% pair rate on the max run moved V across 1/sqrt(2) unlabelled.
+    from dadl.analysis.fringe import SINGLES_DRIFT, TWO_POINT
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0)
+    dets = dict.fromkeys(("A+", "A-", "B+", "B-"), det)
+    for drift, labelled in ((0.0, False), (0.06, True)):
+        rng = np.random.default_rng(100)
+        rmax = simulate_chsh_setting(PairSource(pair_rate_per_s=2e5 * (1 + drift), visibility=0.70), 0.0, 0.0, dets, 2.0, rng)
+        rmin = simulate_chsh_setting(PairSource(pair_rate_per_s=2e5, visibility=0.70), 0.0, 90.0, dets, 2.0, rng)
+        runs = {"max": {"A": rmax["A+"], "B": rmax["B+"]}, "min": {"A": rmin["A+"], "B": rmin["B+"]}}
+        r, counts = fringe_from_tags(runs, Window(width_ps=2000, source="plan"))
+        assert TWO_POINT in r.labels
+        assert (SINGLES_DRIFT in r.labels) == labelled
+        assert counts["singles_ratio_a"] == pytest.approx(1 + drift, abs=0.02)

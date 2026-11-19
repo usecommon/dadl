@@ -16,12 +16,20 @@ used on its dataset:
   Q4): an artifact whose raw input hashes overlap the dataset's raises `GuardrailRefusal`. There
   is no override: reusing the data narrows the intervals, and the fix is a joint fit.
 
+Disjointness compares whole tag-array and file hashes: a calibration made on a slice or a copy
+with any change of the analysed run is not caught. Without a `DatasetContext` none of the
+use-time checks runs (disjointness, validity, conditions); the set is labelled `NOT_CHECKED`.
+
+One artifact per kind and channel: with calibrations before and after the run, pass the one to
+use; the drift between them is not propagated.
+
 Draws (`CalibrationSet.draws`): the columns of one artifact share a sample index, so parameters
 fitted together keep their correlation; different artifacts are drawn independently, each from
 a generator keyed on the seed and its own artifact ID (the rule of `draws_rng`, cycle 3.1).
 Stand-in columns (uniform below an upper limit, not a posterior) are never drawn: they are
 returned as bounds, and phase 3 reports a corrected value at the bound and at zero, as a
-labelled range (decision D3).
+labelled range (decision D3). The forward model labels which parameter is a bound
+(`forward.DEAD_TIME_BOUND`, `forward.JITTER_BOUND`); the set does not.
 """
 
 from __future__ import annotations
@@ -51,7 +59,18 @@ EQUAL_RTOL = 1e-9
 
 MISFIT_ACCEPTED = "misfit calibration accepted"
 OUTSIDE_VALIDITY = "calibration outside its validity"
+#: Kept for compatibility; no longer added by `CalibrationSet.load` (the forward model labels the
+#: parameter that is a bound).
 BOUND_ONLY = "parameter known only as an upper limit"
+NOT_CHECKED = (
+    "calibrations not checked against the dataset (no DatasetContext: disjointness, validity and conditions not tested)"
+)
+SERIES_UNUSED = (
+    "deadtime-series artifacts present but not used: the forward model takes the dark dead time until M5"
+)
+#: Analyses whose forward model does not read deadtime-series artifacts (skipped when `kinds` is None).
+_NO_SERIES = ("hom_visibility", "bell_visibility", "chsh")
+_SERIES_KIND = "deadtime-series"
 
 _RAW_ROLES = ("raw-tags", "raw-file")
 
@@ -201,6 +220,8 @@ class CalibrationSet:
     analysis: str
     members: tuple[Member, ...]
     labels: tuple[str, ...]
+    #: Whether the use-time checks ran against a `DatasetContext`.
+    dataset_checked: bool = True
 
     @classmethod
     def load(
@@ -217,16 +238,23 @@ class CalibrationSet:
 
         `channels` and `kinds` select which artifacts to keep (an artifact is kept if any of its
         channels is listed). Two kept artifacts of the same kind and channels are ambiguous and
-        refused. Without `dataset`, only the misfit check runs; analyses must pass one.
+        refused. Without `dataset`, only the misfit check runs and the set is labelled
+        `NOT_CHECKED`; analyses must pass one. With `kinds` None, deadtime-series artifacts are
+        skipped for the HOM, fringe and CHSH analyses (their forward model does not read them) and
+        the set is labelled `SERIES_UNUSED`.
         """
         policy = policy or Policy.default()
         want_ch = set(channels) if channels is not None else None
         want_kind = set(kinds) if kinds is not None else None
         members: list[Member] = []
+        skipped_series = False
         for path in _artifact_files(sources):
             manifest, _ = read_artifact(path)
             cal = load_calibration(path)
             if want_kind is not None and cal.kind not in want_kind:
+                continue
+            if want_kind is None and cal.kind == _SERIES_KIND and analysis in _NO_SERIES:
+                skipped_series = True
                 continue
             if want_ch is not None and not want_ch & set(cal.channels):
                 continue
@@ -244,11 +272,13 @@ class CalibrationSet:
         labels: list[str] = []
         for m in members:
             labels += _check(m, analysis, policy, dataset)
-        if any(m.calibration.stand_in for m in members):
-            labels.append(BOUND_ONLY)
+        if skipped_series:
+            labels.append(SERIES_UNUSED)
+        if dataset is None:
+            labels.append(NOT_CHECKED)
         if policy.is_modified:
             labels.insert(0, POLICY_MODIFIED)
-        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)))
+        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None)
 
     @property
     def artifact_ids(self) -> tuple[str, ...]:
@@ -286,6 +316,8 @@ class CalibrationSet:
 __all__ = [
     "BOUND_ONLY",
     "MISFIT_ACCEPTED",
+    "NOT_CHECKED",
+    "SERIES_UNUSED",
     "OUTSIDE_VALIDITY",
     "TEMPERATURE_TOLERANCE_K",
     "CalibrationSet",

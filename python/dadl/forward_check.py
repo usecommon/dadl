@@ -18,9 +18,9 @@ The check runs only where the model uses the peak shape: when a delay-jitter cal
 pair gives the window capture. A flagged analysis is refused (`Misspecified`) unless the policy allows `misfit_forward_model`;
 then the corrected value carries `FORWARD_MISFIT_ACCEPTED`.
 
-What it does not check: the calibrated delay and jitter against the analysed run's own (they are
-refitted here, so a drift between calibration and run is not seen), and anything outside the
-window.
+What it does not check: anything outside the window. For CHSH the calibrated delays are compared
+with the analysed peaks through the window capture (`chsh`); for HOM and fringe a drift between
+calibration and run is not seen (the delay and jitter are refitted here).
 """
 
 from __future__ import annotations
@@ -144,6 +144,87 @@ class _ShapeModel:
         return float(np.sum(mu - self.n * np.log(mu)))
 
 
+def _layout(pair: PairData, tick: int) -> tuple[int, int, int, float]:
+    """(shift, half, bin width, starting jitter) of a pair's histogram at `tick`."""
+    shift = int(round(pair.declared_delay_ps / tick)) * tick
+    half = int(pair.window_ps)
+    half = -(-half // tick) * tick
+    sigma0 = pair.jitter_ps if pair.jitter_ps and pair.jitter_ps > 0 else max(half / 10, tick)
+    width = max(tick, int(sigma0 / 3) // tick * tick)
+    # Keep the bin count bounded for wide windows against narrow peaks.
+    width = max(width, -(-(2 * half) // 4000) // tick * tick or tick)
+    return shift, half, width, sigma0
+
+
+def _edges(hist: np.ndarray, half: int, width: int) -> np.ndarray:
+    edges = -half + width * np.arange(hist.size + 1, dtype=float)
+    edges[-1] = min(edges[-1], float(half))
+    return edges
+
+
+def fit_peak(
+    hist: np.ndarray,
+    edges: np.ndarray,
+    tick: float,
+    d0: float,
+    sigma0: float,
+    offsets: Sequence[float],
+    *,
+    polish: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Poisson maximum-likelihood fit of the forward model's shape (`_ShapeModel`) to a histogram:
+    (theta, expected counts per bin). theta = (log bL, log A, d, log sigma, log bR).
+
+    Starts: the jitter at sigma0, twice and half it, with the background from the bins more than
+    5 sigma0 from d0 (or a floor), and once more with the background from the three outer bins
+    each side. The floor start alone stalled on a clean histogram whose peak fills the window (p
+    about 1e-206 at one seed; council round 2).
+
+    With `polish`, a Nelder-Mead search continues from the best start. L-BFGS-B often stops early
+    on the background step at d, leaving the delay a few sd off (-386 ps for a -400 ps peak with
+    6,000 pairs); the predictive check tolerates that, the window capture does not."""
+    hist = np.asarray(hist, dtype=float)
+    lo, hi = edges[:-1], edges[1:]
+    width = float(np.max(hi - lo))
+    half = float(-edges[0])
+    model = _ShapeModel(hist, edges, tick, offsets)
+    floor = 0.5 / (2 * half)
+    far = np.abs(0.5 * (lo + hi) - d0) > 5 * sigma0 + max((abs(o) for o in offsets), default=0.0)
+    bg = float(np.median(hist[far])) / width if far.any() else floor
+    bg = max(bg, floor)
+    outer = max(float(np.median(np.r_[hist[:3], hist[-3:]])) / width, floor)
+    total = float(hist.sum()) + 1.0
+    lb = math.log(1e-6 / (2 * half))
+    bounds = [
+        (lb, math.log(10 * total / width)),
+        (0.0, math.log(10 * total)),
+        (-half, half),
+        (math.log(max(tick / 100, 0.01)), math.log(2 * half)),
+        (lb, math.log(10 * total / width)),
+    ]
+    starts = [(bg, s) for s in dict.fromkeys((sigma0, sigma0 * 2, sigma0 / 2))]
+    if outer != bg:
+        starts.append((outer, sigma0))
+    best = None
+    for b0, s_start in starts:
+        peak = max(float(hist.sum()) - b0 * 2 * half, 1.0)
+        x0 = np.array([math.log(b0), math.log(peak), d0, math.log(max(s_start, tick / 50)), math.log(b0)])
+        x0 = np.clip(x0, [lo for lo, _ in bounds], [hi for _, hi in bounds])
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            r = optimize.minimize(model.nll, x0, method="L-BFGS-B", bounds=bounds, options={"ftol": 1e-14, "maxiter": 2000})
+        if best is None or (np.isfinite(r.fun) and r.fun < best.fun):
+            best = r
+    if polish:
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            r = optimize.minimize(
+                model.nll, best.x, method="Nelder-Mead", bounds=bounds,
+                options={"maxiter": 5000, "xatol": 1e-4, "fatol": 1e-6},
+            )
+        if np.isfinite(r.fun) and r.fun < best.fun:
+            best = r
+    return best.x, model.mu(best.x)
+
+
 def pair_pvalue(pair: PairData) -> float | None:
     """The grouped Pearson p-value of the forward model's shape on one histogram, or None when
     the region holds too few coincidences to check."""
@@ -152,42 +233,43 @@ def pair_pvalue(pair: PairData) -> float | None:
     if a.size == 0 or b.size == 0:
         return None
     tick = tag_tick(a, b)
-    shift = int(round(pair.declared_delay_ps / tick)) * tick
-    half = int(pair.window_ps)
-    half = -(-half // tick) * tick
-    sigma0 = pair.jitter_ps if pair.jitter_ps and pair.jitter_ps > 0 else max(half / 10, tick)
-    width = max(tick, int(sigma0 / 3) // tick * tick)
-    # Keep the bin count bounded for wide windows against narrow peaks.
-    width = max(width, -(-(2 * half) // 4000) // tick * tick or tick)
+    shift, half, width, sigma0 = _layout(pair, tick)
     hist = cross_correlation(a, b - shift, width, half).astype(float)
     if hist.sum() < MIN_COUNTS:
         return None
-    edges = -half + width * np.arange(hist.size + 1, dtype=float)
-    edges[-1] = min(edges[-1], float(half))
-    model = _ShapeModel(hist, edges, tick, pair.offsets_ps)
+    edges = _edges(hist, half, width)
     d0 = float(pair.delay_ps) + (pair.declared_delay_ps - shift)
-    far = np.abs(0.5 * (edges[:-1] + edges[1:]) - d0) > 5 * sigma0 + max((abs(o) for o in pair.offsets_ps), default=0.0)
-    bg = float(np.median(hist[far])) / width if far.any() else 0.5 / (2 * half)
-    bg = max(bg, 0.5 / (2 * half))
-    peak = max(float(hist.sum()) - bg * 2 * half, 1.0)
-    total = float(hist.sum()) + 1.0
-    lb = math.log(1e-6 / (2 * half))
-    bounds = [
-        (lb, math.log(10 * total / width)),
-        (0.0, math.log(10 * total)),
-        (-float(half), float(half)),
-        (math.log(max(tick / 100, 0.01)), math.log(2 * half)),
-        (lb, math.log(10 * total / width)),
-    ]
-    best = None
-    for s_start in dict.fromkeys((sigma0, sigma0 * 2, sigma0 / 2)):
-        x0 = np.array([math.log(bg), math.log(peak), d0, math.log(max(s_start, tick / 50)), math.log(bg)])
-        x0 = np.clip(x0, [lo for lo, _ in bounds], [hi for _, hi in bounds])
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            r = optimize.minimize(model.nll, x0, method="L-BFGS-B", bounds=bounds, options={"ftol": 1e-14, "maxiter": 2000})
-        if best is None or (np.isfinite(r.fun) and r.fun < best.fun):
-            best = r
-    return _grouped_pearson(model.n, model.mu(best.x))
+    _, mu = fit_peak(hist, edges, tick, d0, sigma0, pair.offsets_ps)
+    return _grouped_pearson(hist, mu)
+
+
+def pooled_peak(pairs: Sequence[PairData]) -> tuple[float, float] | None:
+    """(offset of the pair peak from the declared delay, jitter), both in ps, fitted once to the
+    summed histograms of `pairs` (one channel pair and declared delay, such as one outcome pair
+    over a Bell run's settings), or None below `MIN_COUNTS`. The fit starts at the pairs' given
+    delay and jitter, or at the histogram's highest bin without a jitter."""
+    pairs = [p for p in pairs if np.asarray(p.a).size and np.asarray(p.b).size]
+    if not pairs:
+        return None
+    first = pairs[0]
+    if any(p.declared_delay_ps != first.declared_delay_ps or p.window_ps != first.window_ps for p in pairs):
+        raise ValueError("pooled pairs must share the declared delay and window")
+    tick = math.gcd(*(tag_tick(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64)) for p in pairs))
+    shift, half, width, sigma0 = _layout(first, tick)
+    hist = sum(
+        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, width, half).astype(float)
+        for p in pairs
+    )
+    if hist.sum() < MIN_COUNTS:
+        return None
+    edges = _edges(hist, half, width)
+    if first.jitter_ps:
+        d0 = float(first.delay_ps) + (first.declared_delay_ps - shift)
+    else:
+        k = int(np.argmax(hist))
+        d0 = 0.5 * float(edges[k] + edges[k + 1])
+    theta, _ = fit_peak(hist, edges, tick, d0, sigma0, first.offsets_ps, polish=True)
+    return float(theta[2]) - (first.declared_delay_ps - shift), math.exp(float(theta[3]))
 
 
 def run_check(pairs: Sequence[PairData], alpha: float = MISFIT_ALPHA) -> CheckResult:

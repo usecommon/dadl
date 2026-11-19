@@ -120,9 +120,20 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
         print(f"  Accidentals not subtracted (estimate {counts['accidentals']:.3g}); see the labels.")
     ref = abs(setup.reference_delay_ps or 0)
     if ref > 0.1 * setup.window.width_ps:
+        effect = (
+            "the raw V reads low; the corrected value models the capture."
+            if "window_capture" in result.corrections
+            else "V reads low."
+        )
         print(
             f"  warning: the reference delay ({ref:g} ps) is not small against the {setup.window.width_ps} ps window: "
-            "the fixed grid loses part of the split peak at +-delay, and V reads low."
+            f"the fixed grid loses part of the split peak at +-delay, and {effect}"
+        )
+    coherence = (setup.data.get("source") or {}).get("coherence_time_ps") if isinstance(setup.data, dict) else None
+    if coherence and ref < 3 * float(coherence):
+        print(
+            f"  warning: the reference delay ({ref:g} ps) is less than three coherence times ({float(coherence):g} ps "
+            "each): the reference still interferes, and V reads low."
         )
 
 
@@ -895,7 +906,7 @@ def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> No
     if "corrected_at_zero_dead_time" in counts:
         print(
             f"  Dead time known only as an upper limit: {symbol} = {counts['corrected_at_zero_dead_time']:.4f} at zero, "
-            f"{counts['corrected_at_bound_dead_time']:.4f} at the bound (the corrected value uses the bound)"
+            f"{counts['corrected_at_bound_dead_time']:.4f} at the bound (the corrected value and interval use the bound)"
         )
     if result.artifact_ids:
         print("  Calibrations: " + ", ".join(a[:12] for a in result.artifact_ids))

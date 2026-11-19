@@ -52,3 +52,40 @@ def test_sparse_histograms_are_skipped():
     empty = np.array([], dtype=np.int64)
     r = run_check([PairData("none", empty, np.arange(10, dtype=np.int64), 0.0, 1_000)])
     assert r.pvalues == {} and r.pvalue == 1.0 and not r.flagged
+
+
+def test_a_peak_that_fills_the_window_is_fitted_from_the_outer_bins(tmp_path):
+    # Council round 2: a 3% timing tail, 300 ps window, 80 ps reference delay. The background start
+    # from the floor stalled (p about 1e-206 on the reference histogram at this seed); the start
+    # from the outer bins reaches the fit (p about 0.4).
+    from dadl.analysis.chsh import Window
+    from dadl.analysis.hom import hom_from_tags
+    from dadl.analysis.propagation import ACQUIRED, CREATED, HOM_CHANNELS, POLICY
+    from dadl.artifact import write_artifact
+    from dadl.calibration.delay import calibrate_delay
+    from dadl.propagate import CalibrationSet, DatasetContext
+    from dadl.sim import simulate_pairs
+
+    def tail(tags, rng):
+        out = {}
+        for k, t in tags.items():
+            t = np.asarray(t).copy()
+            m = rng.random(t.size) < 0.03
+            t[m] += np.round(rng.exponential(100.0, m.sum())).astype(np.int64)
+            out[k] = np.unique(t)
+        return out
+
+    src = PairSource(pair_rate_per_s=2.0e5, visibility=0.92, coherence_time_ps=10.0)
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=30.0)
+    rng = np.random.default_rng(2007)
+    a, b = simulate_pairs(src.pair_rate_per_s, det, det, 0.05, rng, ())
+    tb = tail({"a": a, "b": b}, rng)
+    cal = calibrate_delay(tb["a"], tb["b"], HOM_CHANNELS, backend="sim", seed=2007, n_draws=400)
+    write_artifact(cal, tmp_path, accept_misfit=True, created=CREATED)
+    cset = CalibrationSet.load(tmp_path, analysis="hom_visibility", policy=POLICY, dataset=DatasetContext(acquired=ACQUIRED))
+    runs = {n: tail(simulate_hom(src, det, det, d, 0.5, rng, ()), rng) for n, d in (("dip", 0.0), ("reference", 80.0))}
+    _, counts = hom_from_tags(
+        runs, Window(width_ps=300, source="plan"), policy=POLICY, calibrations=cset, channels=HOM_CHANNELS,
+        seed=2007, reference_delay_ps=80.0,
+    )
+    assert counts["forward_check_p"] > 0.1

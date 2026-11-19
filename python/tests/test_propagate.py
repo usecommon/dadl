@@ -16,7 +16,9 @@ from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import (
     BOUND_ONLY,
     MISFIT_ACCEPTED,
+    NOT_CHECKED,
     OUTSIDE_VALIDITY,
+    SERIES_UNUSED,
     CalibrationSet,
     DatasetContext,
     condition_mismatches,
@@ -142,7 +144,8 @@ def test_stand_in_columns_are_bounds_not_draws(tmp_path):
         d.column("dark-afterpulse-deadtime", "p", A)
     lo, hi = d.bound("dark-afterpulse-deadtime", "p", A)
     assert lo == 0 and hi == pytest.approx(s.get("dark-afterpulse-deadtime").estimates["p"].high)
-    assert BOUND_ONLY in s.labels
+    # The forward model says which parameter is a bound (council round 2); the set does not.
+    assert BOUND_ONLY not in s.labels
 
 
 # -- misfits -------------------------------------------------------------------------------------
@@ -237,4 +240,54 @@ def test_condition_rules():
 
 def test_without_a_dataset_only_the_misfit_check_runs(tmp_path):
     write(make_cal(A, seed=1, conditions={"tagger_HWSync_Offset": 0.0}), tmp_path, valid_until=dt.datetime(2026, 11, 3, tzinfo=UTC))
-    assert CalibrationSet.load(tmp_path, analysis=ANALYSIS).labels == ()
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS)
+    assert s.labels == (NOT_CHECKED,) and not s.dataset_checked
+
+
+# -- council round 2 ------------------------------------------------------------------------------
+
+
+def test_validity_starts_at_acquisition(tmp_path):
+    # Calibration data taken 09:00, the artifact written 09:30 and valid to 18:00: a dataset taken
+    # at 09:10 is covered (validity started at 09:30 before; council round 2).
+    day = dt.datetime(2026, 11, 2, tzinfo=UTC)
+    write(
+        make_cal(A, seed=1), tmp_path, created=day.replace(hour=9, minute=30), acquired=day.replace(hour=9),
+        valid_until=day.replace(hour=18),
+    )
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(acquired=day.replace(hour=9, minute=10)))
+    assert s.members[0].manifest["valid_for"]["from"].startswith("2026-11-02T09:00")
+    with pytest.raises(StaleCalibration, match="outside"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(acquired=day.replace(hour=8, minute=50)))
+
+
+def test_deadtime_series_artifacts_are_skipped_where_unused(tmp_path):
+    write(make_cal(A, seed=1), tmp_path)
+    write(make_cal(A, seed=2, kind="deadtime-series"), tmp_path)
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    assert [m.kind for m in s.members] == ["dark-afterpulse-deadtime"] and SERIES_UNUSED in s.labels
+    # Asked for by kind, it is kept.
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), kinds=("deadtime-series",))
+    assert [m.kind for m in s.members] == ["deadtime-series"] and SERIES_UNUSED not in s.labels
+
+
+def test_a_set_loaded_without_a_dataset_labels_the_corrected_value(tmp_path):
+    # Council round 2 (R4): a delay calibrated on the analysed tags, loaded without a
+    # DatasetContext, gave a corrected value with neither refusal nor label.
+    from dadl.analysis.chsh import Window
+    from dadl.analysis.hom import hom_from_tags
+    from dadl.calibration.delay import calibrate_delay
+    from dadl.sim import PairSource, simulate_hom
+
+    rng = np.random.default_rng(2)
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=30_000, jitter_sigma_ps=30.0)
+    src = PairSource(pair_rate_per_s=5e5, visibility=0.9, coherence_time_ps=2.0)
+    runs = {k: simulate_hom(src, det, det, d, 0.2, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
+    ref = runs["reference"]
+    write(calibrate_delay(np.sort(ref["A"]), np.sort(ref["B"]), (A, B), backend="sim", seed=1), tmp_path)
+    policy = Policy.default().allow(ANALYSIS, "window_capture", "test")
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, policy=policy)
+    r, _ = hom_from_tags(
+        runs, Window(width_ps=1000, source="plan"), policy=policy, calibrations=s, channels=(A, B), reference_delay_ps=20.0
+    )
+    assert "window_capture" in r.corrections and NOT_CHECKED in r.labels

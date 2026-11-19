@@ -54,11 +54,13 @@ experiment, its guardrails and its roadmap.
   installed, dead time, coincidences and histograms run in Rust (about 40-60x
   faster; about 5x for cross-correlation); `dadl.backend()` says which is in use.
 
-Not yet: calibration uncertainty in results, corrected CHSH, signing,
-the explain engine, MCP.
+Not yet: signing, the explain engine, MCP.
 
-Uncertainties today are statistical only. Analyses (S, visibility) report a
-Gaussian 1σ error; visibilities also always carry an exact 95% interval.
+Raw values (S, visibility) report a statistical Gaussian 1σ error;
+visibilities also always carry an exact 95% interval. Corrected values from
+the forward model (HOM, fringe and CHSH with `--calibrations`) include the
+calibration uncertainty, by joint Monte Carlo over counts and calibration
+draws.
 Calibrations report 95% intervals that need not be symmetric, validated by
 simulation; each artifact's `uncertainty` block lists the components not
 included (tagger timebase, temperature sensor, connectors, declared delays).
@@ -86,11 +88,13 @@ plainly:
   mean dark gap; when dark rate × time constant exceeds about 0.01 (a hot
   InGaAs detector), the afterpulse probability reads high and its interval
   covers less than 95% (72–75% at 0.04), and the calibration says so.
-- **Crosstalk is simulated, not calibrated or labelled.** The simulator
+- **Crosstalk is simulated, not calibrated.** The simulator
   takes opt-in crosstalk links between channels (`dadl.sim.Crosstalk`:
   probability, offset, jitter; off by default, and not yet a `setup.yaml`
-  field), but no calibration fits a crosstalk matrix and no analysis flags
-  it. On the `hom-snspd` example, 1% zero-offset crosstalk from A to B
+  field), but no calibration fits a crosstalk matrix. A corrected value is
+  checked for it only with a delay-jitter artifact (the forward model's
+  predictive check refuses crosstalk in the window); raw values and corrected
+  values without one are not flagged. On the `hom-snspd` example, 1% zero-offset crosstalk from A to B
   lowers V from 0.919 to 0.904 (0.889 with 1% each way), unlabelled; at an
   offset outside the coincidence window (a breakdown flash several ns late)
   it leaves V unchanged. Twilight counts are not modelled.
@@ -156,6 +160,31 @@ plainly:
   2·m_a·m_b, upward when both sides lean the same way: 0.6/0.4 on both sides
   read S = 2.03 from a source at 1.98. Results where the singles show this
   carry an "output imbalance" label; swap outputs or normalise per detector.
+  Corrected S does not correct detector efficiencies: an output imbalance
+  biases it as it does raw S (0.6/0.4 on both sides: corrected S 2.033 for a
+  1.980 source, 13 sigma high). The "output imbalance" label applies to both
+  values.
+- **Delays that miss the pair peaks can raise S.** A delay error on some
+  channels changes the window capture of some outcome pairs and not others:
+  A+ and B+ 400 ps late, declared 0, read S = 2.20 for a 1.98 source (2.05 at
+  200 ps). Each outcome pair's peak is fitted over the four settings; S
+  reweighted by those captures is in the counts, and a result whose raw S
+  differs from it by more than half a standard error carries an "unequal
+  window capture" label. Declare the delays from a pair calibration.
+- **Corrected CHSH** is secondary, never the Bell claim. Calibrated delays
+  that no longer match the analysed peaks (a drift since calibration) are
+  refused as `Misspecified`: the predictive check refits the delay, so it
+  would not see the drift. A dead time known only as an upper limit (an SNSPD,
+  or a short dark run) is used at the bound for the value and its interval;
+  the counts give the value at zero dead time as well (the truth lies
+  between), and a range wider than the error is labelled: quote the range.
+  The predictive check fits a Gaussian peak. A timing tail of a few percent
+  (SPAD diffusion, SNSPD) fails it on a Bell run's 16 histograms even when the
+  delay artifacts pass (3% of clicks with a 300 ps tail: 6 of 8 runs refused),
+  although a tail common to all channels does not bias S. Until the IRF tail
+  (D8) lands, real-detector Bell runs will usually need
+  `--allow misfit_forward_model=...`, which also stops the check flagging
+  crosstalk.
 - **Dead time can raise S.** A recorded click makes the partner arm's dead
   state depend on the outcome, so |E| grows with η²Rτ: a V = 0.7 source
   (S = 1.98) read S = 2.14 with a 1 µs dead time at 3·10⁶ pairs/s and
@@ -194,9 +223,11 @@ plainly:
   by the fitted jitter when the delay fit passes its check.
 - **Off-peak checks have limited power.** A side-window excess smaller than
   about twice the accidentals interval can pass the check unseen.
-- **Corrected visibility** is refused when the accidentals exceed the minimum
-  count (or the corrected value would exceed 1), which removes the datasets
-  nearest V = 1; report the raw value with its exact interval there.
+- **Corrected visibility** by subtraction (no calibrations) is refused when
+  the accidentals exceed the minimum count (or the corrected value would
+  exceed 1), which removes the datasets nearest V = 1; report the raw value
+  with its exact interval there. The forward model keeps the unclipped value
+  and labels it.
 - **HOM** is two-fold and two-point: the visibility at the declared dip delay
   against a reference delay, on a 50:50 beamsplitter, with detectors that do
   not resolve photon number. Four-fold heralded HOM, delay-scan fits and
@@ -316,6 +347,14 @@ and the result says so.
 With a delay-jitter artifact the forward model's peak shape is also checked against the
 analysed coincidences; something in the window it lacks (crosstalk, a misdeclared reference
 delay) is refused as `Misspecified` rather than corrected with an interval that does not know it.
+
+For a CHSH setup, `--calibrations` adds a corrected S as a secondary value; the headline stays
+raw. The default CHSH rule allows no correction, so each is an explicit policy change:
+`--allow dead_time=... --allow accidental_subtraction=... --allow window_capture=...`. Dark artifacts must cover
+every channel and delay-jitter artifacts all four channel pairs.
+
+One artifact per kind and channel: with calibrations before and after the run, pass the one to
+use; the drift between them is not propagated.
 
 From Python:
 

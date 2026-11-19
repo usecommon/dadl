@@ -22,7 +22,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from dadl.errors import GuardrailRefusal
 from dadl.result import Estimate
@@ -267,10 +267,14 @@ def _mirror(est: Estimate) -> Estimate:
     return Estimate(-est.value, est.stderr, low, high)
 
 
-def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = None) -> tuple[str, ...]:
+def threshold_labels(
+    analysis: str, raw: Estimate, corrected: Estimate | None = None, ends: Sequence[float] = ()
+) -> tuple[str, ...]:
     """Labels that qualify a value against the analysis's physical threshold.
 
-    - "threshold crossed only after correction": raw is below, corrected at or above.
+    - "threshold crossed only after correction": raw is below, and the corrected value or one of
+      `ends` (the corrected value at the ends of a range, such as a dead time from zero to its
+      bound) at or above.
     - "within 1.96 sigma of the threshold": the 95 % Gaussian interval of the
       headline (raw) value, or of the corrected value, contains the threshold.
     - "Gaussian error invalid at boundary": a stderr of zero (e.g. a correlator
@@ -282,12 +286,13 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
         # S = -2.01 +- 0.02 carried no label).
         raw = _mirror(raw)
         corrected = None if corrected is None else _mirror(corrected)
+        ends = [-e for e in ends]
     if raw.stderr == 0 or (corrected is not None and corrected.stderr == 0):
         labels.append(GAUSSIAN_INVALID)
     threshold = THRESHOLDS.get(analysis)
     if threshold is None:
         return tuple(labels)
-    if corrected is not None and raw.value < threshold <= corrected.value:
+    if corrected is not None and raw.value < threshold <= max((corrected.value, *ends)):
         labels.append(THRESHOLD_AFTER_CORRECTION)
     for est in (raw, corrected):
         if est is None:

@@ -47,8 +47,11 @@ def forward_from_counts(
     window_ps: int,
     declared_delay_ps: float,
 ) -> tuple[object, dict[str, float]]:
-    """The forward-model correction and the counts it adds (the D3 range when a dead time is a bound)."""
-    from dadl.forward import bound_range, corrected_visibility
+    """The forward-model correction and the counts it adds (the D3 range when a dead time is a bound,
+    labelled when it is wider than the corrected value's standard error)."""
+    import dataclasses
+
+    from dadl.forward import DEAD_TIME_RANGE_WIDE, bound_range, corrected_visibility
 
     grid = {"window_ps": window_ps, "declared_delay_ps": declared_delay_ps}
     fwd = corrected_visibility(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed, **grid)
@@ -57,7 +60,14 @@ def forward_from_counts(
     if rng is not None:
         extra["corrected_at_zero_dead_time"] = rng["at_zero"]
         extra["corrected_at_bound_dead_time"] = rng["at_bound"]
+        if abs(rng["at_bound"] - rng["at_zero"]) > fwd.estimate.stderr:
+            fwd = dataclasses.replace(fwd, labels=fwd.labels + (DEAD_TIME_RANGE_WIDE,))
     return fwd, extra
+
+
+def range_ends(extra: dict[str, float]) -> tuple[float, ...]:
+    """The corrected value at both ends of the D3 range, if any (for `threshold_labels`)."""
+    return tuple(extra[k] for k in ("corrected_at_zero_dead_time", "corrected_at_bound_dead_time") if k in extra)
 
 
 def check_calibration_args(subtract_accidentals: bool | None, channels) -> None:

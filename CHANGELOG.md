@@ -68,7 +68,10 @@ and is versioned separately from the packages.
   setting pair's four outcome combinations get their own accidentals (off-peak bins), live
   fraction and grid capture. The live fraction's conditional term models dead-time selection:
   at 3e6 pairs/s and 50 ns, raw S read 1.6 sigma high on average over 12 runs and the corrected
-  S 0.26 sigma (+-0.29). Efficiencies are not corrected (fair sampling stays assumed).
+  S 0.26 sigma low (+-0.29). The corrected point uses each dark artifact's reported dead time, the
+  shortest gap: an upper edge, high by about one mean gap divided by the number of gaps. The
+  interval comes from the posterior draws, so the corrected point sits low in it (about 0.4 sd for
+  S in chsh-dead-time). Efficiencies are not corrected (fair sampling stays assumed).
 - The default CHSH rule allows no correction: each of `dead_time`, `accidental_subtraction` and
   `window_capture` needs `Policy.allow("chsh", ...)`. Delay-jitter artifacts must cover all four
   channel pairs, and dark artifacts every channel, or the corrected value is refused rather than
@@ -136,6 +139,38 @@ and is versioned separately from the packages.
   - `coverage.merge` refuses shards that disagree on the gate or its rule.
   - coverage re-run locally at 1,000 replicates: tau_p covered 95.5% (series-spad) and 93.8%
     (passive-quench), tau_np 99.2% and 97.3%, misfits 0.3% and 0%.
+
+- Review council round 2 (corrected values; no method version changes):
+  - a dead time known only as an upper limit gives the corrected value and its interval at the
+    bound (the two-point value was at zero, so it could fall outside its own interval); CHSH
+    records `corrected_at_zero_dead_time` and `corrected_at_bound_dead_time` in its counts as HOM
+    and fringe do. "Threshold crossed only after correction" also counts the range's ends, and a
+    range wider than the corrected value's error is labelled;
+  - a stand-in jitter (a coarse tagger's upper limit, status ok) is used at its bound and labelled
+    when the capture depends on it (every corrected analysis raised KeyError);
+  - raw CHSH fits each outcome pair's peak over the four settings and records the offsets and S
+    reweighted by the window captures; delays that miss the peaks are labelled "unequal window
+    capture" (A+ and B+ 400 ps late, declared 0: S 2.20 for 1.98, unlabelled before);
+  - corrected CHSH refuses (`Misspecified`, override `misfit_forward_model`) calibrated delays that
+    no longer match the analysed peaks: a 200 ps drift since calibration read corrected S 2.03-2.05
+    for 1.98 and passed the predictive check;
+  - the predictive check adds a start with the background from the outer bins (the floor start
+    stalled on a clean histogram whose peak fills the window: p about 1e-206);
+  - `hom_from_tags(calibrations=...)` requires `reference_delay_ps` (without it the reference was
+    treated as unsplit and V read 10 sigma low, unlabelled);
+  - fringe results carry a two-point label, record each channel's singles ratio between the max and
+    min acquisitions, and are labelled when it differs beyond 4 sigma (+3% pump drift on the max run
+    read 0.707 for 0.699);
+  - a forward-model corrected visibility above 1 is labelled, not clipped;
+  - corrected values cite only the artifacts the model read; `deadtime-series` artifacts are
+    skipped (and labelled) for HOM, fringe and CHSH; the set-level "parameter known only as an upper
+    limit" label is dropped (the forward model says which parameter); afterpulsing reported by a
+    dark artifact is labelled as not modelled; a set loaded without a `DatasetContext` is labelled;
+    the CHSH accidentals label says efficiencies are not corrected; the HOM two-point label names a
+    reference delay inside the coherence time, and the CLI warns when setup.yaml's
+    `coherence_time_ps` makes it so; the CLI's "V reads low" warning says the corrected value models
+    the capture when it does;
+  - an artifact's `valid_for` starts at `acquired` when recorded, not at `created`.
 
 ### Published results as executable tests
 

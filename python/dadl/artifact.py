@@ -183,7 +183,8 @@ def build_manifest(
 
     `created` (when the record was made) defaults to now (UTC); pass it explicitly to reproduce an
     artifact: with a fixed `created` the same data and code give the same ID, since draw seeds come
-    from the inputs. `acquired` is when the data were taken (from the tagger file when known). A
+    from the inputs. `acquired` is when the data were taken (from the tagger file when known); with
+`valid_until`, validity runs from `acquired` when given, else from `created`. A
     $SOURCE_DATE_EPOCH in the environment is deliberately not read: packaging environments set it,
     and it silently backdated records (calibration-lab review, cycle 3).
     """
@@ -250,7 +251,9 @@ def build_manifest(
     if cal.conditions:
         manifest["conditions"] = dict(cal.conditions)
     if valid_until is not None:
-        manifest["valid_for"] = {"from": manifest["created"], "to": _utc(valid_until)}
+        # Validity starts when the calibration data were taken, if recorded: a dataset taken between
+        # acquisition and writing was refused (council round 2).
+        manifest["valid_for"] = {"from": manifest.get("acquired", manifest["created"]), "to": _utc(valid_until)}
     return manifest, post
 
 

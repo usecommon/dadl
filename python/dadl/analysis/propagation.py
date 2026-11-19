@@ -26,6 +26,10 @@ check flags at least `MIN_FLAG_SHARE` of its replicates; its coverage is reporte
 (it is expected to fail: that is what the check is for).
 
 Regimes are declared before the first run (phase 3 plan, M3).
+
+The gate writes 400 draws per artifact (users get 2,000). With N_MC = 4,000 joint draws the
+interval ends have a Monte Carlo sd of about 4% of the joint standard error, the same at 400 and
+2,000 rows.
 """
 
 from __future__ import annotations
@@ -153,7 +157,10 @@ REGIMES: dict[str, Regime] = {
     ),
     # Dead-time selection (raw S about 1.6 sigma high at a source S of 1.98), with the dead time
     # from short dark runs: its uncertainty is comparable to the statistical error, so this is
-    # the regime where switching it off must undercover.
+    # the regime where switching it off must undercover. About 57% of its 0.1 s dark artifacts give
+    # the dead time as a bound (median 60 ns for 50 ns), so nearly every replicate corrects at least
+    # one channel at its bound: the regime tests the corrected value at the bound and the identified
+    # channels' draws, not the D3 range from zero to the bound.
     "chsh-dead-time": Regime(
         "chsh",
         PairSource(pair_rate_per_s=3.0e6, visibility=0.70),

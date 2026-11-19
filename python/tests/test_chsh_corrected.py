@@ -94,3 +94,139 @@ def test_channels_and_complete_pairs_are_required(data, tmp_path):
     partial = CalibrationSet.load(tmp_path, analysis="chsh", policy=POLICY, dataset=CTX)
     with pytest.raises(ValueError, match="every channel pair"):
         chsh(runs, WINDOW, POLICY, calibrations=partial, channels=IDS)
+
+
+# --- Council round 2 ----------------------------------------------------------------------------
+
+def _calibrate(directory, dets, rng, *, dark_s=None, pairs_s=0.05, rate=2e5):
+    created = dt.datetime(2026, 11, 1, tzinfo=UTC)
+    if dark_s:
+        for name, cid in IDS.items():
+            cal = calibrate_dark(simulate_dark(dets[name], dark_s, rng), cid, backend="sim", seed=1, n_draws=400)
+            write_artifact(cal, directory, accept_misfit=True, created=created)
+    for x in "+-":
+        for y in "+-":
+            a, b = simulate_pairs(rate, dets["A" + x], dets["B" + y], pairs_s, rng)
+            cal = calibrate_delay(a, b, (IDS["A" + x], IDS["B" + y]), backend="sim", seed=1, n_draws=400)
+            write_artifact(cal, directory, accept_misfit=True, created=created)
+
+
+def test_a_bounded_dead_time_gives_the_range_in_counts(tmp_path):
+    # Council round 2 (B2): an SNSPD's dark run identifies no dead time; corrected S is at the bound
+    # with the value at zero in the counts, and a range wider than the error is labelled.
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.forward import DEAD_TIME_BOUND, DEAD_TIME_RANGE_WIDE
+
+    det = DetectorParams(efficiency=0.8, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    dets = dict.fromkeys(IDS, det)
+    rng = np.random.default_rng(900)
+    _calibrate(tmp_path, dets, rng, dark_s=20.0, pairs_s=0.2, rate=1e5)
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=POLICY, dataset=CTX)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=5e4, visibility=0.95), dets, 1.0, rng, SETTINGS)
+    window = Window(width_ps=500, source="plan")
+    r = chsh(runs, window, POLICY, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    c = r.corrected
+    assert c.low <= c.value <= c.high
+    assert c.value == pytest.approx(r.counts["corrected_at_bound_dead_time"])
+    assert DEAD_TIME_BOUND in r.labels and DEAD_TIME_RANGE_WIDE in r.labels
+    delays_only = CalibrationSet(cset.analysis, tuple(m for m in cset.members if m.kind == DELAY_KIND), cset.labels)
+    r0 = chsh(runs, window, POLICY, settings_deg=SETTINGS, calibrations=delays_only, channels=IDS, seed=1)
+    assert r.counts["corrected_at_zero_dead_time"] == pytest.approx(r0.corrected.value, abs=1e-12)
+    assert "corrected_at_zero_dead_time" not in r0.counts
+
+
+def test_a_stand_in_jitter_corrects_chsh(tmp_path):
+    # Council round 2 (R3): a coarse tagger's jitter is an upper limit; CHSH raised KeyError.
+    import dataclasses
+
+    from dadl.forward import RunCounts, corrected_chsh
+    from dadl.analysis.chsh import SIGNS
+
+    rng = np.random.default_rng(11)
+    t = np.sort(rng.uniform(0, 1e12, 20_000))
+    a = np.sort((np.floor((t + 17 + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64))
+    b = np.sort((np.floor((t + 1030 + rng.normal(0, 3, t.size)) / 80) * 80).astype(np.int64))
+    coarse = calibrate_delay(a, b, (IDS["A+"], IDS["B+"]), bin_width_ps=80, tick_ps=80, backend="sim")
+    assert "jitter_sigma_ps" in coarse.stand_in
+    for x in "+-":
+        for y in "+-":
+            cal = dataclasses.replace(coarse, channels=(IDS["A" + x], IDS["B" + y]))
+            write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 1, tzinfo=UTC))
+    policy = _policy("accidental_subtraction", "window_capture")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=policy, dataset=CTX)
+    run = {(x, y): RunCounts(5_000 if x == y else 1_000, 400, 20, 1.0, 100_000, 100_000) for x in "+-" for y in "+-"}
+    c = corrected_chsh(
+        {k: run for k in SIGNS}, IDS, SIGNS, calibrations=cset, policy=policy, window_ps=1_000,
+        delays_ps={"B+": 1013.0, "B-": 1013.0},
+    )
+    assert np.isfinite(c.estimate.value) and "window_capture" in c.corrections
+
+
+MISDECLARED_DET = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=150.0)
+MISDECLARED_SRC = PairSource(pair_rate_per_s=2e5, visibility=0.70)
+
+
+def _late(shift_ps):
+    """A+ and B+ `shift_ps` later than A- and B-."""
+    import dataclasses
+
+    return {n: dataclasses.replace(MISDECLARED_DET, delay_ps=shift_ps if n in ("A+", "B+") else 0) for n in IDS}
+
+
+def test_delays_that_miss_the_pair_peaks_are_labelled():
+    # Council round 2 (B1): A+ and B+ 400 ps late, declared 0: raw S 2.20 for a 1.98 source, unlabelled.
+    from dadl.analysis.chsh import CAPTURE_IMBALANCE
+
+    truth = chsh_ideal(MISDECLARED_SRC.visibility, SETTINGS)
+    rng = np.random.default_rng(7)
+    runs = simulate_chsh(MISDECLARED_SRC, _late(400), 1.0, rng, SETTINGS)
+    prefix = CAPTURE_IMBALANCE.split("{")[0]
+    r = chsh(runs, Window(width_ps=1000, source="plan"), settings_deg=SETTINGS)
+    assert r.raw.value - truth > 20 * r.raw.stderr
+    assert any(lab.startswith(prefix) for lab in r.labels)
+    assert abs(r.counts["capture_reweighted_s"] - truth) < 3 * r.raw.stderr
+    assert r.counts["capture_offsets_ps"]["A+/B-"] == pytest.approx(-400, abs=15)
+    right = chsh(runs, Window(width_ps=1000, source="plan", delays_ps={"A+": 400, "B+": 400}), settings_deg=SETTINGS)
+    assert not any(lab.startswith(prefix) for lab in right.labels)
+
+
+def test_matched_delays_are_not_labelled():
+    # chsh-spad physics (350 ps jitter, 2 ns window, afterpulsing): |raw - reweighted| stays well
+    # under half a standard error.
+    from dadl.analysis.chsh import CAPTURE_IMBALANCE
+
+    prefix = CAPTURE_IMBALANCE.split("{")[0]
+    det = DetectorParams(
+        efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0, afterpulse_prob=0.005,
+        afterpulse_tau_ps=50_000,
+    )
+    for seed in range(10):
+        rng = np.random.default_rng(100 + seed)
+        runs = simulate_chsh(PairSource(pair_rate_per_s=1e5, visibility=0.95), dict.fromkeys(IDS, det), 1.0, rng, SETTINGS)
+        r = chsh(runs, Window(width_ps=2000, source="plan"), settings_deg=SETTINGS)
+        assert not any(lab.startswith(prefix) for lab in r.labels)
+        assert abs(r.raw.value - r.counts["capture_reweighted_s"]) < 0.25 * r.raw.stderr
+
+
+def test_a_delay_drift_since_calibration_is_refused(tmp_path):
+    # Council round 2 (B1): delay artifacts taken before A+ and B+ drifted by 200 ps passed the
+    # predictive check (it refits the delay); corrected S read 2.03-2.05 for 1.98.
+    from dadl.errors import Misspecified
+    from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
+
+    rng = np.random.default_rng(3000)
+    _calibrate(tmp_path, _late(0), rng)
+    # Short pair runs leave some delay artifacts misfits; accepted here, the drift is the point.
+    strict = _policy("accidental_subtraction", "window_capture", "misfit_calibration")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=strict, dataset=CTX)
+    window = Window(width_ps=1000, source="plan")
+    current = simulate_chsh(MISDECLARED_SRC, _late(0), 1.0, rng, SETTINGS)
+    r = chsh(current, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    assert FORWARD_MISFIT_ACCEPTED not in r.labels
+    drifted = simulate_chsh(MISDECLARED_SRC, _late(200), 1.0, rng, SETTINGS)
+    with pytest.raises(Misspecified, match="calibrated delays"):
+        chsh(drifted, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    loose = strict.allow("chsh", "misfit_forward_model", "comparing a stale calibration")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=loose, dataset=CTX)
+    r = chsh(drifted, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    assert FORWARD_MISFIT_ACCEPTED in r.labels

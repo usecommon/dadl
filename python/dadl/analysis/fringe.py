@@ -9,6 +9,12 @@ Corrections follow the Bell rule: under the default policy none is allowed (acci
 can move a non-violating dataset past 1/sqrt(2)). With `calibrations` and a policy that allows the
 corrections, the corrected value comes from the forward model (`dadl.forward`), with calibration
 uncertainty, never from the old subtraction.
+
+The value compares two acquisitions, so a pump drift between them moves it (+3% on the max run
+read 0.707 for 0.699). Every result carries `TWO_POINT`; `SINGLES_DRIFT` is added when a channel's
+singles rate differs between the acquisitions beyond 4 sigma (Poisson). The singles test assumes
+setting-independent singles (a Werner state, no analyser-dependent loss): a loss that depends on
+the setting also trips it.
 """
 
 from __future__ import annotations
@@ -17,7 +23,14 @@ import dataclasses
 
 import numpy as np
 
-from dadl.analysis._twopoint import check_calibration_args, forward_check, forward_from_counts, run_counts, span_ps
+from dadl.analysis._twopoint import (
+    check_calibration_args,
+    forward_check,
+    forward_from_counts,
+    range_ends,
+    run_counts,
+    span_ps,
+)
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
 from dadl.coincidences import grid_coincidences
@@ -31,6 +44,23 @@ FRINGE_CHANNELS: tuple[str, ...] = ("A", "B")
 FRINGE_SETTINGS: tuple[str, ...] = ("max", "min")
 #: Largest relative difference of the two acquisitions' spans for the raw count comparison.
 MAX_EXPOSURE_MISMATCH = 0.01
+#: Poisson z of a channel's singles-rate difference between the acquisitions above which it is labelled.
+SINGLES_DRIFT_Z = 4.0
+
+TWO_POINT = (
+    "two-point visibility at the declared settings: not normalised for rate drift between the max and min "
+    "acquisitions"
+)
+SINGLES_DRIFT = (
+    "singles differ between the max and min acquisitions beyond 4 sigma: a rate drift or a setting-dependent loss; "
+    "V moves with it (+3% on the max run read 0.707 for 0.699)"
+)
+
+
+def _singles_z(n1: int, t1: float, n2: int, t2: float) -> float:
+    """Poisson z of the difference of two singles rates."""
+    var = n1 / t1**2 + n2 / t2**2
+    return (n1 / t1 - n2 / t2) / var**0.5 if var > 0 else 0.0
 
 
 def fringe_from_tags(
@@ -86,6 +116,12 @@ def fringe_from_tags(
         "duration_max_s": t_max / 1e12,
         "duration_min_s": t_min / 1e12,
     }
+    drift = False
+    for ch in FRINGE_CHANNELS:
+        n_max, n_min = int(np.asarray(runs["max"][ch]).size), int(np.asarray(runs["min"][ch]).size)
+        t1, t2 = t_max / 1e12, t_min / 1e12
+        counts[f"singles_ratio_{ch.lower()}"] = (n_max / t1) / (n_min / t2) if n_min else float("inf")
+        drift = drift or abs(_singles_z(n_max, t1, n_min, t2)) > SINGLES_DRIFT_Z
     if subtract_accidentals:
         result = bell_visibility(
             c_max, c_min, accidentals=acc, accidentals_stderr=float(np.sqrt(side_min.sum())) / side_min.size,
@@ -93,7 +129,7 @@ def fringe_from_tags(
         )
     else:
         result = bell_visibility(c_max, c_min, policy=policy, window=window)
-    labels = result.labels
+    labels = result.labels + (TWO_POINT,) + ((SINGLES_DRIFT,) if drift else ())
     if calibrations is not None:
         check_p, check_labels = forward_check(
             "bell_visibility", {"max": (runs["max"], (0.0,)), "min": (runs["min"], (0.0,))},
@@ -110,7 +146,7 @@ def fringe_from_tags(
         )
         counts.update(extra)
         labels = tuple(dict.fromkeys(
-            labels + fwd.labels + check_labels + threshold_labels("bell_visibility", result.raw, fwd.estimate)
+            labels + fwd.labels + check_labels + threshold_labels("bell_visibility", result.raw, fwd.estimate, range_ends(extra))
         ))
         result = dataclasses.replace(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
@@ -120,4 +156,4 @@ def fringe_from_tags(
     return dataclasses.replace(result, labels=labels, counts=counts), counts
 
 
-__all__ = ["FRINGE_CHANNELS", "FRINGE_SETTINGS", "fringe_from_tags"]
+__all__ = ["FRINGE_CHANNELS", "FRINGE_SETTINGS", "SINGLES_DRIFT", "TWO_POINT", "fringe_from_tags"]
