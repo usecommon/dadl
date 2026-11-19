@@ -118,7 +118,7 @@ and is versioned separately from the packages.
   tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2% and 97.3%), so it is
   gated at least 95%; this gate has little power against edge-density errors (M10 item).
 - `python -m dadl.calibration.coverage` gains `--shard k/n --out FILE` and `merge FILES`, as the
-  propagation gate has; CI runs passive-quench in four shards.
+  propagation gate has; CI runs passive-quench in twelve shards.
 - Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery. The analyses'
   forward model uses the dark calibration's non-paralyzable dead time only. With paralysis the
   live fraction is overestimated: for tau_p close to tau_np by about 0.5% at a 10% dead fraction
