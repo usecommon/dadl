@@ -172,6 +172,42 @@ and is versioned separately from the packages.
     the capture when it does;
   - an artifact's `valid_for` starts at `acquired` when recorded, not at `created`.
 
+- Review council round 3 (method `series-gap-mle` 3):
+  - CHSH capture balance: each outcome pair's pooled peak is refitted on a region 5 sigma wider than
+    the window with bins of sigma/3 (narrow peaks sat in one or two bins; wide ones traded their
+    offset against the background), with standard errors; S reweighted by the captures records its
+    standard deviation (`capture_sd_data`). "Unequal window capture" needs the shift to exceed half
+    a standard error and 3.29 of those deviations, or a low capture with the peak off the declared
+    delay; a low capture with the peak on it is labelled "window narrow against the pair jitter"
+    (matched delays at 495 ps jitter and a 0.8 ns window: 9/20 labelled before, 0/20 now);
+  - the delay-drift refusal adds a noise term (the artifacts' capture draws and the peak fits) and
+    records `delay_drift_diff` and `delay_drift_z`: false refusals on current artifacts were 2-65%,
+    now 0/264 in the council's runs; 200-400 ps drifts are still refused;
+  - the predictive check polishes a histogram's fit when its p is below 0.01, with a second start
+    at the highest bin (L-BFGS-B stalled with the start delay tens of ps off: p 2e-6 on clean data);
+  - the corrected CHSH label says what was modelled and what was not (it said dead time and window
+    capture were modelled when neither was); a corrected S without dark artifacts on a raw value
+    with dead-time selection is labelled so;
+  - an artifact recorded for another detector serial than the setup's is outside its validity
+    (`CalibrationSet.load(..., channels=)`, passed by the CLI); a dark dead time undercut by more than
+    max(10, 0.1%) of the analysed gaps is refused (`forward.check_dead_time_gaps`), and the shortest
+    gaps are recorded (`min_gap_ps`); both are overridable with `calibration_outside_validity`;
+  - a recorded temperature or bracket the dataset does not give is a mismatch, as a bias is; an
+    artifact with no validity range is labelled; corrected results record the dataset context they
+    were checked against (`counts["dataset"]`); two artifacts for one channel pair in either order are
+    ambiguous;
+  - the CHSH CLI prints the dead-time range when a dead time is a bound;
+  - docs: validity, tagger settings and bias are enforced at use, not only recorded;
+  - series dead time (method `series-gap-mle` 3): each run's rate is fitted on both branches of
+    n exp(-n tau_p) and the better kept (a 6e7 cps run past the count-rate maximum was fitted at
+    7e6 and biased tau_p to tau_np, 4/4 intervals excluding the truth); the profile of tau_p is
+    searched for every minimum and the interval spans those inside it. The branches differ only
+    through the afterpulses, and below the count-rate maximum the high branch at a lower tau_p can
+    fit better by up to about 4 NLL (a scan to 1e7 cps at tau_p 30 ns read 25.9 ns, interval
+    excluding 30), so the interval is joined with that of the fit held to the low branch, with a
+    note when this widens it. Without afterpulsing a run past the maximum notes both rates;
+    `survival` and `gap_cdf` accept an integer tau_p.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

@@ -159,3 +159,17 @@ def test_analyze_chsh_with_calibrations_needs_the_policy_and_every_pair(tmp_path
     capsys.readouterr()
     assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 1
     assert "every channel pair" in capsys.readouterr().err
+
+
+def test_analyze_chsh_prints_the_dead_time_range(tmp_path, capsys):
+    # Council round 3 (R5): with every dead time a bound the CHSH CLI printed the label "counts give
+    # the value at zero" but not the range.
+    tags, dark, art = tmp_path / "chsh.npz", tmp_path / "dark.npz", tmp_path / "dark-art"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(dark)]) == 0
+    assert main(["calibrate", "dark", "chsh-spad", "--tags", str(dark), "--out", str(art)]) in (0, 1)
+    capsys.readouterr()
+    allow = ["--allow", "dead_time=dark runs", "--allow", "accidental_subtraction=off-peak bins"]
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 0
+    out = capsys.readouterr().out
+    assert "Dead time known only as an upper limit: S = " in out and " at zero, " in out and " at the bound" in out

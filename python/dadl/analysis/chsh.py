@@ -12,8 +12,12 @@ Phase 1 limits, stated so nobody over-reads the result:
 
 A delay error on some channels changes the window capture of some outcome pairs and not others
 and moves S. Each outcome pair's peak is fitted over the four settings (`capture_balance`); S
-reweighted by those captures is in the counts, and `CAPTURE_IMBALANCE` is added when it differs
-from raw S by more than half a standard error or a capture is below `MIN_CAPTURE`.
+reweighted by those captures is in the counts, with its standard deviation from the peak fits
+(`capture_sd_data`). `CAPTURE_IMBALANCE` is added when the reweighted S differs from raw S by more
+than half a standard error and by more than 3.29 of those standard deviations (two-sided 0.001),
+or when a capture is below `MIN_CAPTURE` with its peak off the declared delay by more than half
+its jitter. A capture below `MIN_CAPTURE` with the peak on the declared delay is a window narrow
+against the jitter, not a delay error: `CAPTURE_LOW`.
 """
 
 from __future__ import annotations
@@ -49,8 +53,18 @@ CAPTURE_IMBALANCE = (
     "unequal window capture across outcome pairs: the declared delays miss the pair peaks (offsets in counts), "
     "shifting S by about {dS:+.3f}; declare the delays from a pair calibration"
 )
-#: Smallest window capture of an outcome pair before the declared delays are labelled.
+CAPTURE_LOW = (
+    "window narrow against the pair jitter: capture {c:.2f} on {pair} with the peak on the declared delay (offsets "
+    "in counts); S is post-selected more strongly on the timing"
+)
+#: On the corrected S when the raw value carries `DEAD_TIME_SELECTION` and no dark artifact is used.
+DEAD_TIME_UNCORRECTED = "dead time not modelled: the dead-time selection bias of the raw value stays in the corrected value"
+#: Smallest window capture of an outcome pair before it is labelled.
 MIN_CAPTURE = 0.5
+#: Two-sided 0.001 normal quantile: the capture-balance and delay-drift rules' noise threshold.
+DRIFT_Z = 3.29
+#: Capture draws of the delay-jitter artifacts behind the delay-drift check's noise.
+DRIFT_DRAWS = 400
 
 #: Below this many coincidences per setting the Gaussian error is not trusted.
 MIN_COUNTS_PER_SETTING = 100
@@ -241,43 +255,78 @@ def _pair_name(x: str, y: str) -> str:
     return f"A{x}/B{y}"
 
 
-def reweighted_s(runs, window: Window, captures: Mapping[tuple[str, str], float]) -> float:
-    """S with each outcome combination's raw count divided by its window capture."""
+def _setting_outcome_counts(runs, window: Window) -> dict:
+    """Grid coincidences per setting pair and outcome combination."""
     from dadl.forward import OUTCOME_SIGNS
 
     d = window.delays_ps
-    s = 0.0
-    for key, sign in SIGNS.items():
-        n = {
+    return {
+        key: {
             (x, y): grid_coincidences(runs[key]["A" + x], runs[key]["B" + y], window.width_ps, d.get("A" + x, 0), d.get("B" + y, 0))
-            / captures[(x, y)]
             for x, y in OUTCOME_SIGNS
         }
-        s += sign * sum(o * n[k] for k, o in OUTCOME_SIGNS.items()) / sum(n.values())
+        for key in SIGNS
+    }
+
+
+def reweighted_s(counts, captures: Mapping[tuple[str, str], float]):
+    """S with each outcome combination's count (`_setting_outcome_counts`) divided by its window
+    capture. Captures may be arrays of draws; then so is S."""
+    from dadl.forward import OUTCOME_SIGNS
+
+    s = 0.0
+    for key, sign in SIGNS.items():
+        n = {k: counts[key][k] / captures[k] for k in OUTCOME_SIGNS}
+        s = s + sign * sum(o * n[k] for k, o in OUTCOME_SIGNS.items()) / sum(n.values())
     return s
 
 
-def capture_balance(runs, window: Window) -> tuple[float | None, dict[tuple[str, str], tuple[float, float, float]]]:
-    """S reweighted by each outcome pair's window capture, and per pair (offset, jitter, capture).
+def capture_balance(runs, window: Window, counts=None):
+    """S reweighted by each outcome pair's window capture, per pair (offset, jitter, capture,
+    offset se, jitter se), and the reweighted S's standard deviation from the peak fits.
 
     Each outcome pair's peak is fitted once (`forward_check.pooled_peak`) to its histogram summed
-    over the four settings, and its capture is `forward.grid_capture(offset, jitter, W)`. A pair
-    below `forward_check.MIN_COUNTS` is skipped; then the reweighted S is None."""
+    over the four settings, and its capture is `forward.grid_capture(offset, jitter, W)`. The
+    standard deviation is the delta method's: each pair's offset, then its jitter, moved by its
+    standard error, S recomputed, the squared changes summed. A pair below
+    `forward_check.MIN_COUNTS` is skipped; then the reweighted S and its deviation are None."""
     from dadl.forward import OUTCOME_SIGNS, grid_capture
     from dadl.forward_check import PairData, pooled_peak
 
     d = window.delays_ps
-    out: dict[tuple[str, str], tuple[float, float, float]] = {}
+    out: dict[tuple[str, str], tuple[float, float, float, float, float]] = {}
     for x, y in OUTCOME_SIGNS:
         a, b = "A" + x, "B" + y
         declared = float(d.get(b, 0) - d.get(a, 0))
         fit = pooled_peak([PairData(f"{k[0]},{k[1]} {a}/{b}", runs[k][a], runs[k][b], declared, window.width_ps) for k in SIGNS])
         if fit is not None:
-            offset, sigma = fit
-            out[(x, y)] = (offset, sigma, float(grid_capture(offset, sigma, window.width_ps)))
+            cap = float(grid_capture(fit.offset_ps, fit.sigma_ps, window.width_ps))
+            out[(x, y)] = (fit.offset_ps, fit.sigma_ps, cap, fit.offset_se_ps, fit.sigma_se_ps)
     if len(out) != len(OUTCOME_SIGNS):
-        return None, out
-    return reweighted_s(runs, window, {k: v[2] for k, v in out.items()}), out
+        return None, out, None
+    counts = counts if counts is not None else _setting_outcome_counts(runs, window)
+    caps = {k: v[2] for k, v in out.items()}
+    base = float(reweighted_s(counts, caps))
+    var = 0.0
+    for k, (offset, sigma, _, se_offset, se_sigma) in out.items():
+        for do, ds in ((se_offset, 0.0), (0.0, se_sigma)):
+            moved = dict(caps)
+            moved[k] = float(grid_capture(offset + do, sigma + ds, window.width_ps))
+            var += (float(reweighted_s(counts, moved)) - base) ** 2
+    return base, out, math.sqrt(var)
+
+
+def capture_labels(raw: Estimate, s_balanced, balance, sd_data) -> tuple[str, ...]:
+    """`CAPTURE_IMBALANCE`, `CAPTURE_LOW` or nothing (module docstring)."""
+    shift = raw.value - s_balanced if s_balanced is not None else 0.0
+    moved = s_balanced is not None and abs(shift) > max(0.5 * raw.stderr, DRIFT_Z * (sd_data or 0.0))
+    low = {k: v for k, v in balance.items() if v[2] < MIN_CAPTURE}
+    if moved or any(abs(v[0]) > v[1] / 2 for v in low.values()):
+        return (CAPTURE_IMBALANCE.format(dS=shift),)
+    if low:
+        k = min(low, key=lambda k: low[k][2])
+        return (CAPTURE_LOW.format(c=low[k][2], pair=_pair_name(*k)),)
+    return ()
 
 
 def chsh(
@@ -334,21 +383,23 @@ def chsh(
     m_b = float(np.mean([counts[f"{k[0]},{k[1]}"]["imbalance_b"] for k in SIGNS]))
     if 2.0 * abs(m_a * m_b) > 0.5 * raw.stderr:
         labels += (EFFICIENCY_IMBALANCE,)
-    s_balanced, balance = capture_balance(runs, window)
+    outcome_counts = _setting_outcome_counts(runs, window)
+    s_balanced, balance, sd_data = capture_balance(runs, window, outcome_counts)
     counts["capture_offsets_ps"] = {_pair_name(*k): v[0] for k, v in balance.items()}
     counts["capture_reweighted_s"] = s_balanced
-    shift = raw.value - s_balanced if s_balanced is not None else 0.0
-    if abs(shift) > 0.5 * raw.stderr or any(v[2] < MIN_CAPTURE for v in balance.values()):
-        labels += (CAPTURE_IMBALANCE.format(dS=shift),)
+    counts["capture_sd_data"] = sd_data
+    labels += capture_labels(raw, s_balanced, balance, sd_data)
     if settings_deg is not None:
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     corrected = None
     extra: dict[str, object] = {}
     if calibrations is not None:
         corrected, extra, more, more_counts = _corrected(
-            runs, window, policy, calibrations, channels, seed, raw, s_balanced, balance
+            runs, window, policy, calibrations, channels, seed, raw, (outcome_counts, s_balanced, balance, sd_data)
         )
         counts.update(more_counts)
+        if DEAD_TIME_SELECTION in labels and "dead_time" not in extra["corrections"]:
+            more += (DEAD_TIME_UNCORRECTED,)
         labels += tuple(lab for lab in more if lab not in labels)
     return LabelledValue(
         analysis="chsh",
@@ -362,18 +413,19 @@ def chsh(
     )
 
 
-def _corrected(runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate, s_balanced, balance):
+def _corrected(runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate, capture):
     """The forward-model S, its result fields, its labels (threshold crossing included) and the
-    counts it adds."""
+    counts it adds. `capture` is (outcome counts, reweighted S, balance, its sd) from `chsh`."""
     from dadl.analysis._twopoint import run_counts, span_ps
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
-    from dadl.forward import DEAD_TIME_RANGE_WIDE, OUTCOME_SIGNS, chsh_bound_range, corrected_chsh
+    from dadl.forward import DEAD_TIME_RANGE_WIDE, OUTCOME_SIGNS, check_dead_time_gaps, chsh_bound_range, corrected_chsh
 
     if channels is None or set(channels) != set(CHANNELS):
         raise ValueError(f"with calibrations, pass channels mapping each of {list(CHANNELS)} to its ChannelId")
     d = window.delays_ps
     offsets = side_offsets(window.width_ps)
     check_p, check_labels = _forward_check(runs, window, policy, calibrations, channels)
+    gap_labels, gap_counts = check_dead_time_gaps(calibrations, channels, [runs[k] for k in SIGNS], analysis="chsh", policy=policy)
     reduced = {}
     for key in SIGNS:
         tags = runs[key]
@@ -387,9 +439,13 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         reduced[key] = per
     grid = {"window_ps": window.width_ps, "delays_ps": {k: float(v) for k, v in d.items()}}
     fwd = corrected_chsh(reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed, **grid)
-    counts: dict[str, object] = {"forward_check_p": check_p}
-    labels = fwd.labels + check_labels
-    labels += _delay_drift(runs, window, policy, calibrations, channels, s_balanced, balance, fwd.estimate)
+    counts: dict[str, object] = {"forward_check_p": check_p, **gap_counts}
+    if calibrations.dataset_record() is not None:
+        counts["dataset"] = calibrations.dataset_record()
+    labels = fwd.labels + check_labels + gap_labels
+    drift_labels, drift_counts = _delay_drift(window, policy, calibrations, channels, seed, capture, fwd.estimate)
+    labels += drift_labels
+    counts.update(drift_counts)
     ends: tuple[float, ...] = ()
     rng = chsh_bound_range(reduced, channels, SIGNS, calibrations=calibrations, **grid)
     if rng is not None:
@@ -403,31 +459,50 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
     return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels, counts
 
 
-def _delay_drift(runs, window: Window, policy: Policy, calibrations, channels, s_balanced, balance, corrected: Estimate):
+def _delay_drift(window: Window, policy: Policy, calibrations, channels, seed: int, capture, corrected: Estimate):
     """Compare S reweighted by the analysed peaks' captures with S reweighted by the delay-jitter
-    artifacts' point captures. A drift since calibration changes the window capture, and the
-    predictive check refits the delay, so it does not see it. Refused (`Misspecified`) when they
-    differ by more than half the corrected value's statistical error, unless the policy allows
-    `misfit_forward_model`; then labelled."""
+    artifacts' point captures: (labels, counts). A drift since calibration changes the window
+    capture, and the predictive check refits the delay, so it does not see it.
+
+    The difference's noise has two parts: the artifacts' (the sd of S reweighted by each of
+    `DRIFT_DRAWS` capture draws) and the analysed peak fits' (`capture_balance`). Refused
+    (`Misspecified`) when the difference exceeds half the corrected value's statistical error and
+    `DRIFT_Z` times that noise, unless the policy allows `misfit_forward_model`; then labelled.
+
+    The drift check refuses only a drift that moves S by more than half its statistical error and
+    more than 3.29 standard deviations of the check's own noise (the delay artifacts' capture draws
+    and the analysed peak fit). A smaller drift is not refused (100 ps at 350 ps jitter and a 2 ns
+    window: 0.41 se, 0/20 refused); one within the artifacts' noise is covered by the calibration
+    part of the interval. Longer delay calibrations make the check sharper.
+
+    On clean data the statistic has a small positive mean (+0.0005, about 0.1 statistical se, from
+    the peak fit at offsets of +-400 ps); it is well inside the threshold."""
     from dadl.errors import Misspecified
     from dadl.forward import OUTCOME_SIGNS, _pair_capture
     from dadl.forward_check import FORWARD_MISFIT_ACCEPTED, OVERRIDE, delay_start
 
+    counts, s_balanced, balance, sd_data = capture
     if s_balanced is None:
-        return ()
+        return (), {}
     d = window.delays_ps
-    artifact = {}
+    artifact, draws = {}, {}
     for x, y in OUTCOME_SIGNS:
         a, b = "A" + x, "B" + y
-        cap = _pair_capture(calibrations, channels[a], channels[b], window.width_ps, float(d.get(b, 0) - d.get(a, 0)), 1, 0)
+        cap = _pair_capture(
+            calibrations, channels[a], channels[b], window.width_ps, float(d.get(b, 0) - d.get(a, 0)), DRIFT_DRAWS, seed
+        )
         if cap is None:
-            return ()
-        artifact[(x, y)] = cap[1]
-    s_artifact = reweighted_s(runs, window, artifact)
-    if abs(s_balanced - s_artifact) <= 0.5 * corrected.stderr_statistical:
-        return ()
+            return (), {}
+        draws[(x, y)], artifact[(x, y)] = cap[0], cap[1]
+    s_artifact = float(reweighted_s(counts, artifact))
+    sd = math.hypot(float(np.std(reweighted_s(counts, draws))), sd_data)
+    diff = s_balanced - s_artifact
+    z = diff / sd if sd > 0 else 0.0
+    out = {"delay_drift_diff": diff, "delay_drift_z": z}
+    if abs(diff) <= max(0.5 * corrected.stderr_statistical, DRIFT_Z * sd):
+        return (), out
     if OVERRIDE in policy.rule_for("chsh").allowed_corrections:
-        return (FORWARD_MISFIT_ACCEPTED,)
+        return (FORWARD_MISFIT_ACCEPTED,), out
     worst = max(OUTCOME_SIGNS, key=lambda k: abs(artifact[k] - balance[k][2]))
     a, b = "A" + worst[0], "B" + worst[1]
     declared = float(d.get(b, 0) - d.get(a, 0))
@@ -435,8 +510,8 @@ def _delay_drift(runs, window: Window, policy: Policy, calibrations, channels, s
     raise Misspecified(
         f"the calibrated delays do not match the analysed pair peaks ({a}/{b}: calibrated {calibrated:.0f}, analysed "
         f"{declared + balance[worst][0]:.0f} ps; S {s_artifact:.4f} with the calibrated captures, {s_balanced:.4f} "
-        "with the analysed): a drift since calibration changes the window capture. Recalibrate the delays, or "
-        f"override with Policy.allow('chsh', {OVERRIDE!r}, reason)."
+        f"with the analysed, z = {z:.1f}): a drift since calibration changes the window capture. Recalibrate the "
+        f"delays, or override with Policy.allow('chsh', {OVERRIDE!r}, reason)."
     )
 
 

@@ -60,9 +60,10 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
     # review, cycle 10).
-    from dadl.forward import ACCIDENTALS_MODELLED, FORWARD_MODEL
+    from dadl.forward import FORWARD_MODEL, chsh_model_label
 
-    raw_labels = [lab for lab in result.labels if lab not in (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL, ACCIDENTALS_MODELLED)]
+    hidden = (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL, chsh_model_label(result.corrections))
+    raw_labels = [lab for lab in result.labels if lab not in hidden]
     print(f"  Labels: {'; '.join(raw_labels) or 'none'}")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
@@ -283,7 +284,7 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     _warn_angles(setup)
     print()
     _print_result(result)
-    _print_forward(corrected, {}, "S")
+    _print_forward(corrected, corrected.counts or {}, "S")
     print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}: " + "; ".join(corrected.overrides))
     worst = max(d.dead_time_ps * 1e-12 * (setup.source.pair_rate_per_s * d.efficiency / 2 + d.dark_rate_cps) for d in setup.detectors.values())
     print(
@@ -395,7 +396,11 @@ def _add_record_options(p: argparse.ArgumentParser) -> None:
                    help="a numeric condition to record, e.g. temperature_K=233.1 or bias_V=24.5 (repeatable)")
     p.add_argument("--acquired", help="when the data were taken (ISO 8601 with a UTC offset); a PTU file's local creation time is recorded separately")
     p.add_argument("--created", help="record creation time (ISO 8601), to reproduce an artifact; default now")
-    p.add_argument("--valid-until", help="end of the intended validity (ISO 8601); recorded, not enforced")
+    p.add_argument(
+        "--valid-until",
+        help="end of the intended validity (ISO 8601); an analysis acquired outside it is refused unless "
+        "calibration_outside_validity is allowed",
+    )
     p.add_argument("--supersedes", help="ID of the artifact this one replaces (must exist in --out)")
 
 
@@ -881,8 +886,9 @@ def _policy(analysis: str, allow: list[str]):
     return policy
 
 
-def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, analysis: str, policy):
-    """Artifacts from --calibrations, checked against this dataset (time, conditions, raw inputs)."""
+def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, analysis: str, policy, channels):
+    """Artifacts from --calibrations, checked against this dataset (time, conditions, raw inputs) and
+    the setup's channels (detector serials)."""
     import hashlib
 
     from dadl.data import tags_sha256
@@ -895,7 +901,7 @@ def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, ana
         hashes.add(hashlib.sha256(tags_path.read_bytes()).hexdigest())
     conditions = {**tagger_settings(args.tags), **_conditions(args.condition)}
     dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions, input_sha256=frozenset(hashes))
-    return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset)
+    return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset, channels=channels)
 
 
 def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> None:
@@ -923,7 +929,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     simulated = tags_are_simulated(args.tags)
     analysis = "hom_visibility" if setup.analysis_type == "hom" else "chsh"
     policy = _policy(analysis, args.allow)
-    cset = _calibration_set(args, runs, _resolve(args.setup), analysis, policy) if args.calibrations else None
+    names = ("A", "B") if setup.analysis_type == "hom" else ("A+", "A-", "B+", "B-")
+    used = [setup.channel_id(name) for name in names]
+    cset = _calibration_set(args, runs, _resolve(args.setup), analysis, policy, used) if args.calibrations else None
     if setup.analysis_type == "hom":
         from dadl.analysis.hom import hom_from_tags
 
@@ -951,7 +959,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print()
     _print_result(result)
     if result.corrected is not None:
-        _print_forward(result, {}, "S")
+        _print_forward(result, result.counts or {}, "S")
     print("  Inputs: " + ", ".join(f"{k} {v[:12]}" for k, v in result.inputs.items()))
     print(
         "  Choosing the window, delays or run after seeing the data inflates false violations (best of 72 "

@@ -47,6 +47,8 @@ FORWARD_MISFIT_ACCEPTED = "forward-model misfit accepted: the predictive check f
 MIN_COUNTS = 50
 #: Adjacent bins are merged until each expects at least this many counts.
 MIN_EXPECTED = 5.0
+#: Below this histogram p-value the fit is polished before the p-value is taken.
+POLISH_BELOW = 0.01
 
 
 def _grouped_pearson(n: np.ndarray, mu: np.ndarray) -> float:
@@ -182,7 +184,7 @@ def fit_peak(
 
     With `polish`, a Nelder-Mead search continues from the best start. L-BFGS-B often stops early
     on the background step at d, leaving the delay a few sd off (-386 ps for a -400 ps peak with
-    6,000 pairs); the predictive check tolerates that, the window capture does not."""
+    6,000 pairs); `pair_pvalue` polishes when its p is low, and the window capture always does."""
     hist = np.asarray(hist, dtype=float)
     lo, hi = edges[:-1], edges[1:]
     width = float(np.max(hi - lo))
@@ -239,15 +241,60 @@ def pair_pvalue(pair: PairData) -> float | None:
         return None
     edges = _edges(hist, half, width)
     d0 = float(pair.delay_ps) + (pair.declared_delay_ps - shift)
-    _, mu = fit_peak(hist, edges, tick, d0, sigma0, pair.offsets_ps)
-    return _grouped_pearson(hist, mu)
+    theta, mu = fit_peak(hist, edges, tick, d0, sigma0, pair.offsets_ps)
+    p = _grouped_pearson(hist, mu)
+    if p >= POLISH_BELOW:
+        return p
+    # L-BFGS-B stalls when the start delay is tens of ps off (p 2e-6 on a clean histogram, 0.69
+    # polished; council round 3). Polishing only lowers the NLL, so the test is the same with a
+    # better optimiser; the highest bin is a second start.
+    model = _ShapeModel(hist, edges, tick, pair.offsets_ps)
+    best, best_nll = (theta, mu), model.nll(theta)
+    k = int(np.argmax(hist))
+    for start in (d0, 0.5 * float(edges[k] + edges[k + 1])):
+        th, m = fit_peak(hist, edges, tick, start, sigma0, pair.offsets_ps, polish=True)
+        nll = model.nll(th)
+        if nll < best_nll:
+            best, best_nll = (th, m), nll
+    return _grouped_pearson(hist, best[1])
 
 
-def pooled_peak(pairs: Sequence[PairData]) -> tuple[float, float] | None:
-    """(offset of the pair peak from the declared delay, jitter), both in ps, fitted once to the
-    summed histograms of `pairs` (one channel pair and declared delay, such as one outcome pair
-    over a Bell run's settings), or None below `MIN_COUNTS`. The fit starts at the pairs' given
-    delay and jitter, or at the histogram's highest bin without a jitter."""
+@dataclass(frozen=True)
+class PeakFit:
+    """A pooled pair peak: offset from the declared delay and jitter (ps), with standard errors."""
+
+    offset_ps: float
+    sigma_ps: float
+    offset_se_ps: float
+    sigma_se_ps: float
+
+
+#: Refinement passes of `pooled_peak` after the coarse fit.
+POOL_PASSES = 3
+#: Most bins in a refined pooled histogram.
+POOL_MAX_BINS = 4000
+
+
+def _summed(pairs: Sequence[PairData], shift: int, width: int, half: int) -> np.ndarray:
+    return sum(
+        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, width, half).astype(float)
+        for p in pairs
+    )
+
+
+def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
+    """The pair peak of `pairs` (one channel pair and declared delay, such as one outcome pair over
+    a Bell run's settings), fitted to their summed histograms, or None below `MIN_COUNTS` within
+    the window.
+
+    A coarse fit over |delay - declared| < W comes first (bins from the jitter, or W/30 without
+    one; it starts at the pairs' given delay, or at the highest bin). Then up to `POOL_PASSES`
+    refits, each from the previous one, until the bin width stops changing: the region extends
+    5 sigma beyond the window, so the background is fitted outside the peak (a peak as wide as the
+    window traded its offset against the background), and the bins are sigma/3 wide, so they
+    resolve the peak (a 30 ps peak sat in one or two W/30 bins). Standard errors: sigma / sqrt(A)
+    for the offset and sigma / sqrt(2 A) for the jitter, A the fitted peak area (council round 3).
+    """
     pairs = [p for p in pairs if np.asarray(p.a).size and np.asarray(p.b).size]
     if not pairs:
         return None
@@ -256,10 +303,7 @@ def pooled_peak(pairs: Sequence[PairData]) -> tuple[float, float] | None:
         raise ValueError("pooled pairs must share the declared delay and window")
     tick = math.gcd(*(tag_tick(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64)) for p in pairs))
     shift, half, width, sigma0 = _layout(first, tick)
-    hist = sum(
-        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, width, half).astype(float)
-        for p in pairs
-    )
+    hist = _summed(pairs, shift, width, half)
     if hist.sum() < MIN_COUNTS:
         return None
     edges = _edges(hist, half, width)
@@ -269,7 +313,23 @@ def pooled_peak(pairs: Sequence[PairData]) -> tuple[float, float] | None:
         k = int(np.argmax(hist))
         d0 = 0.5 * float(edges[k] + edges[k + 1])
     theta, _ = fit_peak(hist, edges, tick, d0, sigma0, first.offsets_ps, polish=True)
-    return float(theta[2]) - (first.declared_delay_ps - shift), math.exp(float(theta[3]))
+    w_ps = int(first.window_ps)
+    width = None
+    for _ in range(POOL_PASSES):
+        d, sigma = float(theta[2]), math.exp(float(theta[3]))
+        sigma = min(max(sigma, tick / 2), 4.0 * w_ps)
+        half = -(-int(w_ps + 5 * sigma) // tick) * tick
+        new_width = max(tick, int(sigma / 3) // tick * tick, -(-(2 * half) // POOL_MAX_BINS) // tick * tick)
+        if new_width == width:
+            break
+        width = new_width
+        hist = _summed(pairs, shift, width, half)
+        theta, _ = fit_peak(hist, _edges(hist, half, width), tick, d, sigma, first.offsets_ps, polish=True)
+    sigma = math.exp(float(theta[3]))
+    area = math.exp(float(theta[1]))
+    return PeakFit(
+        float(theta[2]) - (first.declared_delay_ps - shift), sigma, sigma / math.sqrt(area), sigma / math.sqrt(2.0 * area)
+    )
 
 
 def run_check(pairs: Sequence[PairData], alpha: float = MISFIT_ALPHA) -> CheckResult:

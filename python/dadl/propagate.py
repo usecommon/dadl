@@ -11,7 +11,13 @@ used on its dataset:
   Conditions compared (`condition_mismatches`): every `tagger_*` setting must be equal (cycle 2.8:
   recorded but never compared at use); `bias*` values must be equal; a `<name>_min_<unit>` /
   `<name>_max_<unit>` pair must bracket the dataset's `<name>_<unit>`; a single `temperature_K`
-  must be within `TEMPERATURE_TOLERANCE_K`. Keys the artifact does not record are not compared.
+  must be within `TEMPERATURE_TOLERANCE_K`. A setting, bias, bracket or temperature the artifact
+  records but the dataset does not give is a mismatch (council round 3: leaving the condition out
+  passed the check). Keys the artifact does not record are not compared. An artifact with no
+  validity range is labelled `NO_VALIDITY`.
+- **Another detector** (council round 3): when the artifact's channel record and the setup's
+  channel (`channels=`) both name a detector and they differ, the artifact is outside its
+  validity as above. `ChannelId` equality is the tagger input; the detector is checked here.
 - **Calibrated on the analysed data** (design, "Joint posteriors and data reuse"; expert review
   Q4): an artifact whose raw input hashes overlap the dataset's raises `GuardrailRefusal`. There
   is no override: reusing the data narrows the intervals, and the fix is a joint fit.
@@ -20,8 +26,8 @@ Disjointness compares whole tag-array and file hashes: a calibration made on a s
 with any change of the analysed run is not caught. Without a `DatasetContext` none of the
 use-time checks runs (disjointness, validity, conditions); the set is labelled `NOT_CHECKED`.
 
-One artifact per kind and channel: with calibrations before and after the run, pass the one to
-use; the drift between them is not propagated.
+One artifact per kind and channel set (in any order): with calibrations before and after the run,
+pass the one to use; the drift between them is not propagated.
 
 Draws (`CalibrationSet.draws`): the columns of one artifact share a sample index, so parameters
 fitted together keep their correlation; different artifacts are drawn independently, each from
@@ -59,6 +65,7 @@ EQUAL_RTOL = 1e-9
 
 MISFIT_ACCEPTED = "misfit calibration accepted"
 OUTSIDE_VALIDITY = "calibration outside its validity"
+NO_VALIDITY = "calibration {aid} has no validity range: not checked against the acquisition time"
 #: Kept for compatibility; no longer added by `CalibrationSet.load` (the forward model labels the
 #: parameter that is a bound).
 BOUND_ONLY = "parameter known only as an upper limit"
@@ -125,16 +132,33 @@ def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, fl
         elif "_min_" in key:
             name, unit = key.split("_min_", 1)
             high_key, target = f"{name}_max_{unit}", f"{name}_{unit}"
-            if high_key in recorded and target in dataset:
-                if not recorded[key] <= dataset[target] <= recorded[high_key]:
-                    out.append(f"{target} = {dataset[target]:g} outside the calibrated {recorded[key]:g} to {recorded[high_key]:g}")
-        elif key == "temperature_K" and key in dataset:
-            if abs(dataset[key] - value) > TEMPERATURE_TOLERANCE_K:
+            if high_key not in recorded:
+                continue
+            if target not in dataset:
+                out.append(f"{key} = {value:g} recorded, not given for the dataset")
+            elif not recorded[key] <= dataset[target] <= recorded[high_key]:
+                out.append(f"{target} = {dataset[target]:g} outside the calibrated {recorded[key]:g} to {recorded[high_key]:g}")
+        elif key == "temperature_K":
+            if key not in dataset:
+                out.append(f"{key} = {value:g} recorded, not given for the dataset")
+            elif abs(dataset[key] - value) > TEMPERATURE_TOLERANCE_K:
                 out.append(f"temperature_K = {value:g} recorded, {dataset[key]:g} for the dataset (tolerance {TEMPERATURE_TOLERANCE_K:g} K)")
     return out
 
 
-def _check(member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None) -> list[str]:
+def detector_mismatches(member: Member, setup: Mapping[ChannelId, ChannelId]) -> list[str]:
+    """Channels whose artifact record and setup both name a detector, and differ."""
+    out = []
+    for ch in member.channels:
+        used = setup.get(ch)
+        if ch.detector and used is not None and used.detector and used.detector != ch.detector:
+            out.append(f"{ch}: calibrated on detector {ch.detector}, analysing {used.detector}")
+    return out
+
+
+def _check(
+    member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None, setup: Mapping[ChannelId, ChannelId]
+) -> list[str]:
     """Refuse or label one artifact for this analysis; return its labels."""
     labels: list[str] = []
     cal, aid = member.calibration, member.artifact_id[:12]
@@ -147,8 +171,9 @@ def _check(member: Member, analysis: str, policy: Policy, dataset: DatasetContex
             )
         labels.append(MISFIT_ACCEPTED)
     raw = {i[0] for i in cal.inputs if len(i) > 1 and i[1] in _RAW_ROLES}
+    problems: list[str] = detector_mismatches(member, setup)
     if dataset is None:
-        return labels
+        return labels + _outside(problems, cal.kind, aid, analysis, rule)
     shared = raw & dataset.input_sha256
     if shared:
         raise GuardrailRefusal(
@@ -156,9 +181,10 @@ def _check(member: Member, analysis: str, policy: Policy, dataset: DatasetContex
             "calibration data must be disjoint from analysis data, or the intervals are too narrow. Calibrate "
             "on a separate acquisition, or fit the nuisance parameters and the metric in one likelihood."
         )
-    problems: list[str] = []
     valid = member.manifest.get("valid_for")
-    if valid:
+    if not valid:
+        labels.append(NO_VALIDITY.format(aid=aid))
+    else:
         if dataset.acquired is None:
             problems.append("the artifact has a validity range but the dataset's acquisition time was not given")
         else:
@@ -166,14 +192,19 @@ def _check(member: Member, analysis: str, policy: Policy, dataset: DatasetContex
             if not lo <= dataset.acquired <= hi:
                 problems.append(f"acquired {dataset.acquired.isoformat()} is outside {valid['from']} to {valid['to']}")
     problems += condition_mismatches(cal.conditions, dataset.conditions)
-    if problems:
-        if "calibration_outside_validity" not in rule.allowed_corrections:
-            raise StaleCalibration(
-                f"{cal.kind} artifact {aid} does not cover this dataset: {'; '.join(problems)}. Override with "
-                f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
-            )
-        labels.append(OUTSIDE_VALIDITY)
-    return labels
+    return labels + _outside(problems, cal.kind, aid, analysis, rule)
+
+
+def _outside(problems: list[str], kind: str, aid: str, analysis: str, rule) -> list[str]:
+    """Refuse an artifact that does not cover the dataset, or label it under the override."""
+    if not problems:
+        return []
+    if "calibration_outside_validity" not in rule.allowed_corrections:
+        raise StaleCalibration(
+            f"{kind} artifact {aid} does not cover this dataset: {'; '.join(problems)}. Override with "
+            f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
+        )
+    return [OUTSIDE_VALIDITY]
 
 
 def _artifact_files(sources: Iterable[str | Path] | str | Path) -> list[Path]:
@@ -222,6 +253,18 @@ class CalibrationSet:
     labels: tuple[str, ...]
     #: Whether the use-time checks ran against a `DatasetContext`.
     dataset_checked: bool = True
+    #: The `DatasetContext` the set was checked against, if any.
+    dataset: DatasetContext | None = None
+
+    def dataset_record(self) -> dict[str, object] | None:
+        """The dataset context the artifacts were checked against, for a result's counts."""
+        if self.dataset is None:
+            return None
+        acquired = self.dataset.acquired
+        return {
+            "acquired": acquired.isoformat() if acquired is not None else None,
+            "conditions": dict(sorted(self.dataset.conditions.items())),
+        }
 
     @classmethod
     def load(
@@ -237,14 +280,16 @@ class CalibrationSet:
         """Load and check artifacts from files or directories of `<id>.json` manifests.
 
         `channels` and `kinds` select which artifacts to keep (an artifact is kept if any of its
-        channels is listed). Two kept artifacts of the same kind and channels are ambiguous and
-        refused. Without `dataset`, only the misfit check runs and the set is labelled
+        channels is listed). Two kept artifacts of the same kind and channels (in any order) are
+        ambiguous and refused. The detector of each listed channel, when given, is compared with the
+        artifact's. Without `dataset`, only the misfit check runs and the set is labelled
         `NOT_CHECKED`; analyses must pass one. With `kinds` None, deadtime-series artifacts are
         skipped for the HOM, fringe and CHSH analyses (their forward model does not read them) and
         the set is labelled `SERIES_UNUSED`.
         """
         policy = policy or Policy.default()
-        want_ch = set(channels) if channels is not None else None
+        setup = {c: c for c in channels} if channels is not None else {}
+        want_ch = set(setup) if channels is not None else None
         want_kind = set(kinds) if kinds is not None else None
         members: list[Member] = []
         skipped_series = False
@@ -259,9 +304,9 @@ class CalibrationSet:
             if want_ch is not None and not want_ch & set(cal.channels):
                 continue
             members.append(Member(artifact_id(manifest), cal, MappingProxyType(manifest)))
-        seen: dict[tuple[str, tuple[ChannelId, ...]], str] = {}
+        seen: dict[tuple[str, frozenset[ChannelId]], str] = {}
         for m in members:
-            key = (m.kind, m.channels)
+            key = (m.kind, frozenset(m.channels))
             if key in seen and seen[key] != m.artifact_id:
                 raise ConfigError(
                     f"two {m.kind} artifacts for {', '.join(map(str, m.channels))} ({seen[key][:12]}, "
@@ -271,14 +316,14 @@ class CalibrationSet:
         members = list({m.artifact_id: m for m in members}.values())
         labels: list[str] = []
         for m in members:
-            labels += _check(m, analysis, policy, dataset)
+            labels += _check(m, analysis, policy, dataset, setup)
         if skipped_series:
             labels.append(SERIES_UNUSED)
         if dataset is None:
             labels.append(NOT_CHECKED)
         if policy.is_modified:
             labels.insert(0, POLICY_MODIFIED)
-        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None)
+        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None, dataset)
 
     @property
     def artifact_ids(self) -> tuple[str, ...]:
@@ -316,6 +361,7 @@ class CalibrationSet:
 __all__ = [
     "BOUND_ONLY",
     "MISFIT_ACCEPTED",
+    "NO_VALIDITY",
     "NOT_CHECKED",
     "SERIES_UNUSED",
     "OUTSIDE_VALIDITY",
@@ -325,4 +371,5 @@ __all__ = [
     "JointDraws",
     "Member",
     "condition_mismatches",
+    "detector_mismatches",
 ]

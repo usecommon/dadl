@@ -40,6 +40,7 @@ from dadl.analysis._twopoint import (
     range_ends,
     run_counts,
     span_ps,
+    use_checks,
 )
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
@@ -162,6 +163,12 @@ def hom_from_tags(
         )
         if check_p is not None:
             counts["forward_check_p"] = check_p
+        use_labels, use_counts = use_checks(
+            "hom_visibility", [runs["reference"], runs["dip"]], HOM_CHANNELS, tuple(channels),
+            calibrations=calibrations, policy=policy,
+        )
+        counts.update(use_counts)
+        check_labels = check_labels + use_labels
         high = run_counts(runs["reference"], c_max, side_ref, t_ref, offsets=ref_offsets)
         low = run_counts(runs["dip"], c_min, side, t_dip)
         fwd, extra = forward_from_counts(

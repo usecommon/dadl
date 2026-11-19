@@ -16,11 +16,13 @@ from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import (
     BOUND_ONLY,
     MISFIT_ACCEPTED,
+    NO_VALIDITY,
     NOT_CHECKED,
     OUTSIDE_VALIDITY,
     SERIES_UNUSED,
     CalibrationSet,
     DatasetContext,
+    Member,
     condition_mismatches,
 )
 from dadl.sim import DetectorParams, simulate_dark
@@ -83,7 +85,7 @@ def test_loads_a_directory_and_selects_by_channel_and_kind(tmp_path):
     s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), channels=[A], kinds=["dark-afterpulse-deadtime"])
     assert len(s.members) == 1 and s.get("dark-afterpulse-deadtime", A).channels == (A,)
     assert len(s.artifact_ids[0]) == 64
-    assert s.labels == ()
+    assert s.labels == (NO_VALIDITY.format(aid=s.artifact_ids[0][:12]),)
 
 
 def test_two_artifacts_of_one_kind_and_channel_are_ambiguous(tmp_path):
@@ -234,8 +236,11 @@ def test_condition_rules():
     assert condition_mismatches(rng, {"temperature_K": 300.0})
     assert condition_mismatches({"temperature_K": 253.0}, {"temperature_K": 253.4}) == []
     assert condition_mismatches({"temperature_K": 253.0}, {"temperature_K": 254.0})
-    # diagnostics and keys the dataset does not give are not compared
-    assert condition_mismatches({"gaps": 2e4, "temperature_K": 253.0}, {}) == []
+    # diagnostics are not compared; a recorded temperature or bracket the dataset does not give is
+    # a mismatch, as a bias is (council round 3: leaving the condition out passed the check)
+    assert condition_mismatches({"gaps": 2e4}, {}) == []
+    assert condition_mismatches({"temperature_K": 253.0}, {}) == ["temperature_K = 253 recorded, not given for the dataset"]
+    assert condition_mismatches(rng, {}) == ["temperature_min_K = 250 recorded, not given for the dataset"]
 
 
 def test_without_a_dataset_only_the_misfit_check_runs(tmp_path):
@@ -291,3 +296,72 @@ def test_a_set_loaded_without_a_dataset_labels_the_corrected_value(tmp_path):
         runs, Window(width_ps=1000, source="plan"), policy=policy, calibrations=s, channels=(A, B), reference_delay_ps=20.0
     )
     assert "window_capture" in r.corrections and NOT_CHECKED in r.labels
+
+
+# -- council round 3 ------------------------------------------------------------------------------
+
+
+def test_a_recorded_temperature_needs_the_dataset_s(tmp_path):
+    # R2: dark artifacts recorded at 2.5 K loaded with no --condition and no label.
+    write(make_cal(A, seed=1, conditions={"temperature_K": 2.5}), tmp_path)
+    with pytest.raises(StaleCalibration, match="temperature_K = 2.5 recorded, not given for the dataset"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions={"temperature_K": 2.6}))
+    assert s.dataset_record() == {"acquired": "2026-11-02T00:00:00+00:00", "conditions": {"temperature_K": 2.6}}
+
+
+def test_an_artifact_without_validity_is_labelled(tmp_path):
+    write(make_cal(A, seed=1), tmp_path)
+    write(make_cal(B, seed=2), tmp_path, valid_until=dt.datetime(2026, 11, 3, tzinfo=UTC))
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    no_range = [m.artifact_id[:12] for m in s.members if "valid_for" not in m.manifest]
+    assert s.labels == (NO_VALIDITY.format(aid=no_range[0]),)
+
+
+def test_ambiguity_does_not_depend_on_channel_order(tmp_path):
+    # R4: one pair calibrated as (A, B) and again as (B, A); both were loaded, and the artifact ID
+    # (so --created) chose which one was used.
+    import dataclasses
+
+    write(dataclasses.replace(make_cal(A, seed=1), channels=(A, B)), tmp_path)
+    write(dataclasses.replace(make_cal(A, seed=2), channels=(B, A)), tmp_path)
+    with pytest.raises(ConfigError, match="pass the one to use"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+
+
+def test_another_detector_s_artifact_is_outside_its_validity(tmp_path):
+    # R1: an artifact recorded for detector SNSPD-X9 was used for SNSPD-A1 on the same tagger input
+    # (ChannelId equality is the input), getting around the refusal of the real detector's.
+    old = ChannelId("HydraHarp-100", 0, role="A", detector="SNSPD-X9")
+    new = ChannelId("HydraHarp-100", 0, role="A", detector="SNSPD-A1")
+    write(make_cal(old, seed=1), tmp_path, valid_until=dt.datetime(2026, 11, 3, tzinfo=UTC))
+    with pytest.raises(StaleCalibration, match="calibrated on detector SNSPD-X9, analysing SNSPD-A1"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), channels=[new])
+    CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), channels=[old])
+    CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), channels=[ChannelId("HydraHarp-100", 0)])
+    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "same detector, renamed")
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), channels=[new], policy=policy)
+    assert OUTSIDE_VALIDITY in s.labels
+
+
+def test_a_dead_time_longer_than_the_analysed_gaps_is_refused():
+    # R1: another detector's dark artifact applied a 1 us dead time to a run whose gaps go down to
+    # 30 ns. A dead time known only as an upper limit is not checked.
+    import dataclasses
+
+    from dadl.forward import check_dead_time_gaps
+
+    det = DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=1_000_000, jitter_sigma_ps=0.0)
+    rng = np.random.default_rng(5)
+    cal = calibrate_dark(simulate_dark(det, 2.0, rng), A, backend="sim", seed=1, n_draws=400)
+    assert "dead_time_ps" not in cal.stand_in
+    s = CalibrationSet(ANALYSIS, (Member("x" * 64, cal, {}),), ())
+    fast = dataclasses.replace(det, dead_time_ps=30_000, dark_rate_cps=2e6)
+    run = {"A": simulate_dark(fast, 0.05, rng)}
+    with pytest.raises(StaleCalibration, match="analysed gaps are shorter, down to"):
+        check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS)
+    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "checking")
+    labels, counts = check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS, policy=policy)
+    assert labels == (OUTSIDE_VALIDITY,) and 29_000 < counts["min_gap_ps"]["A"] < 31_000
+    slow = {"A": simulate_dark(det, 1.0, rng)}
+    assert check_dead_time_gaps(s, {"A": A}, [slow], analysis=ANALYSIS)[0] == ()

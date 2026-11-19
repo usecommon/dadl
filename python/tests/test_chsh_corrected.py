@@ -14,7 +14,7 @@ from dadl.calibration.delay import calibrate_delay
 from dadl.closed_form import chsh_ideal
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal
-from dadl.forward import ACCIDENTALS_MODELLED, FORWARD_MODEL
+from dadl.forward import FORWARD_MODEL, chsh_model_label
 from dadl.guardrails import POLICY_MODIFIED, Policy
 from dadl.propagate import CalibrationSet, DatasetContext
 from dadl.sim import DetectorParams, PairSource, simulate_chsh, simulate_dark, simulate_pairs
@@ -67,7 +67,7 @@ def test_corrected_s_removes_the_dead_time_selection(data):
     assert r.corrected.value < r.raw.value
     assert r.corrections == ("dead_time", "accidental_subtraction", "window_capture")
     assert len(r.artifact_ids) == 8
-    for label in (FORWARD_MODEL, ACCIDENTALS_MODELLED, POLICY_MODIFIED):
+    for label in (FORWARD_MODEL, chsh_model_label(r.corrections), POLICY_MODIFIED):
         assert label in r.labels
     assert r.corrected.stderr_calibration > 0
 
@@ -193,9 +193,12 @@ def test_delays_that_miss_the_pair_peaks_are_labelled():
 def test_matched_delays_are_not_labelled():
     # chsh-spad physics (350 ps jitter, 2 ns window, afterpulsing): |raw - reweighted| stays well
     # under half a standard error.
-    from dadl.analysis.chsh import CAPTURE_IMBALANCE
+    import math
+
+    from dadl.analysis.chsh import CAPTURE_IMBALANCE, CAPTURE_LOW
 
     prefix = CAPTURE_IMBALANCE.split("{")[0]
+    low = CAPTURE_LOW.split("{")[0]
     det = DetectorParams(
         efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0, afterpulse_prob=0.005,
         afterpulse_tau_ps=50_000,
@@ -206,6 +209,22 @@ def test_matched_delays_are_not_labelled():
         r = chsh(runs, Window(width_ps=2000, source="plan"), settings_deg=SETTINGS)
         assert not any(lab.startswith(prefix) for lab in r.labels)
         assert abs(r.raw.value - r.counts["capture_reweighted_s"]) < 0.25 * r.raw.stderr
+    # Council round 3 (N1, G2): narrow peaks binned at W/30, and peaks as wide as the window fitted
+    # only within it, gave offsets of +4 to +51 ps and false labels on matched delays.
+    for pair_jitter, width, rate in ((30, 2000, 1e6), (30, 10_000, 1e6), (495, 800, 1e5)):
+        det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=pair_jitter / math.sqrt(2))
+        for seed in range(3):
+            runs = simulate_chsh(PairSource(pair_rate_per_s=rate, visibility=0.95), dict.fromkeys(IDS, det), 1.0,
+                                 np.random.default_rng(200 + seed), SETTINGS)
+            r = chsh(runs, Window(width_ps=width, source="plan"), settings_deg=SETTINGS)
+            assert not any(lab.startswith((prefix, low)) for lab in r.labels), (pair_jitter, width, seed)
+            assert max(abs(o) for o in r.counts["capture_offsets_ps"].values()) < 5.0 + 0.01 * pair_jitter
+    # A window narrow against the jitter, delays matched: low capture, not a delay error (G5).
+    runs = simulate_chsh(PairSource(pair_rate_per_s=1e5, visibility=0.95), dict.fromkeys(IDS, det), 1.0,
+                         np.random.default_rng(200), SETTINGS)
+    r = chsh(runs, Window(width_ps=600, source="plan"), settings_deg=SETTINGS)
+    assert any(lab.startswith(low) for lab in r.labels)
+    assert not any(lab.startswith(prefix) for lab in r.labels)
 
 
 def test_a_delay_drift_since_calibration_is_refused(tmp_path):
@@ -230,3 +249,51 @@ def test_a_delay_drift_since_calibration_is_refused(tmp_path):
     cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=loose, dataset=CTX)
     r = chsh(drifted, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
     assert FORWARD_MISFIT_ACCEPTED in r.labels
+    assert abs(r.counts["delay_drift_z"]) > 3.29
+    # Council round 3: 100 ps at 150 ps jitter and a 1 ns window is refused too.
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=strict, dataset=CTX)
+    drifted = simulate_chsh(MISDECLARED_SRC, _late(100), 1.0, rng, SETTINGS)
+    with pytest.raises(Misspecified, match="calibrated delays"):
+        chsh(drifted, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+
+
+@pytest.mark.slow
+def test_current_delay_artifacts_are_not_refused(tmp_path_factory):
+    # Council round 3 (G1): the drift threshold had no noise term and refused 2-65% of clean runs
+    # (12/60 here: 150 ps jitter, 1 ns window, delays declared 0, artifacts current).
+    from dadl.errors import Misspecified
+
+    strict = _policy("accidental_subtraction", "window_capture", "misfit_calibration")
+    window = Window(width_ps=1000, source="plan")
+    zs = []
+    for seed in range(12):
+        rng = np.random.default_rng(5000 + seed)
+        d = tmp_path_factory.mktemp(f"drift{seed}")
+        _calibrate(d, _late(400), rng)
+        cset = CalibrationSet.load(d, analysis="chsh", policy=strict, dataset=CTX)
+        runs = simulate_chsh(MISDECLARED_SRC, _late(400), 1.0, rng, SETTINGS)
+        try:
+            r = chsh(runs, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+        except Misspecified as exc:
+            assert "calibrated delays" not in str(exc), seed
+            continue
+        zs.append(r.counts["delay_drift_z"])
+    assert len(zs) >= 10 and max(abs(z) for z in zs) < 3.29
+
+
+def test_a_corrected_s_without_dark_artifacts_says_so(tmp_path):
+    # Council round 3 (R3): with no dark artifacts the label said dead time and window capture were
+    # modelled, on a corrected S that kept the whole dead-time selection.
+    from dadl.analysis.chsh import DEAD_TIME_UNCORRECTED
+    from dadl.guardrails import DEAD_TIME_SELECTION
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=1_000_000, jitter_sigma_ps=350.0)
+    runs = simulate_chsh(SRC, dict.fromkeys(IDS, det), 0.2, np.random.default_rng(4), SETTINGS)
+    policy = _policy("accidental_subtraction")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=policy, dataset=CTX)
+    r = chsh(runs, Window(width_ps=2000, source="plan"), policy, settings_deg=SETTINGS, calibrations=cset, channels=IDS)
+    assert r.corrections == ("accidental_subtraction",)
+    label = chsh_model_label(r.corrections)
+    assert label.startswith("accidentals modelled; dead time (no dark artifacts) and window capture") and label in r.labels
+    assert DEAD_TIME_SELECTION in r.labels and DEAD_TIME_UNCORRECTED in r.labels
+    assert r.counts["dataset"] == {"acquired": CTX.acquired.isoformat(), "conditions": {}}

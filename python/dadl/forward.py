@@ -239,6 +239,76 @@ def _dead_times(
     return da, db, np.array(pa), np.array(pb)
 
 
+#: Analysed gaps below this fraction of a dark dead time's floor count against it.
+GAP_FRACTION = 0.9
+#: The floor sits this many times the interval's lower half-width below the point (the shortest gap).
+GAP_FLOOR_WIDTHS = 3.0
+#: More such gaps than max(GAP_COUNT, GAP_SHARE x gaps) refuse the dead time.
+GAP_COUNT = 10
+GAP_SHARE = 1e-3
+
+
+def check_dead_time_gaps(
+    calibrations: CalibrationSet | None,
+    channels: Mapping[str, ChannelId],
+    runs,
+    *,
+    analysis: str,
+    policy: Policy | None = None,
+) -> tuple[tuple[str, ...], dict[str, object]]:
+    """Compare each identified dark dead time with the analysed tags: (labels, counts).
+
+    A non-paralyzable dead time tau leaves no gap shorter than tau on its channel. When more than
+    max(`GAP_COUNT`, `GAP_SHARE` x gaps) of the analysed gaps (each acquisition in `runs`, a dict
+    of channel name -> tags) are shorter than `GAP_FRACTION` times tau's floor, the
+    artifact does not describe this detector (another detector's dark artifact gave a 1 us dead
+    time to a run with 30 ns gaps; council round 3) and `StaleCalibration` is raised, unless the
+    policy allows `calibration_outside_validity` (then `OUTSIDE_VALIDITY`). A dead time known only
+    as an upper limit is not checked: gaps below it are consistent with it. The shortest analysed
+    gap per channel is in the counts (`min_gap_ps`).
+
+    The floor is the point minus `GAP_FLOOR_WIDTHS` times its distance to the 95% lower end, not
+    the lower end itself: the dead time's lower tail is about exponential, so the lower end misses
+    a short dark run's truth in 2.5% of channels (a 0.1 s dark run read 145 ns, lower end above the
+    true 50 ns, and was refused), and three widths out it misses about 1 in 10^4."""
+    from dadl.errors import StaleCalibration
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    if calibrations is None or not any(m.kind == DARK_KIND for m in calibrations.members):
+        return (), {}
+    policy = policy or Policy.default()
+    min_gap: dict[str, float] = {}
+    problems: list[str] = []
+    for name, cid in channels.items():
+        try:
+            cal = calibrations.get(DARK_KIND, cid)
+        except KeyError:
+            continue
+        gaps = np.concatenate([np.diff(np.sort(np.asarray(run[name], dtype=np.int64))) for run in runs] or [np.zeros(0)])
+        if gaps.size == 0:
+            continue
+        min_gap[name] = float(gaps.min())
+        if "dead_time_ps" in cal.stand_in or "dead_time_ps" in cal.unidentified:
+            continue
+        tau = cal.estimates["dead_time_ps"]
+        floor = float(tau.value) - GAP_FLOOR_WIDTHS * (float(tau.value) - float(tau.low))
+        k = int(np.count_nonzero(gaps < GAP_FRACTION * floor))
+        if k > max(GAP_COUNT, GAP_SHARE * gaps.size):
+            problems.append(
+                f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter, down to "
+                f"{gaps.min() / 1000:.4g} ns"
+            )
+    labels: tuple[str, ...] = ()
+    if problems:
+        if "calibration_outside_validity" not in policy.rule_for(analysis).allowed_corrections:
+            raise StaleCalibration(
+                f"the dark artifacts do not describe the analysed detectors: {'; '.join(problems)}. Override with "
+                f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
+            )
+        labels = (OUTSIDE_VALIDITY,)
+    return labels, ({"min_gap_ps": min_gap} if min_gap else {})
+
+
 def _used(
     calibrations: CalibrationSet | None, dark_channels, pairs
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -419,10 +489,30 @@ def bound_range(
 
 #: Signs of the four outcome combinations in E = (N++ + N-- - N+- - N-+) / N.
 OUTCOME_SIGNS: Mapping[tuple[str, str], int] = {("+", "+"): 1, ("-", "-"): 1, ("+", "-"): -1, ("-", "+"): -1}
+#: What a corrected S models, built from its corrections (`chsh_model_label`; council round 3: the
+#: text said dead time and window capture were modelled when neither was applied).
 ACCIDENTALS_MODELLED = (
-    "accidentals, dead time and window capture modelled; detector efficiencies not (an output imbalance biases "
-    "corrected S as it does raw S); secondary, not a Bell claim (the headline is raw S)"
+    "{modelled} modelled; {unmodelled}detector efficiencies not (an output imbalance biases corrected S as it does "
+    "raw S); secondary, not a Bell claim (the headline is raw S)"
 )
+_CHSH_PARTS = (
+    ("accidental_subtraction", "accidentals", None),
+    ("dead_time", "dead time", "dead time (no dark artifacts)"),
+    ("window_capture", "window capture", "window capture (no delay-jitter artifacts)"),
+)
+
+
+def _and(words: list[str]) -> str:
+    return ", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1 else "".join(words)
+
+
+def chsh_model_label(corrections) -> str:
+    """`ACCIDENTALS_MODELLED` for a corrected S with these corrections."""
+    done = [name for key, name, _ in _CHSH_PARTS if key in corrections]
+    missing = [why for key, _, why in _CHSH_PARTS if why and key not in corrections]
+    return ACCIDENTALS_MODELLED.format(
+        modelled=_and(done), unmodelled=f"{_and(missing)} not modelled; " if missing else ""
+    )
 
 
 def _channel_dead_times(
@@ -569,7 +659,7 @@ def corrected_chsh(
     policy = policy or Policy.default()
     delays = dict(delays_ps or {})
     corrections: list[str] = []
-    labels: list[str] = [FORWARD_MODEL, ACCIDENTALS_MODELLED]
+    labels: list[str] = [FORWARD_MODEL]
     dead = _channel_dead_times(calibrations, channels, n_draws, seed)
     if dead is not None:
         policy.check_correction("chsh", "dead_time")
@@ -658,6 +748,7 @@ def corrected_chsh(
     pairs = [(channels["A" + x], channels["B" + y]) for (x, y) in OUTCOME_SIGNS] if have else []
     ids, used_labels = _used(calibrations, list(channels.values()) if dead is not None else (), pairs)
     labels += [lab for lab in used_labels if lab not in labels]
+    labels.insert(1, chsh_model_label(corrections))
     return Corrected(est, tuple(corrections), tuple(labels), ids)
 
 
@@ -668,6 +759,8 @@ __all__ = [
     "DEAD_TIME_RANGE_WIDE",
     "JITTER_BOUND",
     "chsh_bound_range",
+    "check_dead_time_gaps",
+    "chsh_model_label",
     "OUTCOME_SIGNS",
     "corrected_chsh",
     "CAPTURE_UNMODELLED",

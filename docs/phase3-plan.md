@@ -333,6 +333,7 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a chsh-dead-time regime whose dark runs identify the dead time or that gates the range | M4 council round 2 (B2, G) | M10, next to rotating seeds (regimes were declared before the first run; needs the owner's agreement) |
 | Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
 | Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
+| Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M10, next to rotating seeds (owner's agreement) |
 
 ## Decisions
 

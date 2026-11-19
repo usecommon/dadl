@@ -317,3 +317,33 @@ def test_coverage_merge_refuses_shards_with_different_gates(tmp_path):
     files[1]["results"][0]["gate"] = [0.5, 1.0]
     with pytest.raises(ValueError, match="disagree on the gate"):
         merge(files)
+
+
+def test_survival_takes_an_integer_tau():
+    # Council round 3 (N3): an int tau_p raised a casting error.
+    w = np.array([1.0, 30_000.0, 90_000.0])
+    assert np.array_equal(survival(w, 1e-6, 20_000), survival(w, 1e-6, 20_000.0))
+    assert np.array_equal(gap_cdf(w, 1e-6, 20_000), gap_cdf(w, 1e-6, 20_000.0))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [0, 1])
+def test_a_run_past_the_count_rate_maximum_is_fitted_on_its_branch(seed):
+    # Council round 3 (N2): the gap law depends on a run's rate through n exp(-n tau_p), which takes
+    # each value twice. A 6e7 cps run (n tau_p 2.4) was fitted on the low branch (7e6 cps) and
+    # tau_p was biased to tau_np: 4/4 intervals excluded 40 ns.
+    det = _det(40_000, 45_000, dark_rate_cps=50_000.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0)
+    rng = np.random.default_rng(seed)
+    ap = calibrate_dark(simulate_dark(det, 1.0, rng), CH, backend="sim", seed=1, n_draws=400)
+    runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in (1e6, 3e6, 6e7)]
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, seed=1, n_draws=10)
+    assert cal.estimates["dead_time_p_ps"].contains(40_000.0)
+    assert any("input rate 5" in n or "input rate 6" in n for n in cal.notes if n.startswith("run 2"))
+
+
+def test_without_afterpulsing_a_rate_past_the_maximum_is_ambiguous():
+    # Without afterpulsing both branches fit equally: the note gives both rates.
+    runs = _runs(_det(20_000, 50_000), (5e6, 2e7, 1e8), 0.01, 3)
+    cal = calibrate_deadtime_series(runs, CH, seed=1, n_draws=10)
+    note = next(n for n in cal.notes if n.startswith("run 2"))
+    assert " or " in note and "do not tell which" in note

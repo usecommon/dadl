@@ -65,6 +65,26 @@ def forward_from_counts(
     return fwd, extra
 
 
+def use_checks(
+    analysis: str,
+    runs: list[dict[str, np.ndarray]],
+    names: tuple[str, str],
+    channels: tuple[ChannelId, ChannelId],
+    *,
+    calibrations: CalibrationSet,
+    policy: Policy | None,
+) -> tuple[tuple[str, ...], dict[str, object]]:
+    """The analysed gaps against the dark dead times (`forward.check_dead_time_gaps`) and the
+    dataset context the calibrations were checked against: (labels, counts)."""
+    from dadl.forward import check_dead_time_gaps
+
+    labels, counts = check_dead_time_gaps(calibrations, dict(zip(names, channels)), runs, analysis=analysis, policy=policy)
+    record = calibrations.dataset_record()
+    if record is not None:
+        counts["dataset"] = record
+    return labels, counts
+
+
 def range_ends(extra: dict[str, float]) -> tuple[float, ...]:
     """The corrected value at both ends of the D3 range, if any (for `threshold_labels`)."""
     return tuple(extra[k] for k in ("corrected_at_zero_dead_time", "corrected_at_bound_dead_time") if k in extra)

@@ -30,6 +30,7 @@ from dadl.analysis._twopoint import (
     range_ends,
     run_counts,
     span_ps,
+    use_checks,
 )
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
@@ -138,6 +139,12 @@ def fringe_from_tags(
         )
         if check_p is not None:
             counts["forward_check_p"] = check_p
+        use_labels, use_counts = use_checks(
+            "bell_visibility", [runs["max"], runs["min"]], FRINGE_CHANNELS, tuple(channels),
+            calibrations=calibrations, policy=policy,
+        )
+        counts.update(use_counts)
+        check_labels = check_labels + use_labels
         high = run_counts(runs["max"], c_max, side_max, t_max)
         low = run_counts(runs["min"], c_min, side_min, t_min)
         fwd, extra = forward_from_counts(

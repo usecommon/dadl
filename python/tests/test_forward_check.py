@@ -89,3 +89,39 @@ def test_a_peak_that_fills_the_window_is_fitted_from_the_outer_bins(tmp_path):
         seed=2007, reference_delay_ps=80.0,
     )
     assert counts["forward_check_p"] > 0.1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [36, 43])
+def test_a_start_delay_tens_of_ps_off_does_not_stall_the_fit(tmp_path, seed):
+    # Council round 3 (G3): with the start 14-27 ps off the peak, L-BFGS-B stopped on the
+    # background step and a clean histogram read p 2e-6 (seed 36) and 7e-7 (seed 43); polished,
+    # 0.69 and 0.82.
+    import dataclasses
+    import datetime as dt
+
+    from dadl.analysis.chsh import SIGNS
+    from dadl.artifact import write_artifact
+    from dadl.calibration.delay import calibrate_delay
+    from dadl.data import ChannelId
+    from dadl.forward_check import delay_start, pair_pvalue
+    from dadl.propagate import CalibrationSet
+    from dadl.sim import simulate_chsh, simulate_pairs
+
+    ids = {n: ChannelId("sim", i) for i, n in enumerate(("A+", "A-", "B+", "B-"))}
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=350.0)
+    dets = {n: dataclasses.replace(det, delay_ps=400 if n in ("A+", "B+") else 0) for n in ids}
+    rng = np.random.default_rng(5000 + seed)
+    for x in "+-":
+        for y in "+-":
+            a, b = simulate_pairs(2e5, dets["A" + x], dets["B" + y], 0.05, rng)
+            cal = calibrate_delay(a, b, (ids["A" + x], ids["B" + y]), backend="sim", seed=1, n_draws=400)
+            write_artifact(cal, tmp_path, accept_misfit=True, created=dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc))
+    cset = CalibrationSet.load(tmp_path, analysis="chsh")
+    settings = {"a": 0.0, "a'": 45.0, "b": 22.5, "b'": 67.5}
+    runs = simulate_chsh(PairSource(pair_rate_per_s=2e5, visibility=0.70), dets, 1.0, rng, settings)
+    assert ("a", "b'") in SIGNS
+    d_cal, jitter = delay_start(cset, ids["A+"], ids["B-"])
+    run = runs[("a", "b'")]
+    pair = PairData("a,b' A+/B-", np.sort(run["A+"]), np.sort(run["B-"]), 0.0, 2000, d_cal, jitter)
+    assert pair_pvalue(pair) > 0.1

@@ -169,12 +169,21 @@ plainly:
   A+ and B+ 400 ps late, declared 0, read S = 2.20 for a 1.98 source (2.05 at
   200 ps). Each outcome pair's peak is fitted over the four settings; S
   reweighted by those captures is in the counts, and a result whose raw S
-  differs from it by more than half a standard error carries an "unequal
-  window capture" label. Declare the delays from a pair calibration.
+  differs from it by more than half a standard error and by more than 3.29
+  standard deviations of the peak fits carries an "unequal window capture"
+  label. Declare the delays from a pair calibration. A window narrow against
+  the jitter, with the peaks on the declared delays, is labelled separately
+  ("window narrow against the pair jitter").
 - **Corrected CHSH** is secondary, never the Bell claim. Calibrated delays
   that no longer match the analysed peaks (a drift since calibration) are
   refused as `Misspecified`: the predictive check refits the delay, so it
-  would not see the drift. A dead time known only as an upper limit (an SNSPD,
+  would not see the drift. The drift check refuses only a drift that moves S
+  by more than half its statistical error and more than 3.29 standard
+  deviations of the check's own noise (the delay artifacts' capture draws and
+  the analysed peak fit). A smaller drift is not refused (100 ps at 350 ps
+  jitter and a 2 ns window: 0.41 se, 0/20 refused); one within the artifacts'
+  noise is covered by the calibration part of the interval. Longer delay
+  calibrations make the check sharper. A dead time known only as an upper limit (an SNSPD,
   or a short dark run) is used at the bound for the value and its interval;
   the counts give the value at zero dead time as well (the truth lies
   between), and a range wider than the error is labelled: quote the range.
@@ -247,8 +256,10 @@ plainly:
   Chunked reading is planned. Unrecognised special records and a divided sync
   input mapped as a detector are refused.
 - **Tagger settings** (input offsets, trigger levels, dead-time settings, the
-  tick) are recorded in each calibration's `conditions` from PTU headers;
-  they are not yet compared when the calibration is used.
+  tick) are recorded in each calibration's `conditions` from PTU headers.
+  Tagger settings (`tagger_*`) and bias are compared when the calibration is
+  used: a mismatch, or a setting recorded but not given for the dataset, is
+  refused (overridable).
 - **Double clicks** in CHSH (both outputs of one side in a slot) count in two
   outcome combinations, which pulls E toward 0.
 - **Reproducibility.** The same tags, setup and software stack give the same
@@ -260,8 +271,10 @@ plainly:
   detector serial, the input file and setup hashes, the acquisition time
   and the conditions you give (`--condition temperature_K=233`), but it is
   not a calibration record in the ISO/IEC 17025 sense: uncertainty is
-  statistical only, and traceability, validity (`--valid-until`) and
-  supersession (`--supersedes`) are recorded, not enforced. The ID gives
+  statistical only, and traceability is recorded, not enforced. Validity is
+  enforced (from acquisition, or creation without one, to `--valid-until`);
+  an artifact with no validity range is labelled; supersession
+  (`--supersedes`) is recorded, not enforced. The ID gives
   integrity, not authenticity: signing is planned. Parameters reported only
   as a bound have `value: null` and `bound: "upper"`, and draw columns that
   are stand-ins rather than a posterior are listed in `posterior.stand_in`.
@@ -353,8 +366,10 @@ raw. The default CHSH rule allows no correction, so each is an explicit policy c
 `--allow dead_time=... --allow accidental_subtraction=... --allow window_capture=...`. Dark artifacts must cover
 every channel and delay-jitter artifacts all four channel pairs.
 
-One artifact per kind and channel: with calibrations before and after the run, pass the one to
-use; the drift between them is not propagated.
+One artifact per kind and channel set (in any order): with calibrations before and after the run,
+pass the one to use; the drift between them is not propagated. An artifact recorded for another
+detector serial than the setup names, or a dark dead time that more than a few of the analysed
+gaps undercut, is refused as outside its validity (overridable).
 
 From Python:
 

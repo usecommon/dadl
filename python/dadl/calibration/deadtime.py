@@ -42,12 +42,20 @@ sensitivity, of tau_p or of its upper limit) and added to the intervals and draw
 still pending when the next gap starts is not modelled (a fraction about p n tau_a / (1 + n tau_a)
 of gaps, recorded as `afterpulse_pending_max`); above 0.5% a note says tau_p is biased low.
 
+**Two rates per gap law.** Without afterpulsing the law depends on n only through
+a = n exp(-n tau_p), which takes each value twice (n tau_p below and above 1): past the count-rate
+maximum the gaps do not tell which rate it is. With afterpulsing the high-rate branch can fit
+better. Each run's rate is fitted from both branches and the lower NLL kept (council round 3: a
+run at 6e7 cps stayed on the low branch and biased tau_p to tau_np).
+
 **Fit.** tau_np is the shortest gap over all runs, with the dark fit's exact tick-quantile
 interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge. The gaps
 past it are binned (fine uniform bins, then geometric ones) and fitted by multinomial maximum
 likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the profile
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
-likelihood's (chi-square(1)); when it reaches tau_p = 0 the hard-edge model is not rejected and
+likelihood's (chi-square(1)), from the lowest to the highest tau_p inside it when the profile has
+two minima (one run on each branch; `_fit_tau`), joined with the interval of the fit held to the
+low branch (the branches are told apart only by the afterpulses, not reliably); when it reaches tau_p = 0 the hard-edge model is not rejected and
 tau_p is an upper limit (unidentified; draws uniform below it, a stand-in). tau_p's point, upper
 end and draws are capped at tau_np's. The likelihood ratio against the hard-edge model is
 recorded (`lr_hard_edge`).
@@ -83,7 +91,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "2"
+METHOD_VERSION = "3"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -98,6 +106,8 @@ GEOMETRIC_RATIO = 1.05
 MAX_UNIFORM_BINS = 6000
 MIN_EXPECTED = 5.0
 PROFILE_TARGET = 3.841
+#: Grid points of the tau_p profile before its local minima are refined.
+PROFILE_GRID = 30
 F0_SAMPLES = 4000
 #: Above this fraction of gaps starting with an afterpulse still pending (not modelled), a note.
 PENDING_MAX = 0.005
@@ -128,6 +138,7 @@ def _modes(a: float, tau: float) -> tuple[float, float]:
 def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
     """S(w): 1 below tau, S' = -a S(w - tau) above (see the module docstring)."""
     w = np.asarray(w, dtype=float)
+    n, tau = float(n), float(tau)
     if tau <= 0.0:
         return np.exp(-n * np.maximum(w, 0.0))
     a = n * math.exp(-n * tau)
@@ -160,6 +171,7 @@ def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
 
 def gap_cdf(u: np.ndarray, n: float, tau: float) -> np.ndarray:
     """P(gap - tau_np <= u) without afterpulsing."""
+    n, tau = float(n), float(tau)
     return 1.0 - survival(np.asarray(u, dtype=float) + tau, n, tau)
 
 
@@ -231,20 +243,55 @@ class _Run:
         return float(-np.sum(self.counts[self.nz] * np.log(prob[self.nz])))
 
 
+def _other_branch(n: float, tau: float) -> float:
+    """The other input rate with the same a = n exp(-n tau) (Lambert W branch -1 below n tau = 1,
+    branch 0 above)."""
+    x = n * tau
+    w = special.lambertw(-x * math.exp(-x), -1 if x < 1.0 else 0)
+    return float(-w.real / tau)
+
+
 class _Fit:
     def __init__(self, runs: list[_Run], p: float, tau_a: float | None) -> None:
         self.runs, self.p, self.tau_a = runs, p, tau_a
         self._n_cache: list[float] = [1.0 / r.mean for r in runs]
+        #: Per run, the last call's other-branch (rate, NLL above the kept one), or None.
+        self.other: list[tuple[float, float] | None] = [None] * len(runs)
+        #: False: the low branch only (a warm start there).
+        self.both_branches = True
 
     def best_n(self, run_index: int, tau: float) -> tuple[float, float]:
-        """The run's input rate maximizing the likelihood at this tau_p, by Newton steps in log n
-        (the likelihood is close to quadratic there: its curvature is about the number of gaps)."""
+        """The run's input rate maximizing the likelihood at this tau_p: Newton from the cached
+        low-branch rate and, when tau > 0, from the other branch's rate (`_other_branch`); the
+        lower NLL is kept. The low-branch rate is cached (a warm start keeps the branch); a
+        high-branch rate moves fast with tau, so it always starts from the low one."""
+        n, f0 = self._newton(run_index, tau, self._n_cache[run_index])
+        self.other[run_index] = None
+        if tau <= 0.0 or not self.both_branches:
+            self._n_cache[run_index] = n
+            return n, f0
+        n2, f2 = self._newton(run_index, tau, self._branch_start(run_index, n, tau))
+        self._n_cache[run_index] = min(n, n2)
+        if f2 < f0:
+            n, f0, n2, f2 = n2, f2, n, f0
+        if abs(math.log(n2 / n)) > 1e-3:
+            self.other[run_index] = (n2, f2 - f0)
+        return n, f0
+
+    def _branch_start(self, run_index: int, n: float, tau: float) -> float:
+        """The other branch's rate, or the recorded rate where n tau e^{-n tau} underflows."""
+        other = _other_branch(n, tau)
+        return other if math.isfinite(other) and other > 0 else 1.0 / self.runs[run_index].mean
+
+    def _newton(self, run_index: int, tau: float, n0: float) -> tuple[float, float]:
+        """Newton steps in log n from n0 (the likelihood is close to quadratic there: its curvature
+        is about the number of gaps)."""
         run = self.runs[run_index]
 
         def f(y: float) -> float:
             return run.nll(math.exp(y), tau, self.p, self.tau_a)
 
-        y = math.log(self._n_cache[run_index])
+        y = math.log(n0)
         d = max(1e-4, 3.0 / math.sqrt(run.n_gaps))
         f0 = f(y)
         for _ in range(12):
@@ -269,7 +316,6 @@ class _Fit:
             d = max(min(d, 2.0 * abs(step)), 1e-6)
         if not np.isfinite(f0):
             raise InsufficientCounts("the gap fit failed")
-        self._n_cache[run_index] = math.exp(y)
         return math.exp(y), f0
 
     def profile(self, tau: float) -> float:
@@ -279,22 +325,51 @@ class _Fit:
         return [self.best_n(i, tau)[0] for i in range(len(self.runs))]
 
 
-def _fit_tau(fit: _Fit, tau_hi: float) -> tuple[float, float, float]:
-    """(tau_p MLE, its NLL, the NLL at tau_p = 0)."""
-    nll0 = fit.profile(0.0)
-    grid = np.geomspace(max(tau_hi * 1e-3, 1.0), tau_hi, 12)
-    vals = [fit.profile(float(t)) for t in grid]
-    k = int(np.argmin(vals))
-    if vals[k] >= nll0:
-        return 0.0, nll0, nll0
+def _minimize(fit: _Fit, grid: np.ndarray, vals: list[float], k: int) -> tuple[float, float]:
+    """The profile's minimum near grid point k."""
     lo = math.log(grid[max(k - 1, 0)])
     hi = math.log(grid[min(k + 1, grid.size - 1)])
     res = optimize.minimize_scalar(lambda y: fit.profile(math.exp(y)), bounds=(lo, hi), method="bounded",
                                    options={"xatol": 1e-5})
-    tau, val = (math.exp(float(res.x)), float(res.fun)) if res.fun < vals[k] else (float(grid[k]), vals[k])
-    if val >= nll0:
-        return 0.0, nll0, nll0
-    return tau, val, nll0
+    return (math.exp(float(res.x)), float(res.fun)) if res.fun < vals[k] else (float(grid[k]), vals[k])
+
+
+def _fit_tau(fit: _Fit, tau_hi: float) -> tuple[float, float, float, list[tuple[float, float]]]:
+    """(tau_p MLE, its NLL, the NLL at tau_p = 0, the profile at grid points and minima).
+
+    The profile can have two minima: a run whose rate may lie on either branch can fit about as
+    well at a lower tau_p on the high branch (passive-quench, 6e6 cps: 30.8 ns there, 40 ns on the
+    low branch, NLLs within 0.6). So the minima are sought twice, each refined from a grid: on the
+    profile itself (every local minimum of a `PROFILE_GRID`-point grid) and with every run on the
+    low branch (unimodal; its minimum is then refined on the profile). The lowest is the MLE; the
+    interval spans every minimum inside it (`_profile_interval`). A fit held to the low branch
+    (`both_branches` False) has the one minimum."""
+    nll0 = fit.profile(0.0)
+    both = fit.both_branches
+    fit.both_branches = False
+    coarse = np.geomspace(max(tau_hi * 1e-3, 1.0), tau_hi, 12)
+    low_vals = [fit.profile(float(t)) for t in coarse]
+    tau_low, low_best = _minimize(fit, coarse, low_vals, int(np.argmin(low_vals)))
+    fit.both_branches = both
+    if not both:
+        points = [(float(t), v) for t, v in zip(coarse, low_vals)] + [(tau_low, low_best)]
+        if low_best >= nll0:
+            return 0.0, nll0, nll0, points
+        fit.profile(tau_low)
+        return tau_low, low_best, nll0, points
+    grid = np.geomspace(max(tau_hi * 1e-3, 1.0), tau_hi, PROFILE_GRID)
+    vals = [fit.profile(float(t)) for t in grid]
+    points = [(float(t), v) for t, v in zip(grid, vals)]
+    minima = [_minimize(fit, grid, vals, k) for k in range(grid.size)
+              if vals[k] < nll0 and vals[k] <= min(vals[max(k - 1, 0)], vals[min(k + 1, grid.size - 1)])]
+    near = np.array([tau_low * 0.9, tau_low, min(tau_low * 1.1, tau_hi)])
+    minima.append(_minimize(fit, near, [fit.profile(float(t)) for t in near], 1))
+    points += minima
+    best_tau, best = min(minima, key=lambda m: m[1])
+    if best >= nll0:
+        return 0.0, nll0, nll0, points
+    fit.profile(best_tau)  # leave the warm starts at the MLE
+    return best_tau, best, nll0, points
 
 
 def _refit_near(fit: _Fit, tau: float, tau_hi: float) -> float:
@@ -305,24 +380,37 @@ def _refit_near(fit: _Fit, tau: float, tau_hi: float) -> float:
     return math.exp(float(res.x))
 
 
-def _profile_interval(fit: _Fit, tau: float, nll_min: float, nll0: float, tau_hi: float) -> tuple[float, float]:
+def _profile_interval(
+    fit: _Fit, tau: float, nll_min: float, nll0: float, tau_hi: float, points: list[tuple[float, float]]
+) -> tuple[float, float]:
+    """The 95% profile-likelihood interval for tau_p: from the lowest to the highest tau_p whose
+    profile is within chi-square(1) of the minimum (`points`, the grid from `_fit_tau`, locate
+    them; both minima are inside when the profile has two)."""
     target = nll_min + PROFILE_TARGET / 2.0
 
     def excess(t: float) -> float:
         return fit.profile(t) - target
 
+    def root(t_out: float, t_in: float) -> float:
+        a, b = sorted((t_out, t_in))
+        if excess(t_out) <= 0 or excess(t_in) > 0:
+            return t_in
+        return math.exp(optimize.brentq(lambda y: excess(math.exp(y)), math.log(a), math.log(b), xtol=1e-4))
+
+    pts = sorted(points + [(max(tau, 1.0), nll_min)])
+    inside = [t for t, v in pts if v <= target]
+    lo_in, hi_in = inside[0], inside[-1]
     if tau <= 0.0 or nll0 <= target:
         low = 0.0
     else:
-        low = optimize.brentq(lambda y: excess(math.exp(y)), math.log(max(tau * 1e-6, 1e-3)), math.log(tau), xtol=1e-4) \
-            if excess(max(tau * 1e-6, 1e-3)) > 0 else 0.0
-        low = math.exp(low) if low else 0.0
-    start = max(tau, 1.0)
-    hi = start * 1.5
-    while excess(hi) < 0 and hi < tau_hi:
-        hi *= 1.5
-    high = math.exp(optimize.brentq(lambda y: excess(math.exp(y)), math.log(start), math.log(min(hi, tau_hi)), xtol=1e-4)) \
-        if excess(min(hi, tau_hi)) > 0 else tau_hi
+        below = [t for t, v in pts if t < lo_in and v > target]
+        t_out = below[-1] if below else max(lo_in * 1e-6, 1e-3)
+        low = root(t_out, lo_in) if excess(t_out) > 0 else 0.0
+    above = [t for t, v in pts if t > hi_in and v > target]
+    if above:
+        high = root(above[0], hi_in)
+    else:
+        high = root(tau_hi, hi_in) if excess(tau_hi) > 0 else tau_hi
     return low, high
 
 
@@ -413,10 +501,26 @@ def calibrate_deadtime_series(
         shifted.append(s)
     binned = [_Run(s, tick, tau_a) for s in shifted]
     fit = _Fit(binned, p, tau_a)
+    # Without afterpulsing the branches fit equally: the low one is fitted, and both are noted.
+    fit.both_branches = p > 0
     tau_hi = float(m)  # tau_p <= tau_np
-    tau, nll_min, nll0 = _fit_tau(fit, tau_hi)
+    tau, nll_min, nll0, points = _fit_tau(fit, tau_hi)
     lr = 2.0 * (nll0 - nll_min)
-    low, high = _profile_interval(fit, tau, nll_min, nll0, tau_hi)
+    low, high = _profile_interval(fit, tau, nll_min, nll0, tau_hi, points)
+    if p > 0:
+        # The branches differ only through the afterpulses, and the high branch at a lower tau_p
+        # can fit better by up to a few NLL on runs below the count-rate maximum (2.0 for a scan
+        # to 1e7 cps at tau_p 30 ns), as the low branch does on runs past it: the interval spans
+        # the fit held to the low branch too.
+        held = _Fit(binned, p, tau_a)
+        held.both_branches = False
+        t_h, nll_h, nll0_h, pts_h = _fit_tau(held, tau_hi)
+        low_h, high_h = _profile_interval(held, t_h, nll_h, nll0_h, tau_hi, pts_h)
+        if low_h < low or high_h > high:
+            notes.append(f"a run's rate fits on either branch of n exp(-n tau_p): the interval spans the fit with "
+                         f"every run below the count-rate maximum ({low_h:.4g} to {high_h:.4g} ps) and the "
+                         f"best fit ({low:.4g} to {high:.4g} ps)")
+            low, high = min(low, low_h), max(high, high_h)
     rates = fit.rates(tau)
     identified = low > 0.0
 
@@ -436,8 +540,8 @@ def calibrate_deadtime_series(
             if identified:
                 sens[k] = (_refit_near(other, tau, tau_hi) - tau) / step
             else:
-                t_k, nll_k, nll0_k = _fit_tau(other, tau_hi)
-                sens[k] = (_profile_interval(other, t_k, nll_k, nll0_k, tau_hi)[1] - high) / step
+                t_k, nll_k, nll0_k, pts_k = _fit_tau(other, tau_hi)
+                sens[k] = (_profile_interval(other, t_k, nll_k, nll0_k, tau_hi, pts_k)[1] - high) / step
         cov = np.cov(ap_draws.T)
         shift_sd = float(math.sqrt(max(sens @ cov @ sens, 0.0)))
         if shift_sd > 0:
@@ -496,8 +600,16 @@ def calibrate_deadtime_series(
 
     probs = [r.probs(n, tau, p, tau_a) for r, n in zip(binned, rates)]
     ppc = with_interruption_check_runs(_pearson(binned, probs), notes, tags)
+    fit.both_branches = True
+    fit.rates(tau)  # each run's other branch, for the notes
     for i, n in enumerate(rates):
-        notes.append(f"run {i}: input rate {n * PS_PER_S:.4g} cps (fitted), {binned[i].n_gaps} gaps")
+        other = fit.other[i]
+        if p == 0.0 and other is not None and other[1] < 0.5:
+            lo_n, hi_n = sorted((n, other[0]))
+            notes.append(f"run {i}: input rate {lo_n * PS_PER_S:.4g} or {hi_n * PS_PER_S:.4g} cps (fitted; past the "
+                         f"count-rate maximum the gaps do not tell which), {binned[i].n_gaps} gaps")
+        else:
+            notes.append(f"run {i}: input rate {n * PS_PER_S:.4g} cps (fitted), {binned[i].n_gaps} gaps")
     cond = {"runs": float(len(runs)), "lr_hard_edge": lr, "gaps": float(sizes.sum())}
     if p > 0:
         cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a)})
