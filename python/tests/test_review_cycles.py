@@ -634,9 +634,14 @@ def test_ci_coverage_matrix_runs_every_regime():
     ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
     if not ci.exists():
         pytest.skip("repository CI file not present")
-    args = re.findall(r'args: "([^"]+)"', ci.read_text(encoding="utf-8"))
+    text = ci.read_text(encoding="utf-8")
+    args = re.findall(r'args: "([^"]+)"', text)
     whole = {a.split()[0] for a in args if "--regimes" not in a}
     listed = {r for a in args if "--regimes" in a for r in a.split("--regimes")[1].split()}
+    # Sharded regimes run as their own command, summed and gated by `coverage merge`.
+    if "dadl.calibration.coverage merge" in text:
+        listed |= {r for m in re.findall(r"dadl\.calibration\.coverage \w+ --regimes ([\w -]+?) --", text)
+                   for r in m.split()}
     for family, regimes in UNITS.items():
         assert family in whole or set(regimes) <= listed, family
 

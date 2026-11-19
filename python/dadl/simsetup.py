@@ -51,19 +51,27 @@ def simulate_setup_dark(setup: Setup, duration_s: float) -> dict:
     return {key: (dark if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}
 
 
-#: Default input rates of a dead-time scan, as fractions of 1 / dead_time_ps of the slowest channel.
+#: Default avalanche rates of a dead-time scan, as fractions of 1 / dead_time_ps of the slowest channel.
 DEADTIME_SCAN_FRACTIONS = (0.05, 0.15, 0.3, 0.5)
 
 
 def deadtime_scan_rates(setup: Setup) -> tuple[float, ...]:
-    """Default photon rates (per s, at each detector) of a dead-time scan: one per setting, up to
-    four, spread so that rate x dead time runs from 0.05 to 0.5 (paralysis grows with it)."""
+    """Default photon rates (per s, at each detector, before its efficiency) of a dead-time scan:
+    one per setting, up to four, spread so that the avalanche rate x dead time runs from 0.05 to
+    0.5 (paralysis grows with it) on the slowest channel at the smallest efficiency.
+
+    Detector physics review (council round 1): scaled by photon rate alone, a detector of
+    efficiency 0.5 reached only 0.25 and tau_p went unidentified.
+    """
     longest = max((d.dead_time_ps for d in setup.detectors.values()), default=0)
     if longest <= 0:
         raise DadlError("the setup's detectors have no dead time to scan")
+    eff = min(d.efficiency for d in setup.detectors.values())
+    if not eff > 0:
+        raise DadlError("the setup's detectors need a positive efficiency to scan")
     k = min(len(setup.setting_keys), len(DEADTIME_SCAN_FRACTIONS))
     fractions = DEADTIME_SCAN_FRACTIONS[:k] if k > 2 else (0.1, 0.4)
-    return tuple(f / (longest * 1e-12) for f in fractions)
+    return tuple(f / (longest * 1e-12 * eff) for f in fractions)
 
 
 def simulate_setup_deadtime_scan(setup: Setup, rates: tuple[float, ...], duration_s: float) -> dict:

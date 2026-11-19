@@ -19,6 +19,8 @@ restarts it, and a candidate passes only when the previous candidate, passed or
 not, is at least `dead_time_p_ps` earlier; what passes then meets the
 non-paralyzable `dead_time_ps` (design, "Detection process": a paralyzable stage
 followed by a non-paralyzable one, tau_np > tau_p).
+Avalanche candidates blocked by the dead time restart the paralyzable stage
+but neither afterpulse nor emit crosstalk.
 
 Crosstalk (opt-in, `Crosstalk`): with probability `probability`, every
 recorded avalanche on the source channel triggers a crosstalk avalanche

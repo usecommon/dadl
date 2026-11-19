@@ -166,3 +166,154 @@ def test_coverage_shards_merge_to_the_whole(tmp_path):
     assert [(r.calibration, r.covered, r.at_least) for r in merged] == [(r.calibration, r.covered, r.at_least) for r in whole]
     with pytest.raises(ValueError, match="not all"):
         merge(files[:1])
+
+
+# Review council, round 1.
+
+
+def _offset(runs, step_ps):
+    return [r + i * step_ps for i, r in enumerate(runs)]
+
+
+def test_interruption_check_takes_each_run_on_its_own_bounds():
+    det = _det(20_000, 50_000)
+    rng = np.random.default_rng(5000)
+    runs = [detect(poisson_times(r, t, rng), det, t, rng) for r, t in zip((2e6, 5e6, 1e7), (0.02, 0.02, 0.015))]
+    aligned = calibrate_deadtime_series(runs, CH, backend="sim", seed=1, n_draws=100)
+    # The same runs taken 30 ms apart on one running clock.
+    offset = calibrate_deadtime_series(_offset(runs, 30_000_000_000), CH, backend="sim", seed=1, n_draws=100)
+    assert aligned.status == "ok" and offset.status == "ok"
+    assert offset.ppc_pvalue == pytest.approx(aligned.ppc_pvalue)
+    # A 20% hole cut out of one run is still an interruption.
+    t = runs[1]
+    holed = [runs[0], t[(t < 0.4 * t[-1]) | (t > 0.6 * t[-1])], runs[2]]
+    cut = calibrate_deadtime_series(holed, CH, backend="sim", seed=1, n_draws=100)
+    assert cut.status == "misfit" and any("far longer than its count rate allows" in n for n in cut.notes)
+
+
+def _survival_exact(w: float, n: float, tau: float) -> float:
+    import math
+    from decimal import Decimal, localcontext
+
+    with localcontext() as ctx:
+        ctx.prec = 80
+        a = Decimal(n) * (-Decimal(n) * Decimal(tau)).exp()
+        w_, tau_ = Decimal(w), Decimal(tau)
+        total, j = Decimal(0), 0
+        while j * tau_ <= w_:
+            total += (-a * (w_ - j * tau_)) ** j / Decimal(math.factorial(j))
+            j += 1
+        return float(total)
+
+
+@pytest.mark.parametrize("x", [0.5, 0.9, 0.99, 1.0, 1.01, 1.1, 2.0])
+def test_survival_tail_matches_the_exact_series(x):
+    # Past 8 tau the second real mode has not decayed near n tau = 1 (the tail was 20-60% low).
+    tau = 30_000.0
+    n = x / tau
+    w = np.array([1.0, 5.0, 9.0, 10.0, 15.0, 20.0, 30.0, 40.0]) * tau
+    exact = np.array([_survival_exact(v, n, tau) for v in w])
+    assert np.max(np.abs(survival(w, n, tau) / exact - 1.0)) < 1e-6
+
+
+def test_profile_is_smooth_with_afterpulsing():
+    import dadl.calibration.deadtime as dtm
+
+    p, tau_a = 0.05, 20_000.0
+    runs = _runs(_det(20_000, 50_000, afterpulse_prob=p, afterpulse_tau_ps=tau_a), (2e6, 5e6, 1e7), 0.02, 777)
+    gaps = [np.diff(r) for r in runs]
+    m = min(g.min() for g in gaps)
+    fit = dtm._Fit([dtm._Run(g.astype(float) - m, 1, tau_a) for g in gaps], p, tau_a)
+    prof = np.array([fit.profile(t) for t in np.arange(18_000, 22_001, 100.0)])
+    # The kernel's jump snapped to the grid made the profile jagged by units (sd 1.38).
+    assert np.diff(prof, 2).std() < 0.05
+
+
+def _afterpulse_artifact(p: float, tau_a: float, rel_sd: float):
+    """A stand-in for a dark artifact: the fields `calibrate_deadtime_series` reads."""
+    from types import SimpleNamespace
+
+    from dadl.stats import Interval
+
+    rng = np.random.default_rng(0)
+    samples = np.column_stack([p * (1 + rel_sd * rng.standard_normal(400)),
+                               tau_a * (1 + rel_sd * rng.standard_normal(400))])
+    return SimpleNamespace(
+        estimates={"afterpulse_prob": Interval(p, p * 0.9, p * 1.1), "afterpulse_tau_ps": Interval(tau_a, tau_a * 0.9, tau_a * 1.1)},
+        stand_in=(), sample_params=("afterpulse_prob", "afterpulse_tau_ps"), samples=samples,
+    )
+
+
+def test_pending_afterpulses_are_noted():
+    from dadl.calibration.coverage import DEADTIME_REGIMES
+    from dadl.calibration.deadtime import PENDING_MAX
+
+    det = _det(20_000, 50_000, afterpulse_prob=0.05, afterpulse_tau_ps=200_000.0)
+    cal = calibrate_deadtime_series(_runs(det, (2e6, 5e6, 1e7), 0.01, 21), CH,
+                                    afterpulse=_afterpulse_artifact(0.05, 200_000.0, 0.02), backend="sim", seed=1,
+                                    n_draws=100)
+    assert cal.conditions["afterpulse_pending_max"] == pytest.approx(0.033, abs=0.003)
+    assert any("afterpulse still pending" in n for n in cal.notes)
+    # The passive-quench coverage regime stays below the guard.
+    reg = DEADTIME_REGIMES["passive-quench"].detector
+    rng = np.random.default_rng(22)
+    runs = [detect(poisson_times(r, 0.01, rng), reg, 0.01, rng) for r in DEADTIME_REGIMES["passive-quench"].rates_cps]
+    pq = calibrate_deadtime_series(runs, CH, afterpulse=_afterpulse_artifact(reg.afterpulse_prob, reg.afterpulse_tau_ps, 0.02),
+                                   backend="sim", seed=1, n_draws=100)
+    assert pq.conditions["afterpulse_pending_max"] < PENDING_MAX
+    assert not any("afterpulse still pending" in n for n in pq.notes)
+
+
+@pytest.mark.parametrize(
+    "tau_p,tau_np,rates,seed",
+    [(10_000, 22_000, (5e5, 1e6, 2e6), 2), (50_000, 50_000, (2e6, 5e6, 1e7), 3)],
+)
+def test_tau_p_never_exceeds_tau_np(tau_p, tau_np, rates, seed):
+    det = DetectorParams(efficiency=1.0, dark_rate_cps=500.0, dead_time_ps=tau_np, dead_time_p_ps=tau_p,
+                         jitter_sigma_ps=0.0)
+    rng = np.random.default_rng(seed)
+    runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in rates]
+    cal = calibrate_deadtime_series(runs, CH, backend="sim", seed=1, n_draws=400)
+    p_iv, np_iv = cal.estimates["dead_time_p_ps"], cal.estimates["dead_time_ps"]
+    assert p_iv.value <= np_iv.value and p_iv.high <= np_iv.high
+    assert np.all(cal.samples[:, 0] <= cal.samples[:, 1])
+
+
+def test_afterpulse_uncertainty_widens_an_upper_limit():
+    det = _det(0, 50_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
+    runs = _runs(det, (2e6, 5e6, 1e7), 0.01, 27)  # tau_p MLE 0: the case that took no afterpulse uncertainty
+    tight = calibrate_deadtime_series(runs, CH, afterpulse=_afterpulse_artifact(0.03, 30_000.0, 1e-9), backend="sim",
+                                      seed=1, n_draws=100)
+    loose = calibrate_deadtime_series(runs, CH, afterpulse=_afterpulse_artifact(0.03, 30_000.0, 0.5), backend="sim",
+                                      seed=1, n_draws=100)
+    assert loose.unidentified == ("dead_time_p_ps",) and tight.estimates["dead_time_p_ps"].value == 0.0
+    assert any("afterpulse uncertainty adds" in n for n in loose.notes)
+    assert loose.estimates["dead_time_p_ps"].high > tight.estimates["dead_time_p_ps"].high
+
+
+def test_default_scan_rates_count_avalanches():
+    from dadl.cli import example_path
+    from dadl.config import load_setup
+    from dadl.simsetup import deadtime_scan_rates
+
+    setup = load_setup(example_path("chsh-spad"))
+    rates = deadtime_scan_rates(setup)
+    eff = min(d.efficiency for d in setup.detectors.values())
+    tau = max(d.dead_time_ps for d in setup.detectors.values()) * 1e-12
+    assert max(rates) * eff * tau == pytest.approx(0.5)
+
+
+def test_coverage_merge_refuses_shards_with_different_gates(tmp_path):
+    import json
+
+    from dadl.calibration.coverage import main, merge
+
+    files = []
+    for k in (1, 2):
+        out = tmp_path / f"s{k}.json"
+        assert main(["deadtime", "--regimes", "series-spad", "--replicates", "2", "--seed", "3", "--shard", f"{k}/2",
+                     "--out", str(out)]) == 0
+        files.append(json.loads(out.read_text()))
+    files[1]["results"][0]["gate"] = [0.5, 1.0]
+    with pytest.raises(ValueError, match="disagree on the gate"):
+        merge(files)

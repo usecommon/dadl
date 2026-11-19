@@ -998,7 +998,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sim.add_argument(
         "--rates", default=None, metavar="R1,R2,...",
-        help="--deadtime-scan: photon rates per s at each detector, one per setting (default: rate x dead time 0.05 to 0.5)",
+        help="--deadtime-scan: photon rate at each detector (before efficiency) per s, one per setting (default: "
+        "avalanche rate x dead time 0.05 to 0.5)",
     )
     sim.add_argument(
         "--duration-s", type=float, default=None,
@@ -1049,7 +1050,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Fit each channel's paralyzable (dead_time_p_ps) and non-paralyzable (dead_time_ps) dead times "
         "from the gaps of two or more acquisitions under steady light at different rates (simulated: dadl simulate "
         "SETUP --deadtime-scan). Afterpulsing is held at the channel's dark artifact (--dark). Writes one "
-        "content-addressed artifact per channel, of kind deadtime-series.",
+        "content-addressed artifact per channel, of kind deadtime-series. The scan needs steady light: an "
+        "attenuated CW laser with its intensity stable to about 1-2% over each run, not pulsed light or a "
+        "mains-powered lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz modulation biased "
+        "tau_p 10% low with the predictive check passing; +-40% is flagged.",
     )
     dt.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
     dt.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, one rate per setting")

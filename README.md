@@ -101,10 +101,35 @@ plainly:
   afterpulses inside it are not seen), valid for actively quenched SPAD
   modules. `calibrate deadtime` adds the series model, a paralyzable stage
   before the non-paralyzable one, from illuminated runs; both stages are
-  still hard edges. Soft (continuous) recovery of SNSPDs and the gradual
-  efficiency recovery of passive quenching are not modelled: such a detector
-  shows as a misfit. The analyses' forward model uses the dark calibration's
-  non-paralyzable dead time only.
+  still hard edges. The series chain is a phenomenological filter with hard
+  edges. It describes a diode or front-end recovery (paralyzable) followed by
+  a longer electronics or tagger dead time (non-paralyzable). It does not
+  describe the reset-window paralysis of an actively quenched module (photons
+  in hold-off do nothing; one just after it re-quenches silently:
+  non-paralyzable then paralyzable), twilight counts, soft recovery of SNSPDs
+  or the gradual efficiency recovery of passive quenching. With enough gaps
+  such a detector shows as a misfit. With few gaps, or when the recovery is
+  close to fully paralyzable, it can pass with an effective tau_p near tau_np
+  that describes the scanned rates but not rates above them.
+  The scan needs steady light: an attenuated CW laser with its intensity
+  stable to about 1-2% over each run, not pulsed light or a mains-powered
+  lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz
+  modulation biased tau_p 10% low with the predictive check passing; +-40%
+  is flagged.
+  tau_np is the lower edge of the dead time as recorded. A real tagger adds
+  its own jitter after the dead time, so the shortest gap sits about
+  4 sqrt(2) sigma_tagger below the detector's dead time (about 0.1 ns for
+  20 ps rms); the interval does not cover that offset.
+  An afterpulse still pending when the next gap starts is not modelled; when
+  more than 0.5% of gaps start with one, a note says tau_p is biased low
+  (by about 1 sd at 3%). In the simulator, avalanche candidates blocked by
+  the dead time restart the paralyzable stage but neither afterpulse nor
+  emit crosstalk.
+  The analyses' forward model uses the dark calibration's non-paralyzable
+  dead time only. With paralysis the live fraction is overestimated: for
+  tau_p close to tau_np by about 0.5% at a 10% dead fraction and 3-4% at the
+  20% limit, per channel (about twice that for a pair); ratios such as S and
+  V cancel much of it.
 - **Afterpulse time constant near the detection threshold** covers somewhat
   under 95% conditional on detection.
 - **DCR(T)** is Arrhenius only, valid inside the calibrated temperature range

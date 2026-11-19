@@ -195,7 +195,9 @@ class CoverageResult:
     replicates: int
     covered: dict[str, int]
     gate: tuple[float, float]
-    #: True when only the lower bound applies (coverage of at least 95%).
+    #: True when only the lower bound applies (coverage of at least 95%). The at-least rule keeps
+    #: the lower edge of the two-sided band, so its false-fail rate is about 1.6e-4 at 1,000
+    #: replicates, below the 5e-4 budget: conservative.
     at_least: bool = False
 
     def fraction(self, name: str) -> float:
@@ -411,14 +413,15 @@ class DeadtimeRegime:
 
 
 DEADTIME_REGIMES: dict[str, DeadtimeRegime] = {
-    # An actively quenched SPAD whose front end paralyzes: tau_p 20 ns before a 50 ns hold-off.
+    # A diode or front-end recovery that paralyzes (tau_p 20 ns) before a longer electronics dead time (50 ns).
     "series-spad": DeadtimeRegime(
         DetectorParams(efficiency=1.0, dark_rate_cps=1000.0, dead_time_ps=50_000, dead_time_p_ps=20_000,
                        jitter_sigma_ps=0.0),
         (2e6, 5e6, 1e7), 0.02,
     ),
     # Passive quench: recharge nearly all paralyzable (40 of 45 ns), with 2% afterpulsing at 30 ns
-    # held at a dark artifact's estimates.
+    # held at a dark artifact's estimates. A stand-in: it checks the fit is self-consistent, not that
+    # it matches a real RC recharge.
     "passive-quench": DeadtimeRegime(
         DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=45_000, dead_time_p_ps=40_000,
                        jitter_sigma_ps=0.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0),
@@ -430,9 +433,14 @@ DEADTIME_REGIMES: dict[str, DeadtimeRegime] = {
 def deadtime_coverage(
     replicates: int = 1000, seed: int = 20261111, regime: str = "series-spad", part: range | None = None
 ) -> list[CoverageResult]:
-    """tau_p (two-sided band, with the misfit share) and tau_np (at least 95%: under light tens of
-    thousands of gaps fall per tick at the edge, so the shortest gap is almost always tau_np itself
-    and its interval is exact to the tick; the 300-replicate pilot covered 100% in series-spad)."""
+    """tau_p (two-sided band, with the misfit share) and tau_np (at least 95%).
+
+    For tau_np the edge density is about 1 gap per tick (series-spad 1.5, passive-quench 0.7), so
+    the shortest gap equals tau_np in about 79% and 45% of replicates; the simulator's integer
+    dead time makes the tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2%
+    and 97.3%), so it is gated at least 95%; this gate has little power against edge-density
+    errors (M10 item).
+    """
     reg = DEADTIME_REGIMES[regime]
     det = reg.detector
     truth_p = {"dead_time_p_ps": float(det.dead_time_p_ps)}
@@ -588,6 +596,9 @@ def merge(records: list[dict]) -> list[CoverageResult]:
         keys = dict.fromkeys(k for _, res in mine for k in res["covered"])
         covered = {k: sum(res["covered"].get(k, 0) for _, res in mine) for k in keys}
         first = mine[0][1]
+        if any(tuple(res["gate"]) != tuple(first["gate"]) or bool(res["at_least"]) != bool(first["at_least"])
+               for _, res in mine):
+            raise ValueError(f"{name}: shards disagree on the gate or its rule")
         out.append(CoverageResult(name, replicates, covered, tuple(first["gate"]), bool(first["at_least"])))
     return out
 

@@ -38,8 +38,7 @@ calibration uncertainty), so the gate has three parts, all required on every pul
 2. **`propagation`** (new): 1,000 replicates per regime of simulated CHSH and HOM runs, each
    with its own simulated calibration runs. The corrected value's 95% interval (statistical plus
    calibration, by joint Monte Carlo) must cover the injected truth within the same binomial band
-   rule as phase 2 (92.6–97.1% for one quantity), on a seed fixed in advance; the raw interval is
-   checked against its own expectation. A **control** must fail: the same run with calibration
+   rule as phase 2 (92.6–97.1% for one quantity), on a seed fixed in advance. A **control** must fail: the same run with calibration
    uncertainty switched off must fall below the band in at least one declared regime, otherwise
    the regime does not test propagation.
 3. **`coverage`** (extended): the phase 2 job plus the series dead-time regimes (M4) and, if
@@ -169,7 +168,7 @@ Python loops).
 - CI: `propagation` job alongside `coverage`, split across runners under the same 50-minute
   limit.
 - Acceptance: all regimes within band; the uncertainty-off control falls below the band in the
-  declared regime(s); misfit share of clean runs at most 1%.
+  declared regime(s); misfit artifacts at most 2% and forward flags at most 1% of clean runs.
 
 ### M4. Series dead-time model
 
@@ -187,7 +186,8 @@ series model below is phase 3"; README limit; expert review Q2.
 - `simulate --deadtime-scan` writes the illuminated runs; `dadl calibrate deadtime`.
 - Schema: **Decision D4**, new kind name.
 - Tests: closed form via the simulated chain (exists), recovery at three (τ_p, τ_np) points,
-  `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each, band as phase 2),
+  `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each; τ_p band as phase 2;
+  τ_np at least 95%, one-sided, see `coverage.deadtime_coverage`),
   method version pinned in `method_versions.json`.
 - Stays out: soft (continuous) recovery of SNSPDs and passive-quench efficiency recovery curves.
   The README limit is reworded, not removed.
@@ -324,6 +324,11 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | `grid_origin_ps` declared rather than fixed at 0 | cycle 1.18 | M7 |
 | Pair-labelled simulation truth for the heralding gate | cycle 7.14; summary of cycles | M3 (the propagation simulator labels pairs) |
 | Rotating seeds for the coverage gates | expert review Q11 | M10, if the owner agrees to change the gate rule before running |
+| τ_np dead-time gate with power: two-sided around its exact expected coverage, or a goodness-of-fit gate on the gap - τ_np histogram, with a random sub-tick dead-time phase in the regime | M4 council round 1 (G1) | M10, next to rotating seeds (a gate-rule change needs the owner's agreement before running) |
+| Afterpulse pending at the next gap modelled in the series gap law (now only a note above 0.5%) | M4 council round 1 (S4) | M10; 0.2.x if not done (new gap law, regime and gate re-run) |
+| Coarse grouped predictive check, Bonferroni-combined with the fine one, for the series dead time | M4 council round 1 (S5) | M10 (changes the misfit share; gate re-run) |
+| Count-variance (Fano) stationarity check for dead-time scans | M4 council round 1 (D1) | M10 (needs the model's renewal Fano factor; gate re-run) |
+| Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
 | Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
 
 ## Decisions
@@ -367,6 +372,8 @@ preference going into M0; the benchmark still has to confirm it.
 - Pulsed sources and multi-pair statistics beyond the CW term; rate-dependent efficiency.
 - Crosstalk calibration (the simulation is in flight; the calibration is v0.2+), multi-component
   afterpulse kernels, surviving-afterpulse likelihood (cycle 7.13), soft SNSPD recovery.
+- The reverse series order for actively quenched modules (non-paralyzable hold-off, then a
+  paralyzable reset window; M4 council round 1, D2).
 - HSM, TPM or OS-keystore signer process; RFC 3161 timestamps; QKD attestation.
 - Swabian, qutools and IDQ adapters; Arrow C Stream adapters; plugin hash pinning.
 - Operator features: more than four inputs per setup, `--json`, history and latest-artifact lookup

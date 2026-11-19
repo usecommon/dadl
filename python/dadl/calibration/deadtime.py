@@ -8,6 +8,11 @@ rates (`dadl simulate --deadtime-scan` writes them) and fits the gap distributio
 in the simulator and the design ("Detection process"): every avalanche candidate restarts a
 paralyzable stage tau_p, and what passes it meets a non-paralyzable tau_np >= tau_p.
 
+The scan needs steady light: an attenuated CW laser with its intensity stable to about 1-2% over
+each run, not pulsed light or a mains-powered lamp. Slow intensity noise looks like less
+paralysis: a +-20% 100 Hz modulation biased tau_p 10% low with the predictive check passing;
++-40% is flagged.
+
 **The gap density.** For a Poisson input of rate n, measure u = gap - tau_np. The next recorded
 avalanche is the first input after tau_np whose preceding input is at least tau_p earlier
 (inputs during the non-paralyzable dead time still restart the paralyzable stage). Its density
@@ -15,10 +20,12 @@ is g(u) = a S(u), a = n exp(-n tau_p), where S(w) = 1 for w < tau_p and S'(w) = 
 
     S(w) = sum_{j <= w / tau_p} (-a (w - j tau_p))^j / j!
 
-summed exactly up to K tau_p and continued as the dominant mode exp(-lambda w) beyond
-(lambda = n if n tau_p <= 1, else from the Lambert W function; the other modes have decayed by
-about (a tau_p / 2 pi)^K). The distribution function is 1 - S(u + tau_p), so the bin
-probabilities are exact. tau_p = 0 is the hard-edge (non-paralyzable) model.
+summed exactly up to K tau_p and continued beyond as its two real modes exp(-lambda w),
+lambda = a exp(lambda tau_p) (Lambert W branches 0 and -1), matched to S and S' there. The
+complex modes have decayed by about (a tau_p / 2 pi)^K; the second real mode has not when
+n tau_p is near 1, where the two real roots merge. The distribution function is
+1 - S(u + tau_p), so the bin probabilities are exact. tau_p = 0 is the hard-edge
+(non-paralyzable) model.
 
 **Afterpulsing.** With probability p a recorded avalanche adds one afterpulse candidate at
 u = E ~ Exp(tau_a) (the simulator's model and the dark fit's). Before it arrives the gap density
@@ -28,11 +35,12 @@ the paralyzable stage, and the next record follows the same law from there:
     g(u) = g0(u) + p [ -g0(u)(1 - e^{-u/tau_a}) + e^{-u/tau_a} S(u) e^{-n tau_p} / tau_a
                        + int_0^{u - tau_p} f_E(w) (S(w + tau_p) - S(w) e^{-n tau_p}) q(u - w) dw ]
 
-with q(t) = a S(t - tau_p) for t >= tau_p (a discrete convolution on the fit's grid). p and
-tau_a are held at a dark artifact's estimates (`afterpulse=`); their uncertainty is carried by
-refitting at shifted values (a linear sensitivity) and added to the intervals and draws. An
-afterpulse still pending when the next gap starts is not modelled (a fraction about
-p n tau_a / (1 + n tau_a) of gaps).
+with q(t) = a S(t - tau_p) for t >= tau_p (a discrete convolution on the fit's grid, q averaged
+over each cell so the profile is smooth in tau_p). p and tau_a are held at a dark artifact's
+estimates (`afterpulse=`); their uncertainty is carried by refitting at shifted values (a linear
+sensitivity, of tau_p or of its upper limit) and added to the intervals and draws. An afterpulse
+still pending when the next gap starts is not modelled (a fraction about p n tau_a / (1 + n tau_a)
+of gaps, recorded as `afterpulse_pending_max`); above 0.5% a note says tau_p is biased low.
 
 **Fit.** tau_np is the shortest gap over all runs, with the dark fit's exact tick-quantile
 interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge. The gaps
@@ -40,15 +48,21 @@ past it are binned (fine uniform bins, then geometric ones) and fitted by multin
 likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the profile
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
 likelihood's (chi-square(1)); when it reaches tau_p = 0 the hard-edge model is not rejected and
-tau_p is an upper limit (unidentified; draws uniform below it, a stand-in). The likelihood ratio
-against the hard-edge model is recorded (`lr_hard_edge`).
+tau_p is an upper limit (unidentified; draws uniform below it, a stand-in). tau_p's point, upper
+end and draws are capped at tau_np's. The likelihood ratio against the hard-edge model is
+recorded (`lr_hard_edge`).
 
 **Predictive check.** A Pearson chi-square over all runs' bins, merged until each expects at
 least 5 gaps, on (groups - 1) degrees of freedom (conservative for a fit on the fine bins; see
-`dadl.forward_check`), and the interruption check of the other calibrations.
+`dadl.forward_check`), and the interruption check of the other calibrations, each run on its own
+bounds (Bonferroni over runs). The check groups thousands of fine bins on (groups - 1) degrees of
+freedom, so it sees gross shape misfits (soft recovery, reset-window paralysis, strong
+modulation) but has little power against a discrepancy confined to the tail or the edge: a few-%
+misfit there can pass while biasing tau_p.
 
 Stays out (phase 3 plan, M4): soft (continuous) recovery of SNSPDs and passive-quench efficiency
-recovery curves; a detector whose efficiency recovers gradually is a misfit here.
+recovery curves. With enough gaps such a detector shows as a misfit; with few, or when its
+recovery is close to fully paralyzable, it can pass with an effective tau_p near tau_np (README).
 """
 
 from __future__ import annotations
@@ -61,7 +75,7 @@ from scipy import optimize, signal, special
 from scipy import stats as _st
 
 from dadl import _checks
-from dadl.calibration.base import N_DRAWS, Calibration, draws_rng, with_interruption_check
+from dadl.calibration.base import N_DRAWS, Calibration, draws_rng, with_interruption_check_runs
 from dadl.calibration.dark import _dead_time
 from dadl.data import ChannelId, tag_tick, tags_sha256
 from dadl.errors import InsufficientCounts
@@ -69,10 +83,10 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 MIN_RUNS = 2
 MIN_GAPS = 1000
-#: Terms of the exact series for S; beyond K tau_p the dominant mode alone.
+#: Terms of the exact series for S; beyond K tau_p its two real modes.
 K_TERMS = 8
 #: Fine bins: at most this fraction of a run's mean gap, and of tau_a.
 BINS_PER_MEAN_GAP = 200
@@ -85,21 +99,30 @@ MAX_UNIFORM_BINS = 6000
 MIN_EXPECTED = 5.0
 PROFILE_TARGET = 3.841
 F0_SAMPLES = 4000
+#: Above this fraction of gaps starting with an afterpulse still pending (not modelled), a note.
+PENDING_MAX = 0.005
 PS_PER_S = 1e12
 
 UNITS = {"dead_time_p_ps": "ps", "dead_time_ps": "ps"}
 DEFINITIONS = {
     "dead_time_p_ps": "paralyzable stage: an avalanche candidate passes only if the previous candidate (passed or not) "
     "is at least this much earlier",
-    "dead_time_ps": "non-paralyzable stage after the paralyzable one: blocks this long after each recorded avalanche",
+    "dead_time_ps": "non-paralyzable stage after the paralyzable one: blocks this long after each recorded avalanche; "
+    "the shortest recorded gap, so it includes the tagger's timing jitter",
 }
 
 
-def _lambda(n: float, tau: float) -> float:
-    """Decay rate of the dominant mode: the smaller root of lambda = n exp(-n tau) exp(lambda tau)."""
-    if n * tau <= 1.0:
-        return n
-    return float(-special.lambertw(-n * tau * math.exp(-n * tau), 0).real / tau)
+def _modes(a: float, tau: float) -> tuple[float, float]:
+    """The two real roots l1 <= l2 of lambda = a exp(lambda tau) (Lambert W branches 0 and -1).
+
+    They merge at a tau = 1/e (n tau = 1), where both are 1/tau; scipy gives nan there.
+    """
+    z = max(-a * tau, -1.0 / math.e)
+    l1 = float(-special.lambertw(z, 0).real / tau)
+    l2 = float(-special.lambertw(z, -1).real / tau)
+    if not (math.isfinite(l1) and math.isfinite(l2)):
+        return 1.0 / tau, 1.0 / tau
+    return l1, l2
 
 
 def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
@@ -117,9 +140,18 @@ def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
             out += np.where(r >= 0.0, (-a * np.maximum(r, 0.0)) ** j / math.factorial(j), 0.0)
         return out
 
+    # Past u0 the two real modes, matched to S(u0) and S'(u0) = -a S(u0 - tau). The divided
+    # difference is written with expm1 so it stays exact as the modes merge (n tau near 1).
     s0 = float(series(np.array([u0]))[0])
-    lam = _lambda(n, tau)
-    out = s0 * np.exp(-lam * np.maximum(w - u0, 0.0))
+    ds0 = -a * float(series(np.array([u0 - tau]))[0])
+    l1, l2 = _modes(a, tau)
+    t = np.maximum(w - u0, 0.0)
+    dl = l2 - l1
+    if abs(dl) * max(float(t.max(initial=0.0)), 1.0) < 1e-9:
+        dd = t * np.exp(-l1 * t)
+    else:
+        dd = np.exp(-l1 * t) * (-np.expm1(-dl * t)) / dl
+    out = s0 * np.exp(-l1 * t) + (ds0 + l1 * s0) * dd
     near = w <= u0
     if near.any():
         out[near] = series(w[near])
@@ -179,13 +211,19 @@ class _Run:
         w = (np.arange(n_w) + 0.5) * h
         f = np.exp(-w / tau_a) / tau_a * (survival(w + tau, n, tau) - survival(w, n, tau) * e_t) * h
         lags = np.arange(self.n_uni) * h
-        q = np.where(lags >= tau, a * survival(lags - tau, n, tau), 0.0)
-        conv = signal.fftconvolve(f, q)[: self.n_uni]
+
+        def q_cell(t: np.ndarray) -> np.ndarray:
+            # q averaged over the cell [t - h/2, t + h/2]: a S(t' - tau) for t' >= tau integrates to
+            # S(lo) - S(hi) (S = 1 below tau), exact and smooth in tau. The point value snapped the
+            # jump at tau to the grid and made the profile jagged (council round 1).
+            lo, hi = np.maximum(t - 0.5 * h, 0.0), np.maximum(t + 0.5 * h, 0.0)
+            return (survival(lo, n, tau) - survival(hi, n, tau)) / h
+
+        conv = signal.fftconvolve(f, q_cell(lags))[: self.n_uni]
         out[: self.n_uni] += conv
         if u.size > self.n_uni:
             t = u[self.n_uni :, None] - w[None, :]
-            qt = np.where(t >= tau, a * survival(np.maximum(t - tau, 0.0), n, tau), 0.0)
-            out[self.n_uni :] += qt @ f
+            out[self.n_uni :] += q_cell(t.ravel()).reshape(t.shape) @ f
         return out
 
     def nll(self, n: float, tau: float, p: float = 0.0, tau_a: float | None = None) -> float:
@@ -380,11 +418,13 @@ def calibrate_deadtime_series(
     lr = 2.0 * (nll0 - nll_min)
     low, high = _profile_interval(fit, tau, nll_min, nll0, tau_hi)
     rates = fit.rates(tau)
+    identified = low > 0.0
 
-    # Afterpulse uncertainty: d tau_p / d(p, tau_a) by refitting at shifted values.
+    # Afterpulse uncertainty: d tau_p / d(p, tau_a) by refitting at shifted values; for an upper
+    # limit, the sensitivity of the limit itself (whatever the MLE).
     shift_sd = 0.0
     sens = np.zeros(2)
-    if ap_draws is not None and tau > 0:
+    if ap_draws is not None:
         sd = ap_draws.std(axis=0)
         for k in range(2):
             if sd[k] <= 0:
@@ -393,14 +433,17 @@ def calibrate_deadtime_series(
             p_k, ta_k = (p + step, tau_a) if k == 0 else (p, tau_a + step)
             other = _Fit(binned, p_k, ta_k)
             other._n_cache = list(fit._n_cache)
-            t_k = _refit_near(other, tau, tau_hi)
-            sens[k] = (t_k - tau) / step
+            if identified:
+                sens[k] = (_refit_near(other, tau, tau_hi) - tau) / step
+            else:
+                t_k, nll_k, nll0_k = _fit_tau(other, tau_hi)
+                sens[k] = (_profile_interval(other, t_k, nll_k, nll0_k, tau_hi)[1] - high) / step
         cov = np.cov(ap_draws.T)
         shift_sd = float(math.sqrt(max(sens @ cov @ sens, 0.0)))
         if shift_sd > 0:
-            notes.append(f"afterpulse uncertainty adds {shift_sd:.3g} ps (1 sd) to tau_p")
+            what = "tau_p" if identified else "tau_p's upper limit"
+            notes.append(f"afterpulse uncertainty adds {shift_sd:.3g} ps (1 sd) to {what}")
 
-    identified = low > 0.0
     unidentified: tuple[str, ...] = ()
     stand_in: tuple[str, ...] = ()
     if identified:
@@ -419,10 +462,6 @@ def calibrate_deadtime_series(
         tau_draws = rng.uniform(0.0, upper, n_draws)
         unidentified = ("dead_time_p_ps",)
         stand_in = ("dead_time_p_ps",)
-        notes.append(
-            f"the hard-edge (non-paralyzable) model is not rejected (likelihood ratio {lr:.2f}): dead_time_p_ps is "
-            f"an upper limit ({upper:.4g} ps); draws are uniform below it, a stand-in"
-        )
 
     # tau_np from the shortest gap: the summed gap density at the edge, over the rates' uncertainty.
     def edge_density(n_vals: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -441,15 +480,33 @@ def calibrate_deadtime_series(
     t_s = np.resize(tau_draws, F0_SAMPLES)[:, None]
     f0_samples = np.sum(sizes[None, :] * edge_density(n_s, t_s), axis=1)
     est_np, np_draws = _dead_time(m, 1, f0, f0_samples, rng, n_draws, tick, afterpulsing_ruled_out=True)
-    np_draws = np.maximum(np_draws, tau_draws)
+    # tau_p <= tau_np: the point, the upper end and every draw (reviews S6, D8: the profile runs up
+    # to the shortest gap, which can lie above tau_np's point and upper end).
+    cap_high = min(est_p.high, est_np.high)
+    est_p = Interval(min(est_p.value, est_np.value), min(est_p.low, cap_high), cap_high)
+    tau_draws = np.minimum(tau_draws, np_draws)
+    if not identified:
+        notes.append(
+            f"the hard-edge (non-paralyzable) model is not rejected (likelihood ratio {lr:.2f}): dead_time_p_ps is "
+            f"an upper limit ({est_p.high:.4g} ps); draws are uniform below it, a stand-in"
+        )
+    if high >= tau_hi:
+        notes.append("tau_p reaches tau_np: the data do not separate the stages (consistent with a fully "
+                     "paralyzable dead time)")
 
     probs = [r.probs(n, tau, p, tau_a) for r, n in zip(binned, rates)]
-    ppc = with_interruption_check(_pearson(binned, probs), notes, *tags)
+    ppc = with_interruption_check_runs(_pearson(binned, probs), notes, tags)
     for i, n in enumerate(rates):
         notes.append(f"run {i}: input rate {n * PS_PER_S:.4g} cps (fitted), {binned[i].n_gaps} gaps")
     cond = {"runs": float(len(runs)), "lr_hard_edge": lr, "gaps": float(sizes.sum())}
     if p > 0:
         cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a)})
+        pending = max(p * n * tau_a / (1.0 + n * tau_a) for n in rates)
+        cond["afterpulse_pending_max"] = pending
+        if pending > PENDING_MAX:
+            notes.append(f"about {pending:.1%} of gaps start with an afterpulse still pending, which the gap law "
+                         "does not model: tau_p is biased low (by about 1 sd at 3%); scan at lower rates or with a "
+                         "detector whose afterpulsing is faster")
     estimates = {"dead_time_p_ps": est_p, "dead_time_ps": est_np}
     return Calibration(
         kind=KIND,

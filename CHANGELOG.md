@@ -109,12 +109,33 @@ and is versioned separately from the packages.
 - CLI: `dadl simulate SETUP --deadtime-scan [--rates R1,R2,...]` (one rate per setting) and
   `dadl calibrate deadtime SETUP --tags scan.npz [--dark DIR] --out DIR`.
 - `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI; locally
-  tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: under
-  light the shortest gap is almost always tau_np itself, exact to the tick.
+  tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: the
+  edge density is about 1 gap per tick (series-spad 1.5, passive-quench 0.7), so the shortest gap
+  equals tau_np in about 79% and 45% of replicates; the simulator's integer dead time makes the
+  tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2% and 97.3%), so it is
+  gated at least 95%; this gate has little power against edge-density errors (M10 item).
 - `python -m dadl.calibration.coverage` gains `--shard k/n --out FILE` and `merge FILES`, as the
   propagation gate has; CI runs passive-quench in four shards.
-- Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery; the forward model
-  still uses the dark calibration's non-paralyzable dead time.
+- Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery. The analyses'
+  forward model uses the dark calibration's non-paralyzable dead time only. With paralysis the
+  live fraction is overestimated: for tau_p close to tau_np by about 0.5% at a 10% dead fraction
+  and 3-4% at the 20% limit, per channel (about twice that for a pair); ratios such as S and V
+  cancel much of it.
+- Review council round 1 (method `series-gap-mle` 2):
+  - the interruption check tests each scan run on its own bounds, Bonferroni over runs (runs of
+    unequal length, or taken one after another on a running clock, were flagged misfit);
+  - the survival function continues past 8 tau_p with both real modes (the tail was 20-60% low
+    near n tau_p = 1);
+  - the afterpulse kernel is averaged over each grid cell, so the profile of tau_p is smooth;
+  - `afterpulse_pending_max` is recorded, with a note above 0.5% (pending afterpulses bias tau_p
+    low and are not modelled);
+  - tau_p's point, upper end and draws are capped at tau_np's;
+  - the afterpulse uncertainty is added to tau_p's upper limit too;
+  - default scan rates are photon rates scaled by the smallest efficiency, so the avalanche rate
+    x dead time spans 0.05-0.5;
+  - `coverage.merge` refuses shards that disagree on the gate or its rule.
+  - coverage re-run locally at 1,000 replicates: tau_p covered 95.5% (series-spad) and 93.8%
+    (passive-quench), tau_np 99.2% and 97.3%, misfits 0.3% and 0%.
 
 ### Published results as executable tests
 
