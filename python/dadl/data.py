@@ -85,6 +85,13 @@ def runs_metadata(runs: Mapping[Any, Any]) -> list[Mapping[str, Any]]:
     return [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m]
 
 
+def run_t3_period(run: Any) -> float | None:
+    """The T3 sync period (ps) of one acquisition from its metadata (`RunTags`), else None."""
+    meta = getattr(run, "metadata", None) or {}
+    period = meta.get("sync_period_ps") if meta.get("mode", "T3") == "T3" else None
+    return float(period) if period else None
+
+
 def runs_lattice(runs: Mapping[Any, Any]) -> int | None:
     """The lattice of pair delays (ps) of `runs` from their metadata (council round 8): the common
     divisor of the acquisitions' `lattice_ps`; None when no acquisition records one (simulated or

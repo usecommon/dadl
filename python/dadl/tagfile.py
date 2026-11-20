@@ -40,17 +40,36 @@ SETTING_PAIRS: tuple[tuple[str, str], ...] = tuple(SIGNS)
 Runs = dict[Any, dict[str, np.ndarray]]
 
 
-def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings: Sequence = SETTING_PAIRS) -> Runs:
+def ptu_files(path: str | Path) -> list[Path]:
+    """The PTU files of a tag path: a folder's setting*.ptu in order, a single .ptu file, else []."""
+    path = Path(path)
+    if path.is_dir():
+        return sorted(path.glob("setting*.ptu"))
+    if path.suffix.lower() == ".ptu" and path.is_file():
+        return [path]
+    return []
+
+
+def read_tags(
+    path: str | Path,
+    channels: dict[int, str] | None = None,
+    settings: Sequence = SETTING_PAIRS,
+    only: Sequence[int] | None = None,
+) -> Runs:
     """Read a tag file into the `runs` structure that `dadl.chsh` takes.
 
     `settings` names the setting indices in order (CHSH: the four setting
-    pairs; HOM: "dip", "reference").
+    pairs; HOM: "dip", "reference"). For PTU input, `only` reads just those
+    setting indices (the others are empty), and a single .ptu file is read as
+    setting 0 (council round 9, Tw6: one dark file needed copies as setting1-3).
     """
     path = Path(path)
     channels = channels or dict(enumerate(CHANNELS))
     settings = tuple(settings)
     if path.is_dir():
-        return _read_ptu_dir(path, channels, settings)
+        return _read_ptu_dir(path, channels, settings, only)
+    if path.suffix.lower() == ".ptu" and path.is_file():
+        return _read_ptu_dir(path.parent, channels, settings, (0,), single=path)
     if path.exists() and not path.is_file():
         raise ConfigError(f"{path}: not a regular file")
     try:
@@ -92,7 +111,7 @@ def read_tags(path: str | Path, channels: dict[int, str] | None = None, settings
                 for i, c in enumerate(COLUMNS)
             }
         else:
-            raise ConfigError(f"{path}: tag files must be .npz or .csv")
+            raise ConfigError(f"{path}: tag files must be .npz, .csv or .ptu (or a folder of settingN.ptu files)")
     except FileNotFoundError as exc:
         raise ConfigError(f"tag file not found: {path}") from exc
     except PermissionError as exc:
@@ -201,14 +220,20 @@ def ptu_file(directory: str | Path, index: int) -> Path:
     return Path(directory) / f"setting{index}.ptu"
 
 
-def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) -> Runs:
+def _read_ptu_dir(
+    directory: Path, channels: dict[int, str], settings: tuple, only: Sequence[int] | None = None,
+    single: Path | None = None,
+) -> Runs:
     from dadl.adapters.ptu import PtuFile
     from dadl.data import RunTags
     from dadl.errors import AdapterError
 
     runs: Runs = {}
     for i, key in enumerate(settings):
-        path = ptu_file(directory, i)
+        if only is not None and i not in only:
+            runs[key] = RunTags({name: np.empty(0, dtype=np.int64) for name in channels.values()})
+            continue
+        path = single if single is not None else ptu_file(directory, i)
         if not path.is_file():
             raise ConfigError(f"{directory}: missing {path.name} (one PTU file per acquisition, setting0.ptu, ...)")
         try:
@@ -308,13 +333,11 @@ def tag_tick_ps(path: str | Path) -> int | None:
     measured sync period reduced to 1 ps).
     """
     path = Path(path)
-    if not path.is_dir():
+    files = ptu_files(path)
+    if not files:
         return None
     from dadl.adapters.ptu import PtuFile
 
-    files = sorted(path.glob("setting*.ptu"))
-    if not files:
-        return None
     return PtuFile(files[0]).tick_ps
 
 
@@ -323,13 +346,11 @@ def tag_lattice_ps(path: str | Path) -> int | None:
     else None. Histograms of pair delays bin on it; `tag_tick_ps` is the error bound of a gap and
     serves dead-time intervals only (council round 8)."""
     path = Path(path)
-    if not path.is_dir():
+    files = ptu_files(path)
+    if not files:
         return None
     from dadl.adapters.ptu import PtuFile
 
-    files = sorted(path.glob("setting*.ptu"))
-    if not files:
-        return None
     return PtuFile(files[0]).lattice_ps
 
 
@@ -337,13 +358,11 @@ def t3_folder(path: str | Path) -> dict[str, Any] | None:
     """For a folder of PTU T3 files: the sync period (ps) and the sync divider (None when not
     divided) of its first file; None for T2 or a tag file."""
     path = Path(path)
-    if not path.is_dir():
+    files = ptu_files(path)
+    if not files:
         return None
     from dadl.adapters.ptu import PtuFile
 
-    files = sorted(path.glob("setting*.ptu"))
-    if not files:
-        return None
     reader = PtuFile(files[0])
     if reader.mode != "T3":
         return None
@@ -367,12 +386,12 @@ def tagger_settings(path: str | Path) -> dict[str, float]:
     from dadl.propagate import setting_rtol
 
     path = Path(path)
-    if not path.is_dir():
+    files = ptu_files(path)
+    if not files:
         return {}
     from dadl.adapters.ptu import PtuFile
 
     found: dict[str, float] | None = None
-    files = sorted(path.glob("setting*.ptu"))
     first = files[0].name if files else ""
     for f in files:
         reader = PtuFile(f)
@@ -384,6 +403,9 @@ def tagger_settings(path: str | Path) -> dict[str, float]:
             for k, v in sorted(header.items())
             if k.startswith(prefixes) and isinstance(v, (int, float)) and not isinstance(v, bool)
         }
+        # Which meaning MeasDesc_GlobalResolution has: the T2 tick or the T3 sync period (council
+        # round 9, Tw2). Compared only between artifacts and datasets of the same mode.
+        settings["tagger_mode"] = 3.0 if reader.mode == "T3" else 2.0
         if found is None:
             found = settings
             continue
@@ -416,11 +438,11 @@ def tags_are_simulated(path: str | Path) -> bool:
     if path.suffix == ".csv" and path.is_file():
         with path.open(encoding="utf-8-sig") as fh:
             return fh.readline().strip() == SIMULATED_CSV_MARK
-    if not path.is_dir():
+    files = ptu_files(path)
+    if not files:
         return False
     from dadl.adapters.ptu import PtuFile
 
-    files = sorted(path.glob("setting*.ptu"))
     headers = [PtuFile(f).header for f in files]
     flags = {h.get("DADL_Simulated") is True or h.get("CreatorSW_Name") == "DADL" for h in headers}
     if len(flags) > 1:

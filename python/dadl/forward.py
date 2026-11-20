@@ -50,6 +50,7 @@ from scipy import special
 
 from dadl.calibration.dark import KIND as DARK_KIND
 from dadl.calibration.delay import KIND as DELAY_KIND
+from dadl.coincidences import as_sorted as _as_sorted
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal
 from dadl.guardrails import Policy
@@ -85,7 +86,16 @@ CAPTURE_UNMODELLED = (
 )
 DEAD_TIME_BOUND = (
     "dead time known only as an upper limit: value and interval at the bound; counts give the value at zero "
-    "(the truth lies between)"
+    "(the truth lies between if the bound holds; a bound set by a few short dark gaps may not)"
+)
+#: The override of the analysis-time gap tests (council round 9, Rd2), and its label.
+DEAD_TIME_OVERRIDE = "dead_time_contradicted"
+DEAD_TIME_CONTRADICTED = "dead time contradicted by the analysed gaps, accepted: {problems}"
+#: A dark dead time below this fraction of the setup's declared one is labelled (council round 9, Rd1b).
+DEAD_TIME_DECLARED_FRACTION = 0.5
+DEAD_TIME_FAR_BELOW = (
+    "the dark dead time of {name} ({x}) is below half the declared {y}: a short double trigger may have set it; "
+    "check the dark artifact's notes"
 )
 DEAD_TIME_RANGE_WIDE = (
     "the range from zero to the dead-time bound moves the corrected value by more than its standard error: "
@@ -306,11 +316,41 @@ def gap_floor_ps(point_ps: float, gaps: float, dark_rate_low_cps: float, channel
     return point_ps - math.log(channels / GAP_DOWN_ALPHA) / (gaps * dark_rate_low_cps) * 1e12
 
 
-def gap_edge_excess(channels: int) -> float:
-    """The upward test's threshold in mean edge spacings: 100 ((K / alpha)^(1/100) - 1), the
-    excess a matched upper end exceeds with chance (1 + x / 100)^-100 = alpha / K per channel
-    (10.4 at K = 2, 11.2 at K = 4)."""
-    return GAP_EDGE_GAPS * ((channels / GAP_UP_ALPHA) ** (1.0 / GAP_EDGE_GAPS) - 1.0)
+def gap_edge_excess(channels: int, j: int = 0, m: int = GAP_EDGE_GAPS) -> float:
+    """The upward test's threshold (council round 9, Rd1): (j + 1) F.isf(alpha / K, 2 (j + 1), 2 m).
+
+    Under a memoryless edge (gaps = tau + Exp) the excess (g[j] - tau) m / (g[j + m] - g[j]) is
+    m Gamma(j + 1) / Gamma(m), that is (j + 1) times an F(2 (j + 1), 2 m) variable, so a matched
+    upper end exceeds the threshold with chance alpha / K per channel. At j = 0 and m = 100 it is
+    100 ((K / alpha)^(1/100) - 1) (10.4 at K = 2, 11.2 at K = 4)."""
+    from scipy import stats as _st
+
+    return (j + 1) * float(_st.f.isf(GAP_UP_ALPHA / channels, 2 * (j + 1), 2 * m))
+
+
+def upward_gap_excess(gaps: np.ndarray, upper: float) -> tuple[float, int, int] | None:
+    """The upward gap test's statistic on sorted gaps (council round 9, Rd1): (excess, j, M) with
+    j = max(`GAP_COUNT`, `GAP_SHARE` x gaps), M = max(`GAP_EDGE_GAPS`, j + 1) and excess =
+    (g[j] - upper) M / (g[j + M] - g[j]), infinite at a zero spacing; None when there are too few
+    gaps or g[j] is not above `upper`. Compare it with `gap_edge_excess` (K, j, M)."""
+    j = int(max(GAP_COUNT, GAP_SHARE * gaps.size))
+    m = max(GAP_EDGE_GAPS, j + 1)
+    if gaps.size <= j + m or not gaps[j] > upper:
+        return None
+    spread = float(gaps[j + m] - gaps[j])
+    return ((float(gaps[j]) - upper) * m / spread if spread > 0 else math.inf), j, m
+
+
+def dead_time_far_below(cal, declared_ps: float) -> float | None:
+    """The dark artifact's dead time (point, or bound when not identified) when it is below
+    `DEAD_TIME_DECLARED_FRACTION` of the setup's declared dead time, else None. One rule for the
+    CLI's calibrate warning and analyze label (council round 9, Rd1b)."""
+    if not declared_ps or declared_ps <= 0:
+        return None
+    est = cal.estimates["dead_time_ps"]
+    bound = "dead_time_ps" in cal.stand_in or "dead_time_ps" in cal.unidentified
+    used = float(est.high) if bound else float(est.value)
+    return used if used < DEAD_TIME_DECLARED_FRACTION * float(declared_ps) else None
 
 
 def check_dead_time_gaps(
@@ -344,23 +384,36 @@ def check_dead_time_gaps(
     fraction above 20% at the analysed rate (`corrected_visibility`, `corrected_chsh`), and labels
     it when the analysed gaps fall below its 95% lower end. A lower end at zero is not checked.
 
-    Upward: with g the sorted analysed gaps (at least `GAP_EDGE_GAPS` + 1), the edge density is
-    100 / (g[100] - g[0]); the dead time is refused when (g[0] - upper end) times it exceeds
-    `gap_edge_excess` (a 22 ns artifact on a 50 ns detector; council round 4). This applies to
-    upper limits too. On clean data the upper end is the shortest dark gap, never below the truth,
-    so the test fires far less often than its bound.
+    Upward: with g the sorted analysed gaps, j = max(`GAP_COUNT`, `GAP_SHARE` x gaps) (the
+    downward count rule) and M = max(`GAP_EDGE_GAPS`, j + 1), the excess is (g[j] - upper end) M /
+    (g[j + M] - g[j]); the dead time is refused when it exceeds `gap_edge_excess` (K, j, M) (a 22 ns
+    artifact on a 50 ns detector; council round 4). This applies to upper limits too. A zero spacing
+    is an infinite excess, and a NaN never passes. On clean data the upper end is the shortest dark
+    gap, never below the truth, so the test fires far less often than its bound. Reading g[j], not
+    g[0], makes it robust to j short gaps: one echo (a cable reflection) set g[0] to the dark bound
+    and turned the test off (council round 9, Rd1). The price is power at low rates: at 10 kcps and
+    50,000 gaps the round-4 case passes (excess 80 against 100; g[0] gave 15 against 11.2).
+
+    The test tolerates a few unusual gaps, up to 0.1% of a channel's gaps or 10, whichever is more.
+    A rarer double trigger (a cable reflection, a ringing discriminator) cannot hide the edge. A
+    more frequent one makes the edge look shorter than the detector's dead time. If the setup
+    declares the detector's dead time (`detectors.<name>.dead_time_ps`), the CLI labels a dark dead
+    time far below it (`dead_time_far_below`). The dark artifact's notes say when a single short gap
+    set its bound.
 
     Above the gaps: a dark dead time (point, or bound) longer than more than max(`GAP_COUNT`,
     `GAP_SHARE` x gaps) of the analysed gaps is labelled `DEAD_TIME_ABOVE_GAPS` (council round 8,
     Ph4); the correction keeps the dark value (README, Known limits).
 
     A refused dead time raises `StaleCalibration`, unless the policy allows
-    `calibration_outside_validity` (then `OUTSIDE_VALIDITY`). The counts carry the shortest
+    `dead_time_contradicted` (then `DEAD_TIME_CONTRADICTED`, with the problems; council round 9,
+    Rd2: `calibration_outside_validity` no longer covers it). The problems are also recorded in
+    `dead_time_gap_problems` when accepted. The counts carry the shortest
     analysed gap (`min_gap_ps`), the floor (`gap_check_floor_ps`) and which floor it is
     (`gap_check_floor_kind`: "exponential law" or "3 widths" (refusing), "lower end (label only)",
     or None when not checked downward) per channel."""
     from dadl.errors import StaleCalibration
-    from dadl.propagate import OUTSIDE_VALIDITY
+    from dadl.guardrails import override_hint
 
     if calibrations is None or not any(m.kind == DARK_KIND for m in calibrations.members):
         return (), {}
@@ -372,7 +425,6 @@ def check_dead_time_gaps(
         except KeyError:
             continue
     k_channels = max(len(darks), 1)
-    edge_excess = gap_edge_excess(k_channels)
     min_gap: dict[str, float] = {}
     floors: dict[str, float | None] = {}
     kinds: dict[str, str | None] = {}
@@ -380,7 +432,7 @@ def check_dead_time_gaps(
     below: list[str] = []
     for name, cal in darks.items():
         cid = channels[name]
-        gaps = np.concatenate([np.diff(np.sort(np.asarray(run[name], dtype=np.int64))) for run in runs] or [np.zeros(0)])
+        gaps = np.concatenate([np.diff(_as_sorted(np.asarray(run[name], dtype=np.int64))) for run in runs] or [np.zeros(0)])
         if gaps.size == 0:
             continue
         gaps = np.sort(gaps)
@@ -419,25 +471,26 @@ def check_dead_time_gaps(
             below.append(DEAD_TIME_ABOVE_GAPS.format(
                 name=f"{name} ({cid})", x=_duration(used), k=above, g=_duration(float(gaps[0]))
             ))
-        if gaps.size > GAP_EDGE_GAPS and gaps[0] > upper:
-            spread = float(gaps[GAP_EDGE_GAPS] - gaps[0])
-            excess = (gaps[0] - upper) * GAP_EDGE_GAPS / spread if spread > 0 else math.inf
-            if excess > edge_excess:
+        edge = upward_gap_excess(gaps, upper)
+        if edge is not None:
+            excess, j, m = edge
+            if not excess <= gap_edge_excess(k_channels, j, m):
                 what = f"dead time {tau.value / 1000:.4g}" if not bound else f"dead time below {upper / 1000:.4g}"
                 problems.append(
-                    f"{what} ns of {name} ({cid}): the shortest analysed gap is {gaps[0] / 1000:.4g} ns, longer than "
-                    f"its upper end by {excess:.0f} mean edge spacings"
+                    f"{what} ns of {name} ({cid}): the analysed gap {j + 1} from the shortest is "
+                    f"{gaps[j] / 1000:.4g} ns, longer than its upper end by {excess:.0f} mean edge spacings"
                 )
     labels: tuple[str, ...] = ()
-    if problems:
-        if "calibration_outside_validity" not in policy.rule_for(analysis).allowed_corrections:
-            raise StaleCalibration(
-                f"the dark artifacts do not describe the analysed detectors: {'; '.join(problems)}. Override with "
-                f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
-            )
-        labels = (OUTSIDE_VALIDITY,)
-    labels += tuple(below)
     counts: dict[str, object] = {}
+    if problems:
+        if DEAD_TIME_OVERRIDE not in policy.rule_for(analysis).allowed_corrections:
+            raise StaleCalibration(
+                f"the dark artifacts do not describe the analysed detectors: {'; '.join(problems)}. "
+                f"{override_hint(analysis, DEAD_TIME_OVERRIDE)}"
+            )
+        labels = (DEAD_TIME_CONTRADICTED.format(problems="; ".join(problems)),)
+        counts["dead_time_gap_problems"] = list(problems)
+    labels += tuple(below)
     if min_gap:
         counts["min_gap_ps"] = min_gap
         counts["gap_check_floor_ps"] = floors
@@ -677,7 +730,7 @@ def _channel_dead_times(
 #: How to correct the rest when the dark dead time cannot be used (council round 6, R7).
 WITHOUT_DARK = (
     "load the calibrations without the dark artifacts (CalibrationSet.load(..., kinds=...); on the CLI, move the "
-    "dark artifacts out of the calibrations folder) to correct the rest"
+    "dark artifacts out of the calibrations folder, each .json with its .posterior.npy) to correct the rest"
 )
 
 
@@ -693,8 +746,8 @@ def _refuse_loose_bound(name: str, cid: ChannelId | None, hi_ps: float, rate_cps
         raise GuardrailRefusal(
             f"the dead time of {_who(name, cid)} is known only below {_duration(hi_ps)} (the dark data did not "
             f"identify it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above "
-            f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. Calibrate the dead "
-            f"time from data that identify it, or {WITHOUT_DARK}."
+            f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. No DADL calibration "
+            f"can supply it yet (series dead-time artifacts are not used by analyses): {WITHOUT_DARK}."
         )
 
 

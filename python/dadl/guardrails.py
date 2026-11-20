@@ -75,11 +75,18 @@ T3_SOURCE_REFUSAL = (
     "T3 input from a sync source: the side-window accidentals assume CW light; pulsed accidentals sit in side "
     "peaks. Declare `source.type: cw` in the setup if the source is CW and the sync is a clock only"
 )
+#: Added to `T3_SOURCE_REFUSAL` for `spdc-cw` (council round 9, Rd3).
+T3_TEMPLATE_SOURCE = (
+    "; the template's spdc-cw is the default and does not count: declare source.type: cw if the sync is a clock only"
+)
 T3_DIVIDER = (
     "T3 sync divider {divider}: the divider convention is unverified; rates may be off by the divider"
 )
 #: Source types that declare CW light (`source_type=`, setup.yaml's `source.type`).
 CW_SOURCE_TYPES = ("cw", "spdc-cw")
+#: On T3 input only this explicit type declares the sync a clock (council round 9, Rd3): the
+#: templates' `spdc-cw` is the default and did not count as a declaration.
+T3_CLOCK_SOURCE = "cw"
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
 KNOWN_CORRECTIONS = frozenset(
@@ -95,6 +102,9 @@ KNOWN_CORRECTIONS = frozenset(
         # a misfit artifact, and one whose validity or conditions do not cover the dataset.
         "misfit_calibration",
         "calibration_outside_validity",
+        # The analysed gaps contradicting a dark dead time (dadl.forward.check_dead_time_gaps;
+        # council round 9: no longer under calibration_outside_validity).
+        "dead_time_contradicted",
         # The forward model's predictive check failing on the analysed data (dadl.forward_check).
         "misfit_forward_model",
     }
@@ -367,13 +377,19 @@ def corrected_threshold_labels(
     return tuple(labels)
 
 
+def override_hint(analysis: str, correction: str) -> str:
+    """How to override a refusal, in Python and on the CLI (council round 9, Tw4)."""
+    return f"Override with Policy.allow({analysis!r}, {correction!r}, reason); on the CLI, --allow {correction}=REASON."
+
+
 def t3_input(runs: Mapping, source_type: str | None, corrected: bool) -> tuple[tuple[str, ...], bool]:
     """Labels for runs read from PTU T3 files (`dadl.data.RunTags` metadata), and whether a
     corrected value may be computed.
 
     On T3 input a corrected value is refused (`GuardrailRefusal`) when `corrected` (one is asked
-    for) and the source is not declared CW; when it is not asked for, the second value is False
-    if the source is not declared CW. Other input passes unlabelled.
+    for) and the source is not declared `cw`; when it is not asked for, the second value is False
+    if the source is not declared `cw`. Only an explicit `cw` counts: the templates' `spdc-cw` is
+    the default (council round 9, Rd3). Other input passes unlabelled.
     """
     metas = [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m and m.get("sync_period_ps")]
     if not metas:
@@ -381,7 +397,7 @@ def t3_input(runs: Mapping, source_type: str | None, corrected: bool) -> tuple[t
     labels = [T3_INPUT]
     dividers = sorted({int(m["sync_divider"]) for m in metas if m.get("sync_divider")})
     labels += [T3_DIVIDER.format(divider=d) for d in dividers]
-    cw = source_type in CW_SOURCE_TYPES
+    cw = source_type == T3_CLOCK_SOURCE
     if corrected and not cw:
-        raise GuardrailRefusal(T3_SOURCE_REFUSAL)
+        raise GuardrailRefusal(T3_SOURCE_REFUSAL + (T3_TEMPLATE_SOURCE if source_type == "spdc-cw" else ""))
     return tuple(labels), cw

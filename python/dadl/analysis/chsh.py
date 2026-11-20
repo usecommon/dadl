@@ -31,7 +31,9 @@ from types import MappingProxyType
 import numpy as np
 
 from dadl import _checks
+from dadl.coincidences import as_sorted as _as_sorted
 from dadl.coincidences import grid_coincidences
+from dadl.data import RunTags, run_t3_period
 from dadl.errors import InsufficientCounts
 from dadl.guardrails import (
     DEAD_TIME_SELECTION,
@@ -39,6 +41,7 @@ from dadl.guardrails import (
     INTERRUPTED,
     Policy,
     corrected_threshold_labels,
+    override_hint,
     t3_input,
     threshold_labels,
 )
@@ -136,8 +139,8 @@ def _dead_time_estimate(gaps: np.ndarray) -> float:
     # below the dead time sets the low quantiles but not the higher ones (second red-team review,
     # cycle 9: 5.5% ringing echoes removed the label at the 5% quantile).
     best = 0.0
-    for p in DEAD_TIME_QUANTILES:
-        q = float(np.quantile(gaps, p))
+    for p, q in zip(DEAD_TIME_QUANTILES, np.quantile(gaps, DEAD_TIME_QUANTILES)):
+        q = float(q)
         excess = float(gaps.mean()) - q
         if excess <= 0:
             continue
@@ -188,7 +191,7 @@ def check_no_duplicates(runs: dict, channels: tuple[str, ...]) -> None:
     for key, tags in runs.items():
         for ch in channels:
             arr = np.asarray(tags.get(ch, ()))
-            if arr.size > 1 and np.any(np.diff(np.sort(arr)) == 0):
+            if arr.size > 1 and np.any(np.diff(_as_sorted(arr)) == 0):
                 raise ValueError(f"{ch} in acquisition {key}: duplicate timestamps on one channel")
 
 
@@ -215,7 +218,21 @@ def check_reference_channel(window: Window, channels: tuple[str, ...]) -> None:
         )
 
 
-def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, float, int]:
+def _grid(tags: dict[str, np.ndarray], a: str, b: str, window: Window, cache: dict | None = None) -> int:
+    """grid_coincidences of channels a and b at the window's width and delays, memoised in `cache`
+    (one dict per `chsh()` call; council round 9, Pf8). The key holds the arrays' ids, and the entry
+    holds the arrays, so an id cannot be reused while the cache lives."""
+    d = window.delays_ps
+    args = (window.width_ps, d.get(a, 0), d.get(b, 0))
+    if cache is None:
+        return grid_coincidences(tags[a], tags[b], *args)
+    key = (id(tags[a]), id(tags[b])) + args
+    if key not in cache:
+        cache[key] = (grid_coincidences(tags[a], tags[b], *args), tags[a], tags[b])
+    return cache[key][0]
+
+
+def correlator(tags: dict[str, np.ndarray], window: Window, cache: dict | None = None) -> tuple[float, float, int]:
     """E = (N++ + N-- - N+- - N-+) / N and its variance (1 - E^2) / N.
 
     Double clicks: a slot with both outputs of one side and a click on the other counts in two
@@ -226,10 +243,9 @@ def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, floa
     missing = [ch for ch in CHANNELS if ch not in tags]
     if missing:
         raise ValueError(f"run is missing channel(s) {missing}; a CHSH run needs {list(CHANNELS)}")
-    d = window.delays_ps
 
     def n(a: str, b: str) -> int:
-        return grid_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0))
+        return _grid(tags, a, b, window, cache)
 
     npp, nmm, npm, nmp = n("A+", "B+"), n("A-", "B-"), n("A+", "B-"), n("A-", "B+")
     total = npp + nmm + npm + nmp
@@ -243,14 +259,14 @@ def correlator(tags: dict[str, np.ndarray], window: Window) -> tuple[float, floa
     return e, (1.0 - e * e) / total, total
 
 
-def setting_counts(tags: dict[str, np.ndarray], window: Window) -> dict[str, float]:
+def setting_counts(tags: dict[str, np.ndarray], window: Window, cache: dict | None = None) -> dict[str, float]:
     """Singles, coincidences, coincidences per singles on each arm, and each side's output imbalance.
 
     The detection-loophole thresholds need the condition on both arms, so the smaller ratio is the
     one to compare (senior-physicist review, cycle 10: the larger one was reported, 0.85 for an arm
     at 0.28).
     """
-    _, _, total = correlator(tags, window)
+    _, _, total = correlator(tags, window, cache)
     singles_a = int(tags["A+"].size + tags["A-"].size)
     singles_b = int(tags["B+"].size + tags["B-"].size)
     per_a = total / max(1.0, singles_a)
@@ -271,16 +287,12 @@ def _pair_name(x: str, y: str) -> str:
     return f"A{x}/B{y}"
 
 
-def _setting_outcome_counts(runs, window: Window) -> dict:
+def _setting_outcome_counts(runs, window: Window, cache: dict | None = None) -> dict:
     """Grid coincidences per setting pair and outcome combination."""
     from dadl.forward import OUTCOME_SIGNS
 
-    d = window.delays_ps
     return {
-        key: {
-            (x, y): grid_coincidences(runs[key]["A" + x], runs[key]["B" + y], window.width_ps, d.get("A" + x, 0), d.get("B" + y, 0))
-            for x, y in OUTCOME_SIGNS
-        }
+        key: {(x, y): _grid(runs[key], "A" + x, "B" + y, window, cache) for x, y in OUTCOME_SIGNS}
         for key in SIGNS
     }
 
@@ -317,7 +329,8 @@ def capture_balance(runs, window: Window, counts=None, lattice_ps: int | None = 
         a, b = "A" + x, "B" + y
         declared = float(d.get(b, 0) - d.get(a, 0))
         fit = pooled_peak([
-            PairData(f"{k[0]},{k[1]} {a}/{b}", runs[k][a], runs[k][b], declared, window.width_ps, lattice_ps=lattice_ps or None)
+            PairData(f"{k[0]},{k[1]} {a}/{b}", runs[k][a], runs[k][b], declared, window.width_ps,
+                     lattice_ps=lattice_ps or None, t3_period_ps=run_t3_period(runs[k]))
             for k in SIGNS
         ])
         if fit is not None:
@@ -387,20 +400,26 @@ def chsh(
     check_no_duplicates(runs, CHANNELS)
     # Counting does not need sorted tags, but the dead-time and interruption guards do (unsorted
     # input dropped both labels: API review, cycle 7).
-    runs = {k: {ch: np.sort(np.asarray(v)) for ch, v in r.items()} for k, r in runs.items()}
+    # The metadata stays with each acquisition: the T3 sync period puts cross-sync delays back on
+    # the lattice (council round 9, Tw1).
+    runs = {
+        k: RunTags({ch: _as_sorted(np.asarray(v)) for ch, v in r.items()}, metadata=getattr(r, "metadata", None))
+        for k, r in runs.items()
+    }
+    grid_cache: dict = {}
     s = 0.0
     var = 0.0
     for key, sign in SIGNS.items():
         if key not in runs:
             raise ValueError(f"missing run for setting pair {key}; need {list(SIGNS)}")
-        e, v, _ = correlator(runs[key], window)
+        e, v, _ = correlator(runs[key], window, grid_cache)
         s += sign * e
         var += v
     raw = Estimate(s, math.sqrt(var))
     labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw) + t3_labels
     if interrupted(*([runs[k][ch] for ch in CHANNELS] for k in SIGNS)):
         labels += (INTERRUPTED,)
-    counts: dict[str, object] = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}
+    counts: dict[str, object] = {f"{k[0]},{k[1]}": setting_counts(runs[k], window, grid_cache) for k in SIGNS}
     counts["signs"] = {f"{k[0]},{k[1]}": s for k, s in SIGNS.items()}
     if dead_time_selection(runs, {k: counts[f"{k[0]},{k[1]}"]["coincidences"] for k in SIGNS}) > 0.01:
         labels += (DEAD_TIME_SELECTION,)
@@ -411,7 +430,7 @@ def chsh(
     m_b = float(np.mean([counts[f"{k[0]},{k[1]}"]["imbalance_b"] for k in SIGNS]))
     if 2.0 * abs(m_a * m_b) > 0.5 * raw.stderr:
         labels += (EFFICIENCY_IMBALANCE,)
-    outcome_counts = _setting_outcome_counts(runs, window)
+    outcome_counts = _setting_outcome_counts(runs, window, grid_cache)
     s_balanced, balance, sd_data = capture_balance(runs, window, outcome_counts, lattice)
     counts["capture_offsets_ps"] = {_pair_name(*k): v[0] for k, v in balance.items()}
     counts["capture_reweighted_s"] = s_balanced
@@ -425,7 +444,7 @@ def chsh(
     if calibrations is not None:
         corrected, extra, more, more_counts = _corrected(
             runs, window, policy, calibrations, channels, seed, raw, (outcome_counts, s_balanced, balance, sd_data),
-            lattice,
+            lattice, grid_cache,
         )
         counts.update(more_counts)
         if DEAD_TIME_SELECTION in labels and "dead_time" not in extra["corrections"]:
@@ -446,7 +465,8 @@ def chsh(
 
 
 def _corrected(
-    runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate, capture, lattice=None
+    runs, window: Window, policy: Policy, calibrations, channels, seed: int, raw: Estimate, capture, lattice=None,
+    grid_cache: dict | None = None,
 ):
     """The forward-model S, its result fields, its labels (threshold crossing included) and the
     counts it adds. `capture` is (outcome counts, reweighted S, balance, its sd) from `chsh`;
@@ -472,16 +492,16 @@ def _corrected(
         per = {}
         for x, y in OUTCOME_SIGNS:
             a, b = "A" + x, "B" + y
-            c = grid_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0))
+            c = _grid(tags, a, b, window, grid_cache)
             side = shifted_coincidences(tags[a], tags[b], window.width_ps, d.get(a, 0), d.get(b, 0), offsets)
             sides[f"{key[0]},{key[1]} {a}/{b}"] = side
             per[(x, y)] = run_counts(tags, c, side, span, channels=(a, b))
         reduced[key] = per
-    offpeak_p, offpeak_labels = offpeak_check("chsh", sides, offsets, policy)
+    offpeak_p, offpeak_labels, offpeak_draws = offpeak_check("chsh", sides, offsets, policy)
     grid = {"window_ps": window.width_ps, "delays_ps": {k: float(v) for k, v in d.items()}}
     fwd = corrected_chsh(reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed, **grid)
     counts: dict[str, object] = {**({"forward_check_p": check_p} if check_p is not None else {}), **gap_counts,
-                                 "offpeak_p": offpeak_p, **fwd.counts}
+                                 "offpeak_p": offpeak_p, "offpeak_draws": offpeak_draws, **fwd.counts}
     if lattice == 0:
         from dadl.forward_check import NO_LATTICE
 
@@ -558,7 +578,7 @@ def _delay_drift(window: Window, policy: Policy, calibrations, channels, seed: i
         f"the calibrated delays do not match the analysed pair peaks ({a}/{b}: calibrated {calibrated:.0f}, analysed "
         f"{declared + balance[worst][0]:.0f} ps; S {s_artifact:.4f} with the calibrated captures, {s_balanced:.4f} "
         f"with the analysed, z = {z:.1f}): a drift since calibration changes the window capture. Recalibrate the "
-        f"delays, or override with Policy.allow('chsh', {OVERRIDE!r}, reason)."
+        f"delays. {override_hint('chsh', OVERRIDE)}"
     )
 
 
@@ -585,8 +605,8 @@ def _forward_check(
             if jitter is None:
                 return None, ()
             pairs.append(PairData(
-                f"{key[0]},{key[1]} {a}/{b}", np.sort(tags[a]), np.sort(tags[b]), declared, window.width_ps,
-                d_cal - declared, jitter, lattice_ps=lattice,
+                f"{key[0]},{key[1]} {a}/{b}", _as_sorted(tags[a]), _as_sorted(tags[b]), declared, window.width_ps,
+                d_cal - declared, jitter, lattice_ps=lattice, t3_period_ps=run_t3_period(tags),
             ))
     result = run_check(pairs)
     return result.pvalue, enforce(result, "chsh", policy)

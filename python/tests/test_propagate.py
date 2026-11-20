@@ -360,11 +360,15 @@ def test_a_dead_time_longer_than_the_analysed_gaps_is_refused():
     run = {"A": simulate_dark(fast, 0.05, rng)}
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter, down to"):
         check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS)
-    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "checking")
+    policy = Policy.default().allow(ANALYSIS, "dead_time_contradicted", "checking")
     labels, counts = check_dead_time_gaps(s, {"A": A}, [run], analysis=ANALYSIS, policy=policy)
-    assert tuple(lab for lab in labels if not lab.startswith("the dark dead time of")) == (OUTSIDE_VALIDITY,) and 29_000 < counts["min_gap_ps"]["A"] < 31_000
+    rest = tuple(lab for lab in labels if not lab.startswith("the dark dead time of"))
+    assert len(rest) == 1 and rest[0].startswith(CONTRADICTED) and 29_000 < counts["min_gap_ps"]["A"] < 31_000
     slow = {"A": simulate_dark(det, 1.0, rng)}
     assert check_dead_time_gaps(s, {"A": A}, [slow], analysis=ANALYSIS)[0] == ()
+
+
+CONTRADICTED = "dead time contradicted by the analysed gaps, accepted: "
 
 
 def _gap_check(cal_tau: int, true_tau: int, rate: float, rng, policy=None):
@@ -391,8 +395,9 @@ def test_the_gap_check_refuses_in_both_directions():
     for rate in (1e6, 5e6):
         labels, counts = _gap_check(50_000, 50_000, rate, rng)
         assert tuple(lab for lab in labels if not lab.startswith("the dark dead time of")) == () and 40_000 < counts["gap_check_floor_ps"]["A"] < 50_000
-    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "checking")
-    assert _gap_check(22_000, 50_000, 1e6, rng, policy)[0] == (OUTSIDE_VALIDITY,)
+    policy = Policy.default().allow(ANALYSIS, "dead_time_contradicted", "checking")
+    labels = _gap_check(22_000, 50_000, 1e6, rng, policy)[0]
+    assert len(labels) == 1 and labels[0].startswith(CONTRADICTED) and "longer than its upper end" in labels[0]
 
 
 def test_the_upward_gap_test_applies_to_an_upper_limit():
@@ -485,3 +490,69 @@ def test_a_delay_artifact_from_another_tagger_is_refused(tmp_path):
     write(make_cal(A, seed=2), d2, instrument={"model": "HydraHarp", "serial": "1111111"})
     labels = CalibrationSet.load(d2, analysis=ANALYSIS, dataset=other).labels
     assert OTHER_TAGGER in labels and OUTSIDE_VALIDITY not in labels
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+T2_DARK = {"tagger_mode": 2.0, "tagger_MeasDesc_GlobalResolution": 5e-12}
+T3_RUN = {"tagger_mode": 3.0, "tagger_MeasDesc_GlobalResolution": 4.999937e-8, "tagger_MeasDesc_Resolution": 5e-12}
+
+
+def test_a_t2_dark_artifact_covers_a_t3_dataset(tmp_path):
+    # Council round 9 (Tw2): the T2 tick and the T3 sync period share one header key; a T2 dark
+    # artifact (5 ps) was refused on a T3 run (50 ns), following DADL's own advice. Artifacts
+    # without tagger_mode keep the old comparison.
+    assert condition_mismatches(T2_DARK, T3_RUN) == []
+    old = {"tagger_MeasDesc_GlobalResolution": 5e-12}
+    assert condition_mismatches(old, T3_RUN) and condition_mismatches(T2_DARK, {**T3_RUN, "tagger_mode": 2.0})
+    write(make_cal(A, seed=1, conditions=T2_DARK), tmp_path)
+    CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions=T3_RUN))
+
+
+def test_a_changed_cw_t3_clock_is_labelled_not_refused(tmp_path):
+    # Council round 9 (Tw3, the twin's hom_sync10): with source.type cw the sync is a clock only, so
+    # a 20 to 10 MHz change labels dark and pair artifacts instead of refusing them.
+    from dadl.propagate import T3_CLOCK_CHANGED
+
+    write(make_cal(A, seed=1, conditions=T3_RUN, kind="heralding-efficiency"), tmp_path)
+    run10 = {**T3_RUN, "tagger_MeasDesc_GlobalResolution": 9.999881e-8}
+    with pytest.raises(StaleCalibration, match="tagger_MeasDesc_GlobalResolution = 4.999937e-08 recorded"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions=run10))
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions=run10, t3_cw=True))
+    assert T3_CLOCK_CHANGED.format(a="4.999937e-08 s", b="9.999881e-08 s") in s.labels
+    # A kind that may depend on the clock (deadtime-series) is still refused.
+    series = tmp_path / "series"
+    series.mkdir()
+    write(make_cal(A, seed=2, conditions=T3_RUN, kind="deadtime-series"), series)
+    with pytest.raises(StaleCalibration, match="tagger_MeasDesc_GlobalResolution"):
+        CalibrationSet.load(series, analysis=ANALYSIS, dataset=ctx(conditions=run10, t3_cw=True),
+                            kinds=["deadtime-series"])
+
+
+def test_conditions_outside_the_compared_forms_are_labelled(tmp_path):
+    # Council round 9 (Rd4): detector_temperature_K 233 against 298 passed silently, as did a lone
+    # temperature_min_K.
+    from dadl.propagate import NOT_COMPARED
+
+    assert condition_mismatches({"temperature_min_K": 250.0}, {"temperature_K": 240.0})
+    assert condition_mismatches({"temperature_min_K": 250.0}, {"temperature_K": 260.0}) == []
+    assert condition_mismatches({"temperature_max_K": 250.0}, {"temperature_K": 260.0})
+    assert condition_mismatches({"temperature_max_K": 250.0}, {}) == ["temperature_max_K = 250 recorded, not given for the dataset"]
+    write(make_cal(A, seed=1, conditions={"detector_temperature_K": 233.0, "gaps": 2e4}), tmp_path)
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions={"detector_temperature_K": 298.0}))
+    assert NOT_COMPARED.format(key="detector_temperature_K") in s.labels
+    assert NOT_COMPARED.format(key="gaps") not in s.labels
+
+
+def test_no_validity_labels_collapse_into_one(tmp_path):
+    # Council round 9 (Tw8): CHSH repeated "has no validity range" once per artifact.
+    from dadl.propagate import NO_VALIDITY_MANY, collapse_no_validity
+
+    labels = (NO_VALIDITY.format(aid="aaa"), "other", NO_VALIDITY.format(aid="bbb"))
+    assert collapse_no_validity(labels) == (NO_VALIDITY_MANY.format(aids="aaa, bbb"), "other")
+    assert collapse_no_validity(labels[:2]) == labels[:2]
+    write(make_cal(A, seed=1), tmp_path)
+    write(make_cal(B, seed=2), tmp_path)
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    ids = [m.artifact_id for m in s.members]
+    assert s.labels_for(ids) == (NO_VALIDITY_MANY.format(aids=", ".join(a[:12] for a in ids)),)

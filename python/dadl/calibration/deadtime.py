@@ -125,6 +125,7 @@ recovery is close to fully paralyzable, it can pass with an effective tau_p near
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Sequence
 
@@ -188,27 +189,39 @@ def _modes(a: float, tau: float) -> tuple[float, float]:
     return l1, l2
 
 
+def _series(x: np.ndarray, a: float, tau: float) -> np.ndarray:
+    out = np.zeros_like(x)
+    top = float(x.max(initial=-1.0))
+    for j in range(K_TERMS + 1):
+        if j * tau > top and j > 0:
+            break  # every remaining term is masked to 0.0: adding it changes nothing
+        r = x - j * tau
+        out += np.where(r >= 0.0, (-a * np.maximum(r, 0.0)) ** j / math.factorial(j), 0.0)
+    return out
+
+
+@functools.lru_cache(maxsize=4096)
+def _survival_consts(n: float, tau: float):
+    a = n * math.exp(-n * tau)
+    u0 = K_TERMS * tau
+    # Past u0 the two real modes, matched to S(u0) and S'(u0) = -a S(u0 - tau). The divided
+    # difference is written with expm1 so it stays exact as the modes merge (n tau near 1).
+    s0 = float(_series(np.array([u0]), a, tau)[0])
+    ds0 = -a * float(_series(np.array([u0 - tau]), a, tau)[0])
+    l1, l2 = _modes(a, tau)
+    return a, u0, s0, ds0, l1, l2
+
+
 def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
     """S(w): 1 below tau, S' = -a S(w - tau) above (see the module docstring)."""
     w = np.asarray(w, dtype=float)
     n, tau = float(n), float(tau)
     if tau <= 0.0:
         return np.exp(-n * np.maximum(w, 0.0))
-    a = n * math.exp(-n * tau)
-    u0 = K_TERMS * tau
+    a, u0, s0, ds0, l1, l2 = _survival_consts(n, tau)
 
     def series(x: np.ndarray) -> np.ndarray:
-        out = np.zeros_like(x)
-        for j in range(K_TERMS + 1):
-            r = x - j * tau
-            out += np.where(r >= 0.0, (-a * np.maximum(r, 0.0)) ** j / math.factorial(j), 0.0)
-        return out
-
-    # Past u0 the two real modes, matched to S(u0) and S'(u0) = -a S(u0 - tau). The divided
-    # difference is written with expm1 so it stays exact as the modes merge (n tau near 1).
-    s0 = float(series(np.array([u0]))[0])
-    ds0 = -a * float(series(np.array([u0 - tau]))[0])
-    l1, l2 = _modes(a, tau)
+        return _series(x, a, tau)
     t = np.maximum(w - u0, 0.0)
     dl = l2 - l1
     if abs(dl) * max(float(t.max(initial=0.0)), 1.0) < 1e-9:

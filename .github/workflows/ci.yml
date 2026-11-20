@@ -50,6 +50,8 @@ jobs:
   python:
     name: Python ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Council round 9 (Pf5): the slowest unit job took 41.8 min.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +77,8 @@ jobs:
     # Council round 7 (Q9): tests marked slow (seed sweeps, scans over 15 s) run once, on Linux.
     name: Python 3.12, slow tests (ubuntu-latest)
     runs-on: ubuntu-latest
+    # Council round 9 (Pf5): the slowest unit job took 41.8 min.
+    timeout-minutes: 75
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -95,6 +99,8 @@ jobs:
   python-minimum:
     name: Python 3.10 with the minimum declared dependencies
     runs-on: ubuntu-latest
+    # Council round 9 (Pf5): the slowest unit job took 41.8 min.
+    timeout-minutes: 75
     steps:
       # actions/checkout v7.0.1, pinned by commit SHA
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

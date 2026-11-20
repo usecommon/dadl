@@ -384,12 +384,19 @@ def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
     long = _with_darks(cset, [_dark(cid, 1e6, seed=i) for i, cid in enumerate(IDS.values())])
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
         chsh(runs, WINDOW, POLICY, calibrations=long, channels=IDS, seed=1)
-    loose = POLICY.allow("chsh", "calibration_outside_validity", "checking")
+    # Council round 9 (Rd2): the validity override no longer covers the gap tests.
+    with pytest.raises(StaleCalibration, match="dead_time_contradicted"):
+        check_dead_time_gaps(long, IDS, [runs[k] for k in runs], analysis="chsh",
+                             policy=POLICY.allow("chsh", "calibration_outside_validity", "checking"))
+    loose = POLICY.allow("chsh", "dead_time_contradicted", "checking")
     # Under the override the gap check passes it, labelled; its dead fraction (0.74) is then
     # refused (council round 6, R1 b).
     labels, counts = check_dead_time_gaps(long, IDS, [runs[k] for k in runs], analysis="chsh", policy=loose)
     # The 1 us point is also above the gaps: labelled (council round 8, DEAD_TIME_ABOVE_GAPS).
-    assert tuple(lab for lab in labels if not lab.startswith("the dark dead time of")) == (OUTSIDE_VALIDITY,) and 45_000 < counts["min_gap_ps"]["A+"] < 51_000
+    rest = tuple(lab for lab in labels if not lab.startswith("the dark dead time of"))
+    assert len(rest) == 1 and rest[0].startswith("dead time contradicted by the analysed gaps, accepted: dead time 1000 ns")
+    assert OUTSIDE_VALIDITY not in labels and len(counts["dead_time_gap_problems"]) == 4
+    assert 45_000 < counts["min_gap_ps"]["A+"] < 51_000
     with pytest.raises(GuardrailRefusal, match="pair term and the unmodelled paralyzable stage are not trusted"):
         chsh(runs, WINDOW, loose, calibrations=long, channels=IDS, seed=1)
     short = _with_darks(cset, [_dark(cid, 22_000, 500, seed=i) for i, cid in enumerate(IDS.values())])
@@ -453,7 +460,7 @@ def test_labels_of_unused_artifacts_are_left_out(data, tmp_path):
 
     from dadl.calibration import calibrate_accidentals
     from dadl.calibration.delay import KIND as DELAY_KIND
-    from dadl.propagate import NO_VALIDITY
+    from dadl.propagate import NO_VALIDITY, NO_VALIDITY_MANY
 
     runs, d = data
     full = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
@@ -469,8 +476,9 @@ def test_labels_of_unused_artifacts_are_left_out(data, tmp_path):
     r = chsh(runs, WINDOW, policy, calibrations=cset, channels=IDS, seed=1)
     gone = NO_VALIDITY.format(aid=unused.stem[:12])
     assert gone in cset.labels and gone not in r.all_labels
-    used = [NO_VALIDITY.format(aid=aid[:12]) for aid in r.artifact_ids]
-    assert len(used) == 4 and all(lab in r.corrected_labels and lab not in r.labels for lab in used)
+    # Council round 9 (Tw8): the used artifacts' "no validity range" is one label listing them.
+    used = NO_VALIDITY_MANY.format(aids=", ".join(aid[:12] for aid in r.artifact_ids))
+    assert len(r.artifact_ids) == 4 and used in r.corrected_labels and used not in r.labels
     assert FORWARD_MODEL in r.corrected_labels and FORWARD_MODEL not in r.labels
 
 
@@ -584,5 +592,108 @@ def test_clean_chsh_spad_runs_pass_the_off_peak_check():
         runs = simulate_chsh(reg.source, dict.fromkeys(("A+", "A-", "B+", "B-"), reg.detector), reg.duration_s,
                              np.random.default_rng(900 + seed), CHSH_SETTINGS)
         ps = [offpeak_p(shifted_coincidences(np.sort(r["A" + x]), np.sort(r["B" + y]), reg.window_ps, 0, 0, offsets),
-                        offsets) for r in runs.values() for x in "+-" for y in "+-"]
+                        offsets, 16) for r in runs.values() for x in "+-" for y in "+-"]
         assert min(ps) >= OFFPEAK_ALPHA / len(ps)
+
+
+# --- Council round 9 -----------------------------------------------------------------------------
+
+
+def _flat_sides(rng, n, mean=1.0):
+    from dadl.calibration.accidentals import side_offsets
+
+    offsets = side_offsets(2_000)
+    return offsets, {f"s{i}": rng.poisson(mean, offsets.size) for i in range(n)}
+
+
+def test_a_periodic_off_peak_side_among_16_is_refused():
+    # Council round 9 (Pf1): at 20,000 fixed draws the doubled dispersion p could never reach
+    # 2e-4 / 16; the r9-perf case (every 4th window, mean 1) passed CHSH unflagged.
+    from dadl.analysis._twopoint import offpeak_check
+    from dadl.errors import Misspecified
+
+    rng = np.random.default_rng(3)
+    offsets, sides = _flat_sides(rng, 15)
+    bad = np.zeros(offsets.size, dtype=np.int64)
+    bad[::4] = rng.poisson(4.0, bad[::4].size)
+    sides = {"bad": bad, **sides}
+    with pytest.raises(Misspecified, match="bad: p = "):
+        offpeak_check("chsh", sides, offsets, None)
+    p, labels, draws = offpeak_check("chsh", sides, offsets, POLICY.allow("chsh", "misfit_forward_model", "checking"))
+    assert p < 2e-4 and labels and draws > 640_000
+    # The flagged side runs to n_max; the sides after it stop once they cannot be flagged.
+    assert draws < 700_000
+
+
+def test_the_sequential_off_peak_p_is_reproducible_and_flat_sides_pass():
+    # Council round 9 (Pf1): seeded from the counts, the same data give the same p; a flat side
+    # stops after a few hundred draws with p = 20 / draws, not near the threshold.
+    from dadl.analysis._twopoint import OFFPEAK_ALPHA, offpeak_check, sequential_dispersion_pvalue
+
+    rng = np.random.default_rng(11)
+    offsets, sides = _flat_sides(rng, 16, mean=1.3)
+    first = [sequential_dispersion_pvalue(s, 16) for s in sides.values()]
+    assert first == [sequential_dispersion_pvalue(s, 16) for s in sides.values()]
+    for p, draws in first:
+        assert p >= 1e-3 and (draws == 0 or p == pytest.approx(20 / draws) or draws == 640_000)
+    p, labels, draws = offpeak_check("chsh", sides, offsets, None)
+    assert p >= OFFPEAK_ALPHA and labels == () and 0 < draws < 16 * 20_000
+    # The chi-square path above a mean of 5 per window draws nothing.
+    assert sequential_dispersion_pvalue(rng.poisson(8.0, offsets.size), 16)[1] == 0
+
+
+@pytest.mark.slow
+def test_pulsed_accidentals_at_half_of_one_chsh_side_are_refused():
+    # Council round 9 (Pf1, pulsed_chsh.py): one of 16 sides holds a pulsed share of 0.5 at a
+    # 13157.9 ps period (50 ps jitter), mean 1.3 per window; refused in at least 28 of 30 seeds.
+    from scipy.special import erf
+
+    from dadl.analysis._twopoint import offpeak_check
+    from dadl.calibration.accidentals import side_offsets
+    from dadl.errors import Misspecified
+
+    width, period, jit = 2_000, 13_157.9, 50.0
+    offsets = side_offsets(width)
+    w = np.zeros(offsets.size)
+    for i, o in enumerate(offsets):
+        lo, hi = o, o + width
+        for n in range(int(np.floor((lo - 5 * jit) / period)), int(np.ceil((hi + 5 * jit) / period)) + 1):
+            w[i] += 0.5 * (erf((hi - n * period) / (np.sqrt(2) * jit)) - erf((lo - n * period) / (np.sqrt(2) * jit)))
+    lam = 1.3 * (0.5 + 0.5 * w / w.mean())
+    refused = 0
+    for seed in range(30):
+        rng = np.random.default_rng(1000 + seed)
+        sides = {f"s{i}": rng.poisson(1.3, offsets.size) for i in range(15)}
+        sides["pulsed"] = rng.poisson(lam)
+        try:
+            offpeak_check("chsh", sides, offsets, None)
+        except Misspecified:
+            refused += 1
+    assert refused >= 28
+
+
+@pytest.mark.slow
+def test_the_sequential_dispersion_p_is_valid_on_iid_poisson_sides():
+    # Council round 9 (Pf1, null_seed.txt): 20,000 iid Poisson(1.3) sides at 16 sides; with the
+    # seed from the counts every level is at or below nominal (seed 0 ran the 5% level at 6%).
+    from dadl.analysis._twopoint import sequential_dispersion_pvalue
+    from dadl.calibration.accidentals import side_offsets
+
+    rng = np.random.default_rng(20261120)
+    k = side_offsets(2_000).size
+    ps = np.array([sequential_dispersion_pvalue(rng.poisson(1.3, k), 16)[0] for _ in range(20_000)])
+    assert np.mean(ps <= 0.01) <= 0.012 and np.mean(ps <= 1e-3) <= 0.0015
+
+
+def test_chsh_and_the_gap_check_do_not_modify_the_caller_s_tags(data):
+    # Council round 9 (Pf3): as_sorted hands sorted input through without a copy.
+    import copy
+
+    from dadl.forward import check_dead_time_gaps
+
+    runs, d = data
+    before = copy.deepcopy(runs)
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    chsh(runs, WINDOW, POLICY, calibrations=cset, channels=IDS, seed=1)
+    check_dead_time_gaps(cset, IDS, [runs[k] for k in runs], analysis="chsh", policy=POLICY)
+    assert all(np.array_equal(runs[k][c], before[k][c]) for k in runs for c in runs[k])

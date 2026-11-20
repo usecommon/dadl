@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from dadl.data import ChannelId
+from dadl.coincidences import as_sorted as _as_sorted
+from dadl.data import ChannelId, run_t3_period
 from dadl.guardrails import Policy
 from dadl.propagate import CalibrationSet
 
@@ -13,9 +14,13 @@ from dadl.propagate import CalibrationSet
 #: Off-peak flatness check (council round 8, Ph3): its share of the 1e-3 per-analysis refusal
 #: budget, Bonferroni over the acquisitions (or acquisitions x outcome pairs) checked.
 OFFPEAK_ALPHA = 2e-4
-#: Simulations of the exact dispersion test: at 2,000 its smallest p (about 1e-3 after doubling)
-#: could never reach the threshold.
-OFFPEAK_N_SIM = 20_000
+#: Sequential Monte Carlo of the exact dispersion test (council round 9, Pf1): stop at this many
+#: exceedances (p = h / draws). A fixed 20,000 draws gave a smallest doubled p of 1e-4, which could
+#: never reach the threshold with 16 sides (CHSH), only with 2 (HOM and fringe).
+OFFPEAK_H = 20
+#: n_max = OFFPEAK_N_MAX_FACTOR x 2 x sides / alpha draws: the smallest p is a fifth of a side's
+#: dispersion threshold.
+OFFPEAK_N_MAX_FACTOR = 4
 OFFPEAK_REFUSAL = (
     "the off-peak windows are not flat (pulsed light or a periodic background): the accidentals cannot be read "
     "off-peak"
@@ -26,41 +31,124 @@ OFFPEAK_ACCEPTED = (
 )
 
 
-def offpeak_p(side: np.ndarray, offsets: np.ndarray) -> float:
-    """The off-peak flatness p-value of one acquisition's shifted counts: min(dispersion, trend),
-    doubled, with the exact dispersion test at `OFFPEAK_N_SIM` simulations."""
-    from dadl.calibration.accidentals import dispersion_pvalue, trend_pvalue
+def sequential_dispersion_pvalue(
+    counts: np.ndarray,
+    n_sides: int = 1,
+    alpha: float = OFFPEAK_ALPHA,
+    h: int = OFFPEAK_H,
+    n_max_factor: int = OFFPEAK_N_MAX_FACTOR,
+    stop_at: int | None = None,
+) -> tuple[float, int]:
+    """Exact dispersion p-value of shifted counts by sequential Monte Carlo (Besag and Clifford
+    1991): (p, draws used).
 
-    return min(1.0, 2.0 * min(dispersion_pvalue(side, n_sim=OFFPEAK_N_SIM), trend_pvalue(side, offsets)))
+    Multinomial null tables (the total spread evenly over the windows) are drawn in growing chunks.
+    At the h-th draw whose statistic reaches the observed one, p = h / draws so far. Otherwise the
+    draws stop at n_max = n_max_factor x 2 x n_sides / alpha, with p = (g + 1) / (n_max + 1) for g
+    exceedances. Either way P(p <= u) <= u. The generator is seeded from the counts, so the same data
+    give the same p, and different sides use unrelated streams (a fixed seed made the 5% level run at
+    6%: council round 9). At a mean of `EXACT_BELOW` per window or more the chi-square law is used
+    (0 draws). `stop_at` ends the draws at that many exceedances (p = stop_at / draws, an early
+    stop used once the analysis is already refused)."""
+    from scipy import stats as st
+
+    from dadl.calibration.accidentals import EXACT_BELOW
+
+    counts = np.asarray(counts)
+    m = float(np.mean(counts)) if counts.size else 0.0
+    if counts.size < 2 or m <= 0:
+        return 1.0, 0
+    stat = float(np.sum((counts - m) ** 2) / m)
+    if m >= EXACT_BELOW:
+        return float(st.chi2.sf(stat, counts.size - 1)), 0
+    n_max = int(np.ceil(n_max_factor * 2 * n_sides / alpha))
+    stop = h if stop_at is None else min(h, int(stop_at))
+    total, k = int(counts.sum()), counts.size
+    rng = np.random.default_rng(np.random.SeedSequence(counts.astype(np.uint32)))
+    exceeded = drawn = 0
+    chunk = 64
+    while drawn < n_max:
+        size = min(chunk, n_max - drawn)
+        sims = rng.multinomial(total, np.full(k, 1.0 / k), size=size)
+        hits = np.cumsum(np.sum((sims - m) ** 2, axis=1) / m >= stat - 1e-9)
+        if exceeded + hits[-1] >= stop:
+            at = int(np.searchsorted(hits, stop - exceeded)) + 1  # draws in this chunk up to the stop
+            return stop / (drawn + at), drawn + at
+        exceeded += int(hits[-1])
+        drawn += size
+        chunk = min(chunk * 2, 16384)
+    return (exceeded + 1) / (n_max + 1), drawn
+
+
+def _offpeak(side: np.ndarray, offsets: np.ndarray, n_sides: int, stop_at: int | None = None) -> tuple[float, int]:
+    from dadl.calibration.accidentals import trend_pvalue
+
+    p_disp, draws = sequential_dispersion_pvalue(side, n_sides, stop_at=stop_at)
+    return min(1.0, 2.0 * min(p_disp, trend_pvalue(side, offsets))), draws
+
+
+def offpeak_p(side: np.ndarray, offsets: np.ndarray, n_sides: int = 1) -> float:
+    """The off-peak flatness p-value of one acquisition's shifted counts among `n_sides` checked:
+    min(dispersion, trend), doubled, with the sequential dispersion test
+    (`sequential_dispersion_pvalue`)."""
+    return _offpeak(side, offsets, n_sides)[0]
+
+
+def _refusing_exceedances(n_sides: int) -> int:
+    """The fewest dispersion exceedances whose p at n_max, (g + 1) / (n_max + 1), no longer flags a
+    side: once a side has this many, its dispersion half cannot flag it (4 for 2 or 16 sides)."""
+    n_max = int(np.ceil(OFFPEAK_N_MAX_FACTOR * 2 * n_sides / OFFPEAK_ALPHA))
+    g = 0
+    while 2.0 * (g + 1) / (n_max + 1) < OFFPEAK_ALPHA / n_sides:
+        g += 1
+    return g
 
 
 def offpeak_check(
     analysis: str, sides: dict[str, np.ndarray], offsets: np.ndarray, policy: Policy | None
-) -> tuple[float, tuple[str, ...]]:
+) -> tuple[float, tuple[str, ...], int]:
     """Check that each acquisition's off-peak windows are flat, as the accidentals assume (council
     round 8, Ph3: pulsed light on T2 or plain tags read V 10-40 sd off, unlabelled). Returns the
-    smallest p, Bonferroni-adjusted over `sides`, and the labels. Flagged when the smallest p is
-    below `OFFPEAK_ALPHA` / len(sides): refused (`Misspecified`) unless the policy allows
-    `misfit_forward_model`, then labelled `OFFPEAK_ACCEPTED`. Call it only where an
-    accidental-subtracted value is computed."""
+    smallest p, Bonferroni-adjusted over `sides`, the labels and the Monte Carlo draws used. Flagged
+    when the smallest p is below `OFFPEAK_ALPHA` / len(sides): refused (`Misspecified`) unless the
+    policy allows `misfit_forward_model`, then labelled `OFFPEAK_ACCEPTED`. Call it only where an
+    accidental-subtracted value is computed.
+
+    Once one side is flagged, the remaining sides are drawn only until they cannot be flagged
+    (a flagged side runs to n_max, about 3 s with 16 sides).
+
+    Power (council round 9, L4): with about one off-peak coincidence per window, as in a typical
+    CHSH run, the check reliably finds pulsed accidentals only when they are about half or more of
+    one acquisition's off-peak counts. In council round 9's test it refused 30 of 30 runs at one
+    half, 8-17 of 30 at 30%, and 0-2 of 30 at 20%. A smaller pulsed share passes unlabelled. The
+    off-peak windows then miss part of the same-pulse accidentals, so V and |E| read low
+    (conservative for the threshold). Longer acquisitions raise the counts per window and the power."""
     from dadl.errors import Misspecified
     from dadl.forward_check import OVERRIDE
-    from dadl.guardrails import Policy as _Policy
+    from dadl.guardrails import Policy as _Policy, override_hint
 
-    ps = {name: offpeak_p(side, offsets) for name, side in sides.items()}
-    if not ps:
-        return 1.0, ()
+    if not sides:
+        return 1.0, (), 0
+    n = len(sides)
+    ps: dict[str, float] = {}
+    draws = 0
+    stop_at = None
+    for name, side in sides.items():
+        ps[name], used = _offpeak(side, offsets, n, stop_at)
+        draws += used
+        if stop_at is None and ps[name] < OFFPEAK_ALPHA / n:
+            stop_at = _refusing_exceedances(n)
     worst = min(ps, key=ps.get)
-    adjusted = min(1.0, ps[worst] * len(ps))
-    if ps[worst] >= OFFPEAK_ALPHA / len(ps):
-        return adjusted, ()
+    adjusted = min(1.0, ps[worst] * n)
+    if ps[worst] >= OFFPEAK_ALPHA / n:
+        return adjusted, (), draws
     policy = policy or _Policy.default()
     if OVERRIDE not in policy.rule_for(analysis).allowed_corrections:
         raise Misspecified(
-            f"{OFFPEAK_REFUSAL} ({worst}: p = {adjusted:.3g} after Bonferroni over {len(ps)}). Override with "
-            f"Policy.allow({analysis!r}, {OVERRIDE!r}, reason)."
+            f"{OFFPEAK_REFUSAL} ({worst}: p = {adjusted:.3g} after Bonferroni over {n}). "
+            f"{override_hint(analysis, OVERRIDE)}"
         )
-    return adjusted, (OFFPEAK_ACCEPTED,)
+    return adjusted, (OFFPEAK_ACCEPTED,), draws
 
 
 def span_ps(run: dict[str, np.ndarray], channels: tuple[str, str]) -> float:
@@ -188,8 +276,8 @@ def forward_check(
     if jitter is None or lattice_ps == 0:
         return None, ()
     pairs = [
-        PairData(name, np.sort(run[a]), np.sort(run[b]), declared, window_ps, d_cal - declared, jitter, offsets,
-                 lattice_ps)
+        PairData(name, _as_sorted(run[a]), _as_sorted(run[b]), declared, window_ps, d_cal - declared, jitter, offsets,
+                 lattice_ps, run_t3_period(run))
         for name, (run, offsets) in runs.items()
     ]
     result = run_check(pairs)

@@ -404,6 +404,58 @@ release the package still reports version 0.1.1.
     hom-snspd 94.5/94.5, hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0,
     hom-crosstalk 30.5/32.5 with 100% flagged (misfit artifacts 1.0% to 0.5%). Seed 4242:
     chsh-spad 93.0/93.0, chsh-dead-time 97.0/85.0, no refusals.
+- Review council round 9 (method `xcorr-gaussian-mle` 10; `deadtime` 7 re-pinned, code changed
+  with outputs byte-identical; `dark`, `accidentals`, `dcr`, `heralding` unchanged):
+  - off-peak check: at 20,000 fixed draws the doubled dispersion p could never reach 2e-4 / 16, so
+    only the trend half could refuse in CHSH. The dispersion test is now sequential Monte Carlo
+    (Besag-Clifford: stop at the 20th exceedance, else at 8 x sides / 2e-4 draws), seeded from the
+    counts (`offpeak_draws` in the counts). It is about 90x cheaper on clean data, refuses a pulsed
+    share of half or more of one CHSH acquisition, and passes smaller shares (limit stated).
+    Behaviour change: the off-peak check can now refuse in CHSH;
+  - upward gap test: one cable echo set the shortest gap to the dark bound and switched the test
+    off (S 2.03 for 1.98, unrefused). It now reads gap j = max(10, 0.1% of the gaps) against
+    (j + 1) F.isf(1e-4 / K, 2 (j + 1), 2M), the exact law of an exponential edge; a zero spacing
+    or NaN is refused. It loses power at low rates (stated). `DEAD_TIME_BOUND` no longer says the
+    truth lies between without "if the bound holds". `dadl analyze` labels a dark dead time below
+    half the setup's declared `dead_time_ps` (one rule with `calibrate dark`'s warning, now at
+    half);
+  - the gap tests have their own override, `dead_time_contradicted`, labelled with the problems
+    (also in `dead_time_gap_problems`). `calibration_outside_validity` no longer covers them.
+    Behaviour change;
+  - T3 delay: pair delays across a sync edge sat k r off the dtime lattice and were floored into
+    the wrong bin (-7 ps at 4.4 ns, 80 ps, 12500.3 ps, status ok). The delay fit, the predictive
+    check and the CHSH peak fits put them back on the lattice by sync-count group and fit one
+    delay with each group's peak shifted by -k r (`PairData.t3_period_ps`, from the tags'
+    metadata). T2 and periods on the lattice are unchanged;
+  - on T3 input only `source.type: cw` declares the sync a clock; the templates' `spdc-cw` is
+    refused with a sentence saying so. Behaviour change;
+  - tagger settings record `tagger_mode`; the T2 tick and the T3 period (one header key) are
+    compared only within a mode, so a T2 dark artifact covers a T3 run. Under `cw`, a changed T3
+    clock labels dark and pair artifacts instead of refusing them;
+  - refusals that name `Policy.allow` also give the CLI form (`override_hint`); the README lists
+    the override names and the condition rules; the SNSPD refusal no longer suggests a remedy no
+    command delivers; the README says detector serials are required for recorded data;
+  - recorded conditions the comparison does not understand (a temperature not named
+    `temperature_K`, or a key the dataset also gives) are labelled "recorded, not compared"; a
+    lone `_min_` or `_max_` is compared one-sided; the CLI prints `forward_check_note`;
+    `calibrate dark`, `pairs` and `deadtime` read only the settings they use, and take a single
+    .ptu file as setting 0; `dadl init` prints both first runs and the examples carry a commented
+    `hardware:` block; "no validity range" is one label listing the artifacts;
+  - performance, values unchanged: sorted input is no longer re-sorted or copied (`as_sorted`),
+    `occupied_slots` de-duplicates sorted input in one pass, CHSH memoises its grid counts, the
+    dead-time estimate takes one `np.quantile` call, and the series dead-time constants are
+    cached. Three gate replicates per regime hash as before;
+  - Known limits: analyses hold every channel's tags in memory (about 80-150 GB for a 10-minute
+    CHSH run at 1 Mcps per channel; chunked analysis is planned for M9); the off-peak check's
+    power; the gap tests' tolerance of a few short gaps; the T3 source declaration;
+  - CI: the unit jobs have a 75-minute timeout; plan: owner items O15-O18, O7 extended;
+  - delay (pairs) coverage at 1,000 replicates (CI seed) identical to round 8 in every regime;
+    deadtime coverage identical (95.5/99.9 series-spad, 94.6/99.0 passive-quench); propagation
+    gate at 200 replicates identical in all five regimes with no refusals (hom-snspd 94.5/94.5,
+    hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0, hom-crosstalk 30.5/32.5
+    with 100% flagged), in 278 s against 371 s (chsh-spad 150 to 90 s). Off-peak p < 0.01 in 0.5%
+    of clean chsh-spad and hom-snspd analyses. The named mutants and three new ones (the F
+    threshold's degrees of freedom and alpha / K, the sequential stop) are all killed.
 
 ### Published results as executable tests
 

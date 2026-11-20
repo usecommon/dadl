@@ -48,12 +48,13 @@ experiment, its guardrails and its roadmap.
   MultiHarp) read by DADL's own adapter (phase 2; T3 unreleased). T3 files
   come from a sync (usually pulsed) source. DADL models CW light: in a T3 file
   the sync is used as a clock only. Corrected values are refused on T3 input
-  unless the setup declares `source.type: cw`. Pulsed sources are not
+  unless the setup declares `source.type: cw` (the templates' `spdc-cw` does
+  not count). The T3 sync clock need not match between calibration and run
+  for CW; record dark runs in T2 or T3. Pulsed sources are not
   supported on any input (T2, T3 or plain tags): pulsed accidentals sit in
-  side peaks at multiples of the repetition period. On T2 and plain tags DADL
-  detects them through the off-peak windows (not flat) and refuses the
-  accidental-subtracted values; a period that is a whole multiple of the
-  window grid is not detected, but then the off-peak estimate is also right.
+  side peaks at multiples of the repetition period. DADL detects them
+  through the off-peak windows (not flat) and refuses the
+  accidental-subtracted values, with limited power (see Known limits).
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 - **Hardware twin** (phase 2): `dadl simulate SETUP --out DIR
@@ -91,11 +92,24 @@ experts; there has been no independent human review yet
 [review cycles](docs/reviews/2026-11-review-cycles.md)). Their limits, stated
 plainly:
 
-- **CW sources only.** `source.type` must be `spdc-cw`. Pulsed sources and
-  pulsed or thermal pair statistics are not modelled, on any input; where
-  the off-peak windows show pulsed light, accidental-subtracted values are
-  refused (a period that is a whole multiple of the window grid is not
-  detected, but then the off-peak estimate is right). Independent CW
+- **CW sources only.** `source.type` must be `spdc-cw` (on T3 input, `cw`).
+  Pulsed sources and pulsed or thermal pair statistics are not modelled, on
+  any input; where the off-peak windows show pulsed light, accidental-subtracted
+  values are refused. On T3 input the accidentals are read off-peak only when
+  you declare `source.type: cw`. The template's `spdc-cw` does not count,
+  because it is the default. With pulsed light, a repetition period that
+  divides the off-peak step is not detected by the flatness check. The
+  off-peak estimate is then right only if the first off-peak shift also falls
+  on the comb. Otherwise V and |E| read low (conservative for the threshold),
+  with no label. The off-peak flatness check finds pulsed accidentals from how
+  unevenly they fill the off-peak windows. With about one off-peak
+  coincidence per window, as in a typical CHSH run, it reliably finds them
+  only when they are about half or more of one acquisition's off-peak counts.
+  In council round 9's test it refused 30 of 30 runs at one half, 8-17 of 30
+  at 30%, and 0-2 of 30 at 20%. A smaller pulsed share passes unlabelled. The
+  off-peak windows then miss part of the same-pulse accidentals, so V and |E|
+  read low (conservative for the threshold; council round 9 red team). Longer
+  acquisitions raise the counts per window and the power. Independent CW
   multi-pair coincidences are handled, leaving a bias of about
   −μη_a(1 − η_b)/2 (−1.3% at μ = 0.1 pairs per slot).
 - **Single-exponential afterpulsing.** Detectors with a multi-component or
@@ -237,7 +251,8 @@ plainly:
   calibrations make the check sharper. A dead time known only as an upper limit (an SNSPD,
   or a short dark run) is used at the bound for the value and its interval;
   the counts give the value at zero dead time as well (the truth lies
-  between), and a range wider than the error is labelled: quote the range.
+  between if the bound holds; a bound set by a few short dark gaps may not),
+  and a range wider than the error is labelled: quote the range.
   The predictive check fits a Gaussian peak. A timing tail of a few percent
   (SPAD diffusion, SNSPD) fails it on a Bell run's 16 histograms even when the
   delay artifacts pass (3% of clicks with a 300 ps tail: 6 of 8 runs refused),
@@ -312,11 +327,20 @@ plainly:
   occupied sync period).
   Chunked reading is planned. Unrecognised special records and a divided sync
   input mapped as a detector are refused.
+- **Analyses hold every channel's tags in memory**: about 8 bytes per tag,
+  plus up to the same again for working copies. A 10-minute CHSH run at
+  1 Mcps per channel (6e8 tags per channel, 16 channel-settings) needs about
+  80-150 GB, more than a laptop has. Analyse shorter acquisitions or a subset
+  until chunked analysis lands (milestone M9). Series dead-time calibration is
+  not limited this way.
 - **Tagger settings** (input offsets, trigger levels, dead-time settings, the
   tick) are recorded in each calibration's `conditions` from PTU headers.
   Tagger settings (`tagger_*`) and bias are compared when the calibration is
   used: a mismatch, or a setting recorded but not given for the dataset, is
-  refused (overridable).
+  refused (overridable). The T2 tick and the T3 sync period share one header
+  key; it is compared only between files of the same mode (`tagger_mode`).
+  On T3 input under `source.type: cw`, a changed sync clock is labelled for
+  dark and pair artifacts instead of refused.
 - **Double clicks** in CHSH (both outputs of one side in a slot) count in two
   outcome combinations, which pulls E toward 0.
 - **Reproducibility.** The same tags, setup and software stack give the same
@@ -444,8 +468,25 @@ fibres between them). `dadl simulate --heralding` writes the A+/B+ pair only.
 
 One artifact per kind and channel set (in any order): with calibrations before and after the run,
 pass the one to use; the drift between them is not propagated. An artifact recorded for another
-detector serial than the setup names (also through the Python API), or a dark dead time the
-analysed gaps contradict, is refused as outside its validity (overridable).
+detector serial than the setup names (also through the Python API) is refused as outside its
+validity, and a dark dead time the analysed gaps contradict is refused on its own (both
+overridable).
+
+Refusals name their override; on the CLI each is `--allow NAME=REASON`, and the reason is
+recorded. The names:
+
+| Override | What it accepts |
+| --- | --- |
+| `calibration_outside_validity` | an artifact outside its validity range, conditions, detector or tagger |
+| `dead_time_contradicted` | a dark dead time the analysed gaps contradict (labelled with the problems, recorded as `dead_time_gap_problems`) |
+| `misfit_forward_model` | a failed predictive check, a CHSH delay drift, or off-peak windows that are not flat |
+| `misfit_calibration` | an artifact whose own check failed |
+
+Conditions: an artifact's `temperature_K` must be within 0.5 K of the dataset's, and recording
+`temperature_K` at calibration (`--condition temperature_K=...`) makes it required at analysis.
+`bias*` and `tagger_*` values must be equal, and a `<name>_<unit>` must lie within a recorded
+`<name>_min_<unit>` / `<name>_max_<unit>` (one-sided when only one is recorded). Other recorded
+names are labelled "recorded, not compared".
 
 The dead-time check refuses a dark dead time that the analysed gaps contradict in either
 direction. Downward: gaps shorter than its floor, point − ln(K / 1e-4) / (N f), with N the dark
@@ -453,10 +494,20 @@ run's gaps, f the lower end of its dark rate and K the analysed channels (the sh
 gaps sits above the dead time by Exp(N f)). That is about 4 ns below the point for a 1 s dark
 run at 50 kcps and 265 ns for 0.1 s at 20 kcps, where the dark data cannot exclude anything;
 artifacts without a recorded gap count keep the older floor, three lower half-widths below the
-point. Upward: a shortest analysed gap more than 100((K / 1e-4)^(1/100) − 1) mean edge spacings
-above its upper end (11.2 at K = 4). Each direction refuses a clean analysis with chance at most
-1e-4 (far less upward: the upper end is the shortest dark gap). A dead time between the floor
-and the truth passes; at low analysed rates (about 1,000 gaps) the upward test has no power.
+point. Upward: with j = max(10, 0.1% of the gaps) and M = max(100, j + 1), the gap j + 1 from the
+shortest more than (j + 1) F⁻¹(1 − 1e-4/K; 2(j + 1), 2M) mean edge spacings above its upper end
+(the exact law of an exponential edge; 100((K / 1e-4)^(1/100) − 1) at j = 0). Each direction
+refuses a clean analysis with chance at most 1e-4 (far less upward: the upper end is the shortest
+dark gap). A dead time between the floor and the truth passes; at low analysed rates (about
+1,000 gaps) the upward test has no power, and at 10 kcps and 50,000 gaps it misses a 22 ns
+artifact on a 50 ns detector.
+
+The analysis tests the dark dead time against the analysed gaps in both directions. Each test
+tolerates a few unusual gaps, up to 0.1% of a channel's gaps or 10, whichever is more. A rarer
+double trigger (a cable reflection, a ringing discriminator) cannot hide the edge. A more frequent
+one makes the edge look shorter than the detector's dead time. If you declare the detector's dead
+time in the setup (`detectors.<name>.dead_time_ps`), DADL labels a dark dead time far below it. To
+be sure, look at the dark artifact's notes, which say when a single short gap set its bound.
 When the floor reaches below zero, nothing is refused downward; the 95% lower end is then tested
 for a label only (`gap_check_floor_kind` "lower end (label only)"): it misses in 5% of channels
 by design. A dark dead time longer than many analysed gaps is labelled
@@ -489,8 +540,10 @@ Corrected results add these:
 | `delay_drift_diff`, `delay_drift_z` | analysed minus calibrated capture-reweighted S, and over its noise (CHSH) |
 | `dataset` | the dataset context the calibrations were checked against |
 | `forward_check_p` | the predictive check's p-value; absent without delay-jitter artifacts |
-| `forward_check_note` | why the predictive check was skipped (T3 input with no integer lattice) |
+| `forward_check_note` | why the predictive check was skipped (T3 input with no integer lattice); the CLI prints it |
 | `offpeak_p` | the off-peak flatness check's p-value, Bonferroni over the acquisitions (also on HOM and fringe values with accidentals subtracted) |
+| `offpeak_draws` | the Monte Carlo draws the sequential off-peak dispersion test used (seeded from the counts) |
+| `dead_time_gap_problems` | the dead-time gap tests' problems, when accepted with `dead_time_contradicted` |
 | `monte_carlo` | the Monte Carlo `seed` and `n_draws` the corrected interval depends on |
 | `min_gap_ps` | with dark artifacts: the shortest analysed gap per channel |
 | `gap_check_floor_ps` | with dark artifacts: the dead-time floor per channel; None when not checked downward |
@@ -560,7 +613,7 @@ Before calibrating recorded data, edit the copied `setup.yaml`:
 backend: file                 # not `sim`: calibrations of recorded data are refused under `sim`
 hardware:
   tagger: HydraHarp-1234567   # the tagger's serial, recorded as the channel's device
-  detectors: {A+: SPCM-0042}  # optional detector serials
+  detectors: {A+: SPCM-0042}  # detector serials: required for calibrations of recorded data
 ```
 
 The fixed coincidence grid starts at t = 0 of the tag file: slot k holds

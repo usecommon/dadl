@@ -486,7 +486,7 @@ def test_hom_checks_the_dark_dead_times_against_the_analysed_gaps(setup):
     long = _member_set("hom_visibility", [_dark(CA, 1e6), _dark(CB, 1e6, seed=1)])
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
         hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=long, **kw)
-    loose = POLICY.allow("hom_visibility", "calibration_outside_validity", "checking")
+    loose = POLICY.allow("hom_visibility", "dead_time_contradicted", "checking")
     # Under the override the gap check labels it, and the dead fraction (0.85) is then refused
     # (council round 6, R1 b).
     with pytest.raises(GuardrailRefusal, match="pair term and the unmodelled paralyzable stage are not trusted"):
@@ -927,7 +927,7 @@ def test_the_downward_floor_follows_the_dark_run_s_gap_law():
     cset = _member_set("hom_visibility", [_dark_counted(CA, 1e6, 2_000, 50_000, 50_000.0)])
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
         check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility")
-    loose = Policy.default().allow("hom_visibility", "calibration_outside_validity", "checking")
+    loose = Policy.default().allow("hom_visibility", "dead_time_contradicted", "checking")
     _, counts = check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility", policy=loose)
     assert counts["gap_check_floor_kind"]["A"] == "exponential law"
     assert counts["gap_check_floor_ps"]["A"] == pytest.approx(gap_floor_ps(1e6, 50_000, 49_500.0, 1))
@@ -947,3 +947,106 @@ def test_a_dark_dead_time_above_the_analysed_gaps_is_labelled():
     below = _member_set("hom_visibility", [_dark_counted(CA, 49_000, 2_000, 2_000, 20_000.0)])
     labels, _ = check_dead_time_gaps(below, {"A": CA}, runs, analysis="hom_visibility")
     assert not any(lab.startswith(head) for lab in labels)
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def _echo_channel(n_gaps, echoes, seed=0, edge_ps=1_000_000, mean_ps=1_000_000.0, echo_ps=50_000):
+    """A channel with a 1 us edge and `echoes` clicks followed by a cable echo 50 ns later."""
+    rng = np.random.default_rng(seed)
+    tags = np.cumsum(edge_ps + rng.exponential(mean_ps, n_gaps)).astype(np.int64)
+    pick = rng.choice(tags.size, echoes, replace=False)
+    return np.sort(np.concatenate([tags, tags[pick] + echo_ps]))
+
+
+@pytest.mark.parametrize("echoes", [2, 500])
+def test_a_few_echoes_do_not_turn_off_the_upward_gap_test(echoes):
+    # Council round 9 (Rd1): one echo set the shortest gap to the 50 ns dark bound, and more than
+    # 100 made the spacing 0 (NaN): a 50 ns bound on a 1 us detector passed and S read 2.03 for
+    # 1.98. The test reads gap j = max(10, 0.1% of the gaps) instead.
+    from dadl.errors import StaleCalibration
+    from dadl.forward import check_dead_time_gaps
+
+    runs = [{"A": _echo_channel(1_000_000, echoes)}]
+    cset = _member_set("hom_visibility", [_dark(CA, bound=50_000.0)])
+    with pytest.raises(StaleCalibration, match="dead time below 50 ns of A"):
+        check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility")
+
+
+def test_the_upward_gap_test_keeps_the_round_4_power_and_fails_closed():
+    # Council round 9 (Rd1): a 22 ns artifact on a 50 ns detector at 1 Mcps, 50,000 gaps, is
+    # still refused; an all-equal gap run (zero spacing) is refused, not passed as NaN.
+    from dadl.errors import StaleCalibration
+    from dadl.forward import check_dead_time_gaps
+
+    rng = np.random.default_rng(4)
+    runs = [{"A": np.cumsum(50_000 + rng.exponential(1e6, 50_000)).astype(np.int64)}]
+    cset = _member_set("hom_visibility", [_dark(CA, 22_000, 500)])
+    with pytest.raises(StaleCalibration, match="longer than its upper end"):
+        check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility")
+    flat = [{"A": np.arange(1, 5_001, dtype=np.int64) * 1_000_000}]
+    with pytest.raises(StaleCalibration, match="longer than its upper end by inf"):
+        check_dead_time_gaps(_member_set("hom_visibility", [_dark(CA, bound=50_000.0)]), {"A": CA}, flat,
+                             analysis="hom_visibility")
+
+
+def _clean_excess_refusals(n_channels, n_gaps, seed, channels=4):
+    from dadl.forward import gap_edge_excess, upward_gap_excess
+
+    rng = np.random.default_rng(seed)
+    refused = 0
+    for _ in range(n_channels):
+        gaps = np.sort(50_000 + rng.exponential(2e5, n_gaps))
+        excess, j, m = upward_gap_excess(gaps, 50_000.0)
+        refused += not excess <= gap_edge_excess(channels, j, m)
+    return refused
+
+
+def test_the_upward_threshold_is_the_exact_law_of_an_exponential_edge():
+    # Council round 9 (Rd1): (j + 1) F.isf(alpha / K, 2 (j + 1), 2 M), 100((K / alpha)^(1/100) - 1)
+    # at j = 0; the red team's g[k] with the g[0] threshold refused every clean channel.
+    from scipy import stats
+
+    from dadl.forward import gap_edge_excess
+
+    assert gap_edge_excess(4, 0, 100) == pytest.approx(100 * ((4 / 1e-4) ** 0.01 - 1), rel=1e-9)
+    assert gap_edge_excess(4, 10, 100) == pytest.approx(11 * stats.f.isf(2.5e-5, 22, 200), rel=1e-12)
+    assert gap_edge_excess(2, 1000, 1001) > gap_edge_excess(4, 10, 100)
+    assert _clean_excess_refusals(200, 2_000, seed=1) == 0
+
+
+@pytest.mark.slow
+def test_clean_exponential_edges_at_the_upper_end_are_not_refused():
+    # Council round 9 (gapup.txt): 0 of 4,000 clean channels with the upper end at tau.
+    assert _clean_excess_refusals(4_000, 2_000, seed=2) == 0
+
+
+def test_the_gap_tests_have_their_own_override():
+    # Council round 9 (Rd2): the validity override no longer accepts a contradicted dark dead time
+    # (an echo-set 50 ns bound on a 1 us detector); dead_time_contradicted does, with the problems
+    # in the label and the counts.
+    from dadl.errors import StaleCalibration
+    from dadl.forward import DEAD_TIME_CONTRADICTED, check_dead_time_gaps
+
+    rng = np.random.default_rng(6)
+    runs = [{"A": np.cumsum(1_000_000 + rng.exponential(1e6, 20_000)).astype(np.int64)}]
+    cset = _member_set("hom_visibility", [_dark(CA, bound=50_000.0)])
+    validity = Policy.default().allow("hom_visibility", "calibration_outside_validity", "taken before the artifact")
+    with pytest.raises(StaleCalibration, match="--allow dead_time_contradicted=REASON"):
+        check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility", policy=validity)
+    loose = Policy.default().allow("hom_visibility", "dead_time_contradicted", "echo in the dark run")
+    labels, counts = check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility", policy=loose)
+    head = DEAD_TIME_CONTRADICTED.split("{problems}")[0]
+    assert [lab for lab in labels if lab.startswith(head)] == [head + counts["dead_time_gap_problems"][0]]
+    assert "dead time below 50 ns of A" in counts["dead_time_gap_problems"][0]
+
+
+def test_a_dark_dead_time_far_below_the_declared_one_is_flagged():
+    # Council round 9 (Rd1b): one rule for calibrate dark's warning and analyze's label.
+    from dadl.forward import dead_time_far_below
+
+    assert dead_time_far_below(_dark(CA, bound=50_000.0), 1_000_000) == 50_000.0
+    assert dead_time_far_below(_dark(CA, 400_000, 1_000), 1_000_000) == 400_000.0
+    assert dead_time_far_below(_dark(CA, 600_000, 1_000), 1_000_000) is None
+    assert dead_time_far_below(_dark(CA, bound=50_000.0), 0) is None

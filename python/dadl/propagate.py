@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +58,7 @@ from dadl.artifact import artifact_id, load_calibration, read_artifact
 from dadl.calibration.base import Calibration
 from dadl.data import ChannelId
 from dadl.errors import ConfigError, GuardrailRefusal, StaleCalibration
-from dadl.guardrails import POLICY_MODIFIED, Policy
+from dadl.guardrails import POLICY_MODIFIED, Policy, override_hint
 
 #: Largest difference between a calibration's recorded temperature and the dataset's. A SPAD's
 #: dark rate changes by about 5-10% per kelvin near room temperature, so 0.5 K keeps the change
@@ -70,6 +71,17 @@ EQUAL_RTOL = 1e-9
 #: tags: 1e-4 admits the drift and refuses another repetition rate. In T2 it is the tick, whose
 #: values are discrete, so 1e-4 is still exact there.
 SETTING_RTOL = {"tagger_MeasDesc_GlobalResolution": 1e-4}
+#: The T2 tick or T3 sync period (one header key for both), and the mode that says which it is
+#: (council round 9, Tw2: a T2 dark artifact's tick was compared with a T3 dataset's period).
+PERIOD_KEY = "tagger_MeasDesc_GlobalResolution"
+MODE_KEY = "tagger_mode"
+#: Kinds whose values do not depend on the T3 sync clock under CW light (council round 9, Tw3).
+CLOCK_FREE_KINDS = ("dark-afterpulse-deadtime", "delay-jitter", "accidentals", "heralding-efficiency")
+T3_CLOCK_CHANGED = (
+    "T3 sync clock changed since calibration ({a} -> {b}); with CW light these calibrations do not depend on it"
+)
+#: A recorded condition the comparison does not understand (council round 9, Rd4).
+NOT_COMPARED = "condition {key} recorded, not compared"
 #: Kinds whose artifact belongs to the tagger that recorded it (its channel skew and own dead
 #: time): calibrated on another tagger, they do not cover the dataset (council round 7, G6).
 TAGGER_KINDS = ("delay-jitter", "deadtime-series")
@@ -78,6 +90,8 @@ OTHER_TAGGER = "calibration taken on another tagger"
 MISFIT_ACCEPTED = "misfit calibration accepted"
 OUTSIDE_VALIDITY = "calibration outside its validity"
 NO_VALIDITY = "calibration {aid} has no validity range: not checked against the acquisition time"
+#: `NO_VALIDITY` for several artifacts, in one label (council round 9, Tw8).
+NO_VALIDITY_MANY = "calibrations {aids} have no validity range: not checked against the acquisition time"
 #: Kept for compatibility; no longer added by `CalibrationSet.load` (the forward model labels the
 #: parameter that is a bound).
 BOUND_ONLY = "parameter known only as an upper limit"
@@ -106,6 +120,9 @@ class DatasetContext:
     input_sha256: frozenset[str] = frozenset()
     #: The tagger that recorded the dataset (`model`, `serial`), as the artifact's `instrument`.
     instrument: Mapping[str, str] = field(default_factory=dict)
+    #: T3 input under an explicit `source.type: cw`: the sync is a clock only, and a changed clock
+    #: is labelled for `CLOCK_FREE_KINDS` instead of refused (council round 9, Tw3).
+    t3_cw: bool = False
 
     def __post_init__(self) -> None:
         if self.acquired is not None and self.acquired.tzinfo is None:
@@ -142,28 +159,38 @@ def setting_rtol(key: str) -> float:
     return SETTING_RTOL.get(key, EQUAL_RTOL)
 
 
+def _modes_differ(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> bool:
+    return MODE_KEY in recorded and MODE_KEY in dataset and recorded[MODE_KEY] != dataset[MODE_KEY]
+
+
 def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> list[str]:
     """Why a calibration's recorded conditions do not cover the dataset's (empty if they do).
 
+    `tagger_MeasDesc_GlobalResolution` is the T2 tick or the T3 sync period: it is compared only
+    when both sides record the same `tagger_mode`, or either records none (council round 9, Tw2).
+    A lone `<name>_min_<unit>` or `<name>_max_<unit>` is compared one-sided (council round 9, Rd4).
     Values are printed to 10 significant digits (council round 7, G2: `%g` showed two sync
     periods 1e-7 apart as equal)."""
     out: list[str] = []
     for key, value in sorted(recorded.items()):
+        if key == MODE_KEY or (key == PERIOD_KEY and _modes_differ(recorded, dataset)):
+            continue
         if key.startswith("tagger_") or key.startswith("bias"):
             if key not in dataset:
                 out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
             elif not np.isclose(dataset[key], value, rtol=setting_rtol(key), atol=0.0):
                 out.append(f"{key} = {value:.10g} recorded, {dataset[key]:.10g} for the dataset")
-        elif "_min_" in key:
-            name, unit = key.split("_min_", 1)
-            high_key, target = f"{name}_max_{unit}", f"{name}_{unit}"
-            if high_key not in recorded:
-                continue
+        elif "_min_" in key or "_max_" in key:
+            low = "_min_" in key
+            name, unit = key.split("_min_" if low else "_max_", 1)
+            low_key, high_key, target = f"{name}_min_{unit}", f"{name}_max_{unit}", f"{name}_{unit}"
+            if not low and low_key in recorded:
+                continue  # the pair is compared once, at its _min_ key
+            lo, hi = recorded.get(low_key, -math.inf), recorded.get(high_key, math.inf)
             if target not in dataset:
                 out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
-            elif not recorded[key] <= dataset[target] <= recorded[high_key]:
-                out.append(f"{target} = {dataset[target]:.10g} outside the calibrated {recorded[key]:.10g} to "
-                           f"{recorded[high_key]:.10g}")
+            elif not lo <= dataset[target] <= hi:
+                out.append(f"{target} = {dataset[target]:.10g} outside the calibrated {lo:.10g} to {hi:.10g}")
         elif key == "temperature_K":
             if key not in dataset:
                 out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
@@ -171,6 +198,47 @@ def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, fl
                 out.append(f"temperature_K = {value:.10g} recorded, {dataset[key]:.10g} for the dataset (tolerance "
                            f"{TEMPERATURE_TOLERANCE_K:g} K)")
     return out
+
+
+def _compared(key: str) -> bool:
+    return (key.startswith(("tagger_", "bias")) or "_min_" in key or "_max_" in key or key == "temperature_K")
+
+
+def uncompared_conditions(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> list[str]:
+    """Recorded conditions outside the compared forms that look like a condition of use: the dataset
+    gives the same key (`analyze --condition`), or the name says temperature (council round 9,
+    Rd4: `detector_temperature_K` 233 against 298 passed silently). The fit's own diagnostics are
+    not listed."""
+    return sorted(k for k in recorded if not _compared(k) and (k in dataset or "temperature" in k))
+
+
+def clock_changes(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> str | None:
+    """The T3 sync period change between artifact and dataset, as (recorded -> dataset), or None."""
+    if PERIOD_KEY not in recorded or PERIOD_KEY not in dataset or _modes_differ(recorded, dataset):
+        return None
+    a, b = recorded[PERIOD_KEY], dataset[PERIOD_KEY]
+    if np.isclose(b, a, rtol=setting_rtol(PERIOD_KEY), atol=0.0):
+        return None
+    return T3_CLOCK_CHANGED.format(a=f"{a:.10g} s", b=f"{b:.10g} s")
+
+
+def collapse_no_validity(labels: Iterable[str]) -> tuple[str, ...]:
+    """The labels with every `NO_VALIDITY` label merged into one that lists the IDs (council round 9,
+    Tw8: CHSH repeated it eight times), at the first one's place."""
+    head, tail = NO_VALIDITY.split("{aid}")
+    labels = list(dict.fromkeys(labels))
+    ids = [lab[len(head) : len(lab) - len(tail)] for lab in labels if lab.startswith(head) and lab.endswith(tail)]
+    if len(ids) < 2:
+        return tuple(labels)
+    merged = NO_VALIDITY_MANY.format(aids=", ".join(ids))
+    out: list[str] = []
+    for lab in labels:
+        if lab.startswith(head) and lab.endswith(tail):
+            if merged not in out:
+                out.append(merged)
+        else:
+            out.append(lab)
+    return tuple(out)
 
 
 def instrument_mismatches(recorded: Mapping[str, Any] | None, dataset: Mapping[str, Any] | None) -> list[str]:
@@ -221,7 +289,7 @@ def _check(
         if "misfit_calibration" not in rule.allowed_corrections:
             raise GuardrailRefusal(
                 f"{cal.kind} artifact {aid} is a misfit (predictive check p = {cal.ppc_pvalue:.3g}); its intervals are "
-                f"not to be trusted. Override with Policy.allow({analysis!r}, 'misfit_calibration', reason)."
+                f"not to be trusted. {override_hint(analysis, 'misfit_calibration')}"
             )
         labels.append(MISFIT_ACCEPTED)
     raw = {i[0] for i in cal.inputs if len(i) > 1 and i[1] in _RAW_ROLES}
@@ -254,9 +322,15 @@ def _check(
     # valid_for.conditions are enforced too, merged with the top-level conditions; a key in both
     # must match in both (council round 5, V5).
     extra = (valid or {}).get("conditions") or {}
+    merged = {**cal.conditions, **extra}
     found = condition_mismatches(cal.conditions, dataset.conditions)
     if extra:
-        found += condition_mismatches({**cal.conditions, **extra}, dataset.conditions)
+        found += condition_mismatches(merged, dataset.conditions)
+    changed = clock_changes(merged, dataset.conditions) if dataset.t3_cw and cal.kind in CLOCK_FREE_KINDS else None
+    if changed:
+        found = [f for f in found if not f.startswith(f"{PERIOD_KEY} = ")]
+        labels.append(changed)
+    labels += [NOT_COMPARED.format(key=k) for k in uncompared_conditions(merged, dataset.conditions)]
     problems += list(dict.fromkeys(found))
     tagger = instrument_mismatches(member.manifest.get("instrument"), dataset.instrument)
     if tagger and cal.kind in TAGGER_KINDS:
@@ -272,8 +346,8 @@ def _outside(problems: list[str], kind: str, aid: str, analysis: str, rule) -> l
         return []
     if "calibration_outside_validity" not in rule.allowed_corrections:
         raise StaleCalibration(
-            f"{kind} artifact {aid} does not cover this dataset: {'; '.join(problems)}. Override with "
-            f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
+            f"{kind} artifact {aid} does not cover this dataset: {'; '.join(problems)}. "
+            f"{override_hint(analysis, 'calibration_outside_validity')}"
         )
     return [OUTSIDE_VALIDITY]
 
@@ -335,7 +409,7 @@ class CalibrationSet:
         ids = set(artifact_ids)
         other = {lab for aid, labs in self.member_labels.items() if aid not in ids for lab in labs}
         own = {lab for aid, labs in self.member_labels.items() if aid in ids for lab in labs}
-        return tuple(lab for lab in self.labels if lab not in other or lab in own)
+        return collapse_no_validity(lab for lab in self.labels if lab not in other or lab in own)
 
     def dataset_record(self) -> dict[str, object] | None:
         """The dataset context the artifacts were checked against, for a result's counts."""
@@ -446,6 +520,7 @@ __all__ = [
     "BOUND_ONLY",
     "MISFIT_ACCEPTED",
     "NO_VALIDITY",
+    "NO_VALIDITY_MANY",
     "NOT_CHECKED",
     "SERIES_UNUSED",
     "OTHER_TAGGER",

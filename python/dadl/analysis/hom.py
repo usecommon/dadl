@@ -47,6 +47,7 @@ from dadl.analysis._twopoint import (
     use_checks,
 )
 from dadl.analysis.visibility import hom_visibility
+from dadl.coincidences import as_sorted as _as_sorted
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId, runs_lattice
 from dadl.forward_check import NO_LATTICE
@@ -139,7 +140,7 @@ def hom_from_tags(
 
     c_min, c_max = count(runs["dip"]), count(runs["reference"])
     offsets = side_offsets(window.width_ps)
-    side = shifted_coincidences(np.sort(runs["dip"]["A"]), np.sort(runs["dip"]["B"]), window.width_ps, da, db, offsets)
+    side = shifted_coincidences(_as_sorted(runs["dip"]["A"]), _as_sorted(runs["dip"]["B"]), window.width_ps, da, db, offsets)
     acc = float(side.sum()) / side.size
     acc_err = math.sqrt(float(side.sum())) / side.size
     counts = {
@@ -160,9 +161,9 @@ def hom_from_tags(
     offpeak_labels: tuple[str, ...] = ()
     if subtract_accidentals or calibrations is not None:
         side_ref = shifted_coincidences(
-            np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
+            _as_sorted(runs["reference"]["A"]), _as_sorted(runs["reference"]["B"]), window.width_ps, da, db, offsets
         )
-        counts["offpeak_p"], offpeak_labels = offpeak_check(
+        counts["offpeak_p"], offpeak_labels, counts["offpeak_draws"] = offpeak_check(
             "hom_visibility", {"dip": side, "reference": side_ref}, offsets, policy
         )
     if subtract_accidentals:
@@ -212,7 +213,7 @@ def hom_from_tags(
         )
         # The forward model subtracts the accidentals itself (council round 4: 0.0 was recorded).
         counts["subtracted"] = float("accidental_subtraction" in fwd.corrections)
-    if interrupted(*([np.sort(runs[k][ch]) for ch in HOM_CHANNELS] for k in HOM_SETTINGS)):
+    if interrupted(*([_as_sorted(runs[k][ch]) for ch in HOM_CHANNELS] for k in HOM_SETTINGS)):
         # SNSPD specialist review: a latch in 20% of the dip run raised V by 13 sigma, unlabelled.
         labels += (INTERRUPTED,)
     return dataclasses.replace(result, window=window.as_record(), labels=labels, counts=counts), counts

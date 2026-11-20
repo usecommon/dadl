@@ -45,7 +45,7 @@ from scipy import stats as _st
 from dadl.calibration.delay import _g
 from dadl.data import tag_tick
 from dadl.errors import Misspecified
-from dadl.guardrails import Policy
+from dadl.guardrails import Policy, override_hint
 from dadl.histogram import cross_correlation
 
 #: Family-wise false-alarm rate of the check per analysis.
@@ -107,6 +107,9 @@ class PairData:
     offsets_ps: tuple[float, ...] = (0.0,)
     #: The lattice of the pair delays (ps), from the file's metadata; None takes the tags' step.
     lattice_ps: int | None = None
+    #: The T3 sync period (ps), from the file's metadata: cross-sync delays are put back on the
+    #: lattice (`dadl.calibration.delay.t3_group_histograms`; council round 9, Tw1).
+    t3_period_ps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -133,22 +136,29 @@ class _ShapeModel:
     """Poisson NLL of the forward model's peak shape: mixture of Gaussians at d + offsets, on a
     background with one level each side of d. theta = (log bL, log A, d, log sigma, log bR)."""
 
-    def __init__(self, counts: np.ndarray, edges: np.ndarray, tick: float, offsets: Sequence[float]) -> None:
+    def __init__(
+        self, counts: np.ndarray, edges: np.ndarray, tick: float, offsets: Sequence[float],
+        weights: Sequence[float] | None = None,
+    ) -> None:
         self.n = counts.astype(float)
         self.lo, self.hi = edges[:-1], edges[1:]
         self.w = self.hi - self.lo
         self.tick = float(tick)
         self.offsets = tuple(float(o) for o in offsets)
+        #: Mixture weights (T3 sync-count groups); None is the equal mixture.
+        self.weights = None if weights is None else tuple(float(x) for x in weights)
 
     def mu(self, theta: np.ndarray) -> np.ndarray:
         log_bl, log_a, d, log_s, log_br = (float(v) for v in theta)
         s = math.exp(min(max(log_s, -50.0), 700.0))
         t = self.tick / s
         g = np.zeros_like(self.n)
-        for o in self.offsets:
+        for i, o in enumerate(self.offsets):
             z_hi, z_lo = (self.hi - d - o) / s, (self.lo - d - o) / s
-            g += (s / self.tick) * (_g(z_hi) - _g(z_hi - t) - _g(z_lo) + _g(z_lo - t))
-        g /= len(self.offsets)
+            part = (s / self.tick) * (_g(z_hi) - _g(z_hi - t) - _g(z_lo) + _g(z_lo - t))
+            g += part if self.weights is None else self.weights[i] * part
+        if self.weights is None:
+            g /= len(self.offsets)
         right = np.clip(self.hi - d, 0.0, self.w)
         left = self.w - right
         mu = math.exp(min(log_bl, 700.0)) * left + math.exp(min(log_br, 700.0)) * right + math.exp(min(log_a, 700.0)) * g
@@ -167,6 +177,30 @@ def _tick(pairs: Sequence[PairData]) -> int:
     return math.gcd(*(tag_tick(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64)) for p in pairs))
 
 
+def _histogram(pair: PairData, shift: int, width: int, half: int, tick: int) -> tuple[np.ndarray, dict[float, float]]:
+    """A pair's histogram of b - a - shift, and the peak's T3 sync-count groups as {offset: count}:
+    group k sits k r below the delay (council round 9, Tw1). Non-T3 input is one group at 0."""
+    from dadl.calibration.delay import t3_group_histograms, t3_residue
+
+    a = np.asarray(pair.a, dtype=np.int64)
+    b = np.asarray(pair.b, dtype=np.int64)
+    groups = t3_group_histograms(a, b, width, half, pair.t3_period_ps, tick, shift) if pair.t3_period_ps else None
+    if not groups:
+        hist = cross_correlation(a, b - shift, width, half).astype(float)
+        return hist, {0.0: float(hist.sum())}
+    r = t3_residue(float(pair.t3_period_ps), tick)
+    return sum(groups.values()).astype(float), {-k * r: float(h.sum()) for k, h in groups.items()}
+
+
+def _mixture(offsets: Sequence[float], groups: dict[float, float]) -> tuple[tuple[float, ...], tuple[float, ...] | None]:
+    """The peak's offsets and weights: the declared offsets, each split over the T3 groups."""
+    total = sum(groups.values())
+    if set(groups) == {0.0} or total <= 0:
+        return tuple(offsets), None
+    pairs = [(o + g, n / total / len(offsets)) for o in offsets for g, n in groups.items()]
+    return tuple(o for o, _ in pairs), tuple(w for _, w in pairs)
+
+
 def _align(pairs: Sequence[PairData], shift: int, half: int, tick: int) -> tuple[int, int]:
     """(shift, tooth): the histogram shift moved so that the modal residue of the delays modulo
     the lattice sits `tooth` = tick // 2 ps above a bin edge (council round 8). A tooth at offset c
@@ -174,10 +208,7 @@ def _align(pairs: Sequence[PairData], shift: int, half: int, tick: int) -> tuple
     With a 1 ps lattice nothing moves."""
     if tick <= 1:
         return shift, 0
-    fine = sum(
-        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, 1, half).astype(float)
-        for p in pairs
-    )
+    fine = sum(_histogram(p, shift, 1, half, tick)[0] for p in pairs)
     x = -half + np.arange(fine.size)
     residue = np.bincount(np.mod(x, tick), weights=fine, minlength=tick)
     r0 = int(np.argmax(residue)) if residue.sum() > 0 else 0
@@ -212,6 +243,7 @@ def fit_peak(
     offsets: Sequence[float],
     *,
     polish: bool = False,
+    weights: Sequence[float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Poisson maximum-likelihood fit of the forward model's shape (`_ShapeModel`) to a histogram:
     (theta, expected counts per bin). theta = (log bL, log A, d, log sigma, log bR).
@@ -228,7 +260,7 @@ def fit_peak(
     lo, hi = edges[:-1], edges[1:]
     width = float(np.max(hi - lo))
     half = float(-edges[0])
-    model = _ShapeModel(hist, edges, tick, offsets)
+    model = _ShapeModel(hist, edges, tick, offsets, weights)
     floor = 0.5 / (2 * half)
     far = np.abs(0.5 * (lo + hi) - d0) > 5 * sigma0 + max((abs(o) for o in offsets), default=0.0)
     bg = float(np.median(hist[far])) / width if far.any() else floor
@@ -276,23 +308,24 @@ def pair_pvalue(pair: PairData) -> float | None:
     tick = _tick([pair])
     shift, half, width, sigma0 = _layout(pair, tick)
     shift, tooth = _align([pair], shift, half, tick)
-    hist = cross_correlation(a, b - shift, width, half).astype(float)
+    hist, groups = _histogram(pair, shift, width, half, tick)
     if hist.sum() < MIN_COUNTS:
         return None
+    offsets, weights = _mixture(pair.offsets_ps, groups)
     edges = _edges(hist, half, width)
     d0 = float(pair.delay_ps) + (pair.declared_delay_ps - shift) - tooth
-    theta, mu = fit_peak(hist, edges, tick, d0, sigma0, pair.offsets_ps)
+    theta, mu = fit_peak(hist, edges, tick, d0, sigma0, offsets, weights=weights)
     p = _grouped_pearson(hist, mu)
     if p >= POLISH_BELOW:
         return p
     # L-BFGS-B stalls when the start delay is tens of ps off (p 2e-6 on a clean histogram, 0.69
     # polished; council round 3). Polishing only lowers the NLL, so the test is the same with a
     # better optimiser; the highest bin is a second start.
-    model = _ShapeModel(hist, edges, tick, pair.offsets_ps)
+    model = _ShapeModel(hist, edges, tick, offsets, weights)
     best, best_nll = (theta, mu), model.nll(theta)
     k = int(np.argmax(hist))
     for start in (d0, 0.5 * float(edges[k] + edges[k + 1])):
-        th, m = fit_peak(hist, edges, tick, start, sigma0, pair.offsets_ps, polish=True)
+        th, m = fit_peak(hist, edges, tick, start, sigma0, offsets, polish=True, weights=weights)
         nll = model.nll(th)
         if nll < best_nll:
             best, best_nll = (th, m), nll
@@ -315,11 +348,15 @@ POOL_PASSES = 3
 POOL_MAX_BINS = 4000
 
 
-def _summed(pairs: Sequence[PairData], shift: int, width: int, half: int) -> np.ndarray:
-    return sum(
-        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, width, half).astype(float)
-        for p in pairs
-    )
+def _summed(pairs: Sequence[PairData], shift: int, width: int, half: int, tick: int) -> tuple[np.ndarray, dict]:
+    """The pairs' summed histogram and their pooled T3 groups (`_histogram`)."""
+    total, groups = 0.0, {}
+    for p in pairs:
+        hist, found = _histogram(p, shift, width, half, tick)
+        total = total + hist
+        for g, n in found.items():
+            groups[g] = groups.get(g, 0.0) + n
+    return total, groups
 
 
 def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
@@ -344,16 +381,17 @@ def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
     tick = _tick(pairs)
     shift, half, width, sigma0 = _layout(first, tick)
     shift, tooth = _align(pairs, shift, half, tick)
-    hist = _summed(pairs, shift, width, half)
+    hist, groups = _summed(pairs, shift, width, half, tick)
     if hist.sum() < MIN_COUNTS:
         return None
+    offsets, weights = _mixture(first.offsets_ps, groups)
     edges = _edges(hist, half, width)
     if first.jitter_ps:
         d0 = float(first.delay_ps) + (first.declared_delay_ps - shift) - tooth
     else:
         k = int(np.argmax(hist))
         d0 = 0.5 * float(edges[k] + edges[k + 1])
-    theta, _ = fit_peak(hist, edges, tick, d0, sigma0, first.offsets_ps, polish=True)
+    theta, _ = fit_peak(hist, edges, tick, d0, sigma0, offsets, polish=True, weights=weights)
     w_ps = int(first.window_ps)
     width = None
     for _ in range(POOL_PASSES):
@@ -364,8 +402,9 @@ def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
         if new_width == width:
             break
         width = new_width
-        hist = _summed(pairs, shift, width, half)
-        theta, _ = fit_peak(hist, _edges(hist, half, width), tick, d, sigma, first.offsets_ps, polish=True)
+        hist, groups = _summed(pairs, shift, width, half, tick)
+        offsets, weights = _mixture(first.offsets_ps, groups)
+        theta, _ = fit_peak(hist, _edges(hist, half, width), tick, d, sigma, offsets, polish=True, weights=weights)
     sigma = math.exp(float(theta[3]))
     area = math.exp(float(theta[1]))
     return PeakFit(
@@ -391,8 +430,8 @@ def enforce(result: CheckResult, analysis: str, policy: Policy) -> tuple[str, ..
         raise Misspecified(
             f"the forward model does not fit the analysed coincidences ({result.worst()}: predictive check "
             f"p = {result.pvalue:.3g} after Bonferroni over {len(result.pvalues)} histograms): something in the "
-            "window that the model lacks (crosstalk, an IRF tail, drift) would bias the corrected value. "
-            f"Override with Policy.allow({analysis!r}, {OVERRIDE!r}, reason)."
+            f"window that the model lacks (crosstalk, an IRF tail, drift) would bias the corrected value. "
+            f"{override_hint(analysis, OVERRIDE)}"
         )
     return (FORWARD_MISFIT_ACCEPTED,)
 

@@ -13,6 +13,14 @@ name: chsh-spad
 
 backend: sim
 seed: 2026
+# For recorded data (PTU files or tag files from a tagger), set `backend: file` and
+# uncomment this block: serials are required for calibrations of recorded data.
+# hardware:
+#   tagger: HydraHarp-1234567
+#   detectors: {A+: SPCM-0042, A-: SPCM-0043, B+: SPCM-0044, B-: SPCM-0045}
+# The detector entries below still drive the time-unit check and the off-peak guard:
+# give datasheet values. Then `dadl calibrate dark`, `dadl calibrate pairs` and
+# `dadl analyze --calibrations` (README, "Using your own data").
 
 source:
   type: spdc-cw

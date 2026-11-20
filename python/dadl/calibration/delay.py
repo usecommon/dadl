@@ -44,9 +44,15 @@ pair runs; council round 8).
 
 T3 tags (`t3_period_ps`): within one sync the difference of two tags is a
 whole number of dtime resolutions, but across k syncs it is off that lattice
-by k x (period mod resolution), plus 1 ps of rounding. The off-grid note
-then fires only when the delays' modal residue is further than 1 ps plus
-(period mod resolution) from the lattice (method v9).
+by k r, r = period - resolution x round(period / resolution), plus 1 ps of
+rounding. The off-grid note then fires only when the delays' modal residue
+is further than 1 ps plus (period mod resolution) from the lattice (method
+v9). Method v10 (council round 9): each difference is put back on the
+lattice by its sync-count difference k (`t3_group_histograms`), and the peak
+is the mixture of copies at d - k r weighted by each group's observed share
+of the fit window. Binning the raw differences floored the cross-sync ones
+into the wrong bin, about -(delay / period) x r: -7 ps at a 4.4 ns delay,
+80 ps resolution and 12500.3 ps period, with status ok.
 
 Phase 2 limits: a Gaussian IRF only (an exponential tail biases the delay by
 tens of ps and shows as a failing predictive check, which marks the
@@ -74,7 +80,7 @@ from dadl.stats import Interval, Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "9"
+METHOD_VERSION = "10"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -112,21 +118,28 @@ class _PeakModel:
     theta = (log background left, log peak area, delay, log sigma, log background right).
     """
 
-    def __init__(self, counts: np.ndarray, edges: np.ndarray, tick: float = 1.0) -> None:
+    def __init__(
+        self, counts: np.ndarray, edges: np.ndarray, tick: float = 1.0, shifts=(0.0,), weights=(1.0,)
+    ) -> None:
         self.n = counts.astype(float)
         self.lo = edges[:-1]
         self.hi = edges[1:]
         self.w = self.hi - self.lo
         self.tick = float(tick)
+        # T3 sync-count groups (`t3_group_histograms`): the peak is the mixture of copies at
+        # d + shift with these weights. One group at 0 is the plain peak.
+        self.groups = tuple(zip((float(x) for x in shifts), (float(x) for x in weights)))
 
     def _parts(self, theta: np.ndarray):
         log_bl, log_a, d, log_s, log_br = (float(v) for v in theta)
         log_bl, log_br, log_a = min(log_bl, 700.0), min(log_br, 700.0), min(log_a, 700.0)
         log_s = min(max(log_s, -50.0), 700.0)
         s = math.exp(log_s)
-        z_hi, z_lo = (self.hi - d) / s, (self.lo - d) / s
         t = self.tick / s
-        g = (s / self.tick) * (_g(z_hi) - _g(z_hi - t) - _g(z_lo) + _g(z_lo - t))
+        z_hi = [(self.hi - (d + sh)) / s for sh, _ in self.groups]
+        z_lo = [(self.lo - (d + sh)) / s for sh, _ in self.groups]
+        g = sum(wt * ((s / self.tick) * (_g(zh) - _g(zh - t) - _g(zl) + _g(zl - t)))
+                for (_, wt), zh, zl in zip(self.groups, z_hi, z_lo))
         right = np.clip(self.hi - d, 0.0, self.w)
         left = self.w - right
         bl, br = math.exp(log_bl), math.exp(log_br)
@@ -153,8 +166,10 @@ class _PeakModel:
             return np.exp(-0.5 * z * z) / _SQRT2PI
 
         cdf = special.ndtr
-        second = cdf(z_hi) - cdf(z_hi - t) - cdf(z_lo) + cdf(z_lo - t)
-        dens = phi(z_hi) - phi(z_hi - t) - phi(z_lo) + phi(z_lo - t)
+        second = sum(wt * (cdf(zh) - cdf(zh - t) - cdf(zl) + cdf(zl - t))
+                     for (_, wt), zh, zl in zip(self.groups, z_hi, z_lo))
+        dens = sum(wt * (phi(zh) - phi(zh - t) - phi(zl) + phi(zl - t))
+                   for (_, wt), zh, zl in zip(self.groups, z_hi, z_lo))
         # Moving d right moves bin width from the right level to the left one where d falls in a bin.
         d_d = -a * second / self.tick + np.where(straddle, bl - br, 0.0)
         d_logs = a * (s / self.tick) * dens
@@ -194,6 +209,66 @@ def _on_t3_lattice(a: np.ndarray, b: np.ndarray, tick: int, range_ps: int, t3_pe
         return True
     r0 = int(np.argmax(residue))
     return min(r0, tick - r0) <= 1.0 + math.fmod(float(t3_period_ps), tick)
+
+
+def t3_residue(period_ps: float, lattice_ps: int) -> float:
+    """r = P - lattice x round(P / lattice): how far one sync period is off the dtime lattice. A pair
+    k syncs apart sits k r off the lattice."""
+    return float(period_ps) - lattice_ps * round(float(period_ps) / lattice_ps)
+
+
+def _t3_split(t: np.ndarray, period_ps: float, lattice_ps: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """(sync count N, dtime part phi on the lattice) of T3 tags t = N P + phi (rounded to whole ps),
+    or None when the tags do not have that form (an origin other than sync 0)."""
+    t = np.asarray(t, dtype=np.int64)
+    n = np.floor((t.astype(float) + 1.0) / period_ps).astype(np.int64)
+    rest = t.astype(float) - n.astype(float) * period_ps
+    phi = lattice_ps * np.rint(rest / lattice_ps)
+    if t.size and float(np.max(np.abs(rest - phi))) > 1.5:
+        return None
+    return n, phi.astype(np.int64)
+
+
+def t3_group_histograms(
+    a: np.ndarray, b: np.ndarray, bin_width_ps: int, range_ps: int, period_ps: float | None, lattice_ps: int | None,
+    shift_ps: int = 0,
+) -> dict[int, np.ndarray] | None:
+    """Histograms of T3 pair delays put back on the dtime lattice, one per sync-count difference k
+    (council round 9, Tw1), or None when there is nothing to correct (T2, a period on the lattice,
+    no lattice) or the tags are not of T3 form.
+
+    Within one sync a T3 delay is a whole number of dtime resolutions. Across k syncs it is k r off
+    that lattice (`t3_residue`), and binning on the lattice floored it into the wrong bin: a 4.4 ns
+    delay at an 80 ps resolution and a 12500.3 ps period read 7 ps low with status ok. Here each
+    delay becomes (b - a) - shift_ps - k r rounded to the lattice, counted in group k: the sum of the
+    groups is the histogram on the lattice, and group k's peak sits at the delay - k r. Each tag is
+    split into its sync count N and dtime part phi, and N Q + phi with a large Q keeps the groups
+    apart in one `cross_correlation` pass per k."""
+    if period_ps is None or not lattice_ps or lattice_ps <= 1:
+        return None
+    period = float(period_ps)
+    lattice = int(lattice_ps)
+    r = t3_residue(period, lattice)
+    if r == 0.0 or period <= 0:
+        return None
+    sa, sb = _t3_split(a, period, lattice), _t3_split(b, period, lattice)
+    if sa is None or sb is None:
+        return None
+    step = lattice * round(period / lattice)
+    k_lo = math.floor((shift_ps - range_ps - period) / step) - 1
+    k_hi = math.ceil((shift_ps + range_ps + period) / step) + 1
+    q = 2 * (int(range_ps) + abs(int(shift_ps)) + (max(abs(k_lo), abs(k_hi)) + 2) * (int(math.ceil(period)) + step))
+    top = max(int(sa[0].max(initial=0)), int(sb[0].max(initial=0)))
+    if top * q > 2**62 // 2:
+        return None
+    ua = sa[0] * np.int64(q) + sa[1]
+    ub = sb[0] * np.int64(q) + sb[1]
+    out = {}
+    for k in range(k_lo, k_hi + 1):
+        hist = cross_correlation(ua, ub - np.int64(shift_ps + k * (q - step)), bin_width_ps, range_ps)
+        if hist.any():
+            out[k] = hist
+    return out or None
 
 
 def _bootstrap_deviance(n: np.ndarray, mu: np.ndarray, n_sim: int = 1000) -> float:
@@ -262,7 +337,9 @@ def calibrate_delay(
         bin_width_ps = new
     if range_ps % tick:
         range_ps = -(-range_ps // tick) * tick
-    hist = cross_correlation(a, b, bin_width_ps, range_ps)
+    # T3 (council round 9, Tw1): pair delays put back on the lattice, grouped by sync count.
+    groups = t3_group_histograms(a, b, bin_width_ps, range_ps, t3_period_ps, tick) if tick_ps is not None else None
+    hist = sum(groups.values()) if groups else cross_correlation(a, b, bin_width_ps, range_ps)
     edges = _edges(hist.size, bin_width_ps, range_ps)
     counts = hist.astype(float)
     background = float(np.median(counts))
@@ -291,7 +368,16 @@ def calibrate_delay(
     half = max(WINDOW_SIGMAS * s0, 50 * bin_width_ps)
     sel = (edges[1:] > d0 - half) & (edges[:-1] < d0 + half)
     idx = np.flatnonzero(sel)
-    model = _PeakModel(counts[idx], edges[idx[0] : idx[-1] + 2], tick)
+    shifts, weights = (0.0,), (1.0,)
+    if groups:
+        # Group k's peak at d - k r, weighted by its observed share of the fit window.
+        r = t3_residue(float(t3_period_ps), tick)
+        shares = {k: float(h[idx].sum()) for k, h in groups.items()}
+        total_share = sum(shares.values())
+        if total_share > 0:
+            shifts = tuple(-k * r for k in shares)
+            weights = tuple(v / total_share for v in shares.values())
+    model = _PeakModel(counts[idx], edges[idx[0] : idx[-1] + 2], tick, shifts, weights)
     widths = model.w
     b0 = max(background / bin_width_ps, 0.5 / float(widths.sum()))
     a0 = max(float(np.sum(counts[idx] - b0 * widths)), 1.0)
@@ -503,4 +589,4 @@ def _sigma_upper_limit(model: _PeakModel, theta: np.ndarray, bounds: list) -> fl
     return math.exp(hi)
 
 
-__all__ = ["KIND", "calibrate_delay"]
+__all__ = ["KIND", "calibrate_delay", "t3_group_histograms", "t3_residue"]

@@ -333,3 +333,38 @@ def test_the_off_peak_check_is_calibrated_on_clean_hom_snspd():
                 for k, d in (("dip", 0.0), ("reference", reg.reference_delay_ps))}
         ps.append(hom_from_tags(runs, w)[1]["offpeak_p"])
     assert np.mean(np.array(ps) < 0.01) <= 0.02
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def test_the_template_s_spdc_cw_does_not_declare_a_t3_clock():
+    # Council round 9 (Rd3, the red team's t3cw.py): every template declares spdc-cw, which skipped
+    # the T3 declaration; a pulsed 12525 ps period off the side-window comb then read V 0.95 for 1.
+    from dadl.data import RunTags
+    from dadl.errors import GuardrailRefusal, Misspecified
+
+    period = 13157.9
+    rng = np.random.default_rng(2)
+    plain = {"dip": _pulsed(period, 2_000_000, rng), "reference": _pulsed(period, 2_000_000, rng, p_pair=0.002)}
+    runs = {k: RunTags(v, metadata={"mode": "T3", "sync_period_ps": period, "tick_ps": 2}) for k, v in plain.items()}
+    w = Window(1000, "plan")
+    with pytest.raises(GuardrailRefusal, match="the template's spdc-cw is the default and does not count"):
+        hom_from_tags(runs, w, source_type="spdc-cw", subtract_accidentals=True)
+    result, _ = hom_from_tags(runs, w, source_type="spdc-cw")
+    assert result.corrected is None
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w, source_type="cw")
+
+
+def test_analyses_do_not_modify_the_caller_s_tags():
+    # Council round 9 (Pf3): as_sorted returns the caller's array when it is already in order, so
+    # nothing downstream may write into it.
+    import copy
+
+    noisy = DetectorParams(efficiency=0.8, dark_rate_cps=2e5, dead_time_ps=30_000, jitter_sigma_ps=10)
+    rng = np.random.default_rng(3)
+    runs = {"dip": simulate_hom(SRC, noisy, noisy, 0.0, 0.2, rng), "reference": simulate_hom(SRC, noisy, noisy, 40.0, 0.2, rng)}
+    before = copy.deepcopy(runs)
+    hom_from_tags(runs, Window(width_ps=1000, source="plan"))
+    assert all(np.array_equal(runs[k][c], before[k][c]) for k in runs for c in runs[k])

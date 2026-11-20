@@ -216,3 +216,33 @@ def test_a_chsh_dead_time_replicate_carries_the_dead_time_above_gaps_label():
     result, _ = _analyse(REGIMES["chsh-dead-time"], child)
     head = DEAD_TIME_ABOVE_GAPS.split("{name}")[0]
     assert any(lab.startswith(head) for lab in result.corrected_labels)
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+#: SHA-256 (first 16 hex digits) of three gate replicates per regime, off-peak keys left out: the
+#: round-8 code with only the delay method version raised to 10 (artifact IDs seed the calibration
+#: draws) gives these, so the performance changes (as_sorted, one-pass de-duplication, memoised grid
+#: counts, one quantile call, cached series constants) change no value (council round 9, Pf2-Pf8).
+R8_REPLICATE_HASHES = {
+    "hom-snspd": "8d494923702d38aa",
+    "hom-bright": "d5d75abf34eaf9af",
+    "chsh-spad": "5aa8e5cff09ddac9",
+    "hom-crosstalk": "6dff3feb3e607303",
+    "chsh-dead-time": "20c150e54b341803",
+}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("regime", sorted(R8_REPLICATE_HASHES))
+def test_the_performance_changes_leave_the_gate_replicates_unchanged(regime):
+    import hashlib
+
+    from dadl.analysis import propagation as P
+
+    h = hashlib.sha256()
+    for child in P._children(20261118, 1000, range(0, 3), regime):
+        r, mis = P._analyse(P.REGIMES[regime], child)
+        counts = {k: v for k, v in (r.counts or {}).items() if k not in ("offpeak_p", "offpeak_draws")}
+        h.update(repr((r.raw, r.corrected, counts, mis)).encode())
+    assert h.hexdigest()[:16] == R8_REPLICATE_HASHES[regime]

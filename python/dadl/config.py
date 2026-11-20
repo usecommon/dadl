@@ -28,8 +28,8 @@ MAX_FILE_BYTES = 1_000_000
 
 TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy", "hardware"}
 #: Source models DADL implements. Pulsed sources need slots locked to the laser (planned). "cw"
-#: declares CW light without naming the process; on PTU T3 input a declared type is what lets the
-#: analyses correct (council round 7, G3).
+#: declares CW light without naming the process; on PTU T3 input only an explicit "cw" lets the
+#: analyses correct (council round 7, G3; round 9, Rd3: "spdc-cw" is the templates' default).
 SOURCE_TYPES = ("spdc-cw", "cw")
 HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
@@ -221,7 +221,8 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         seed = _wrap("seed", _checks.integer, seed, "seed", minimum=0)
     if data.get("policy", "default") != "default":
         raise ConfigError(
-            "policy must be 'default' in phase 1; loosen rules in code with Policy.allow(analysis, correction, reason)"
+            "policy must be 'default' in phase 1; loosen rules in code with Policy.allow(analysis, correction, reason); "
+            "on the CLI, --allow NAME=REASON"
         )
 
     # source

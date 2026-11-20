@@ -473,11 +473,11 @@ the last column.
 | --- | --- | --- | --- | --- |
 | O1 | Make "Statistical gates" (which now needs the slow-test job) a required check on `main` | r4 C1, r8 Pl5 | Open | Edit ruleset 27075146 |
 | O2 | Release requires gates on the tagged SHA (or a RELEASING policy); forbid direct pushes to main | r7 S6 | Open | Require it in `release.yml`'s `check` job |
-| O3 | Dev version (still 0.1.1; delay is at method 9, deadtime at 7) | r5 V2, r6, r7 | Open | 0.2.0.dev0 before more artifacts |
+| O3 | Dev version (still 0.1.1; delay is at method 10, deadtime at 7) | r5 V2, r6, r7 | Open | 0.2.0.dev0 before more artifacts |
 | O4 | Calibration schema `$id` | r5 V7 | Open | With O3 |
 | O5 | D4 decision text ("0.1.x readers refuse") | r5 V6 | Open | Reword as r5 L2 |
 | O6 | M5 scope (B1), now M5a / M5b; whether M5a joins the gate minimum | r6 B1, r8 Pl1 | Open | Split; M5a in the gate minimum |
-| O7 | Accept the behaviour changes in release notes: refusal above 20% dead fraction; T3 needs `source.type: cw`; `t3-range` refusal; off-peak refusal of pulsed light on T2 and plain tags; forward check at 4e-4 and drift at 3.72 sd; the 1e-3 per-analysis refusal budget as the stated standard | r6, r7, r8 | Partly in CHANGELOG | Accept |
+| O7 | Accept the behaviour changes in release notes: refusal above 20% dead fraction; T3 needs `source.type: cw`; `t3-range` refusal; off-peak refusal of pulsed light on T2 and plain tags; forward check at 4e-4 and drift at 3.72 sd; the 1e-3 per-analysis refusal budget as the stated standard. Round 9: on T3 only `source.type: cw` declares the clock (the templates' `spdc-cw` is refused); the gap tests have their own override `dead_time_contradicted` (`calibration_outside_validity` no longer covers them); the off-peak check can now refuse in CHSH; the upward gap test tolerates a few short gaps | r6, r7, r8, r9 | Partly in CHANGELOG | Accept |
 | O8 | Pre-register gate and regime changes in one sitting: rotating seeds with a second seed, the tau_np gate, the D3 union with chsh-dead-time, past-maximum with declaration and flip search, unidentified tau_p, 5/22 ns, regimes closer to real labs (Ph6), a control regime that survives the M5a truncation | r1-r8 | Open | One sitting before any M4b or M5a run |
 | O9 | Purge the bench binaries from history | r7 S5 | Removed from the tree | Leave (default) |
 | O10 | A real divided T3 file | r7 G5 | Open | Source it, or ship the refusal |
@@ -485,6 +485,10 @@ the last column.
 | O12 | Propagation gate refusal tolerance: replace "any refusal fails" with at most 5 refused per 1,000 (binomial at 1e-3, `FALSE_FAIL`), refused counted as not covered; the misfit (at most 18) and flag caps in the same binomial form; check the p < 0.01 share too | r8 St2, St5 | New | Adopt (a gate rule, so the owner's) |
 | O13 | Which of M2b, M3b and M4b may slip to 0.2.x | r8 Pl2 | New | M4b gates with M5a; M3b may slip |
 | O14 | PR #26 merge method, and whether fixes to merged milestones go in their own PRs or reviews are capped at a number of rounds | r8 Pl6 | New | Owner's choice (the reviewer advises a non-squash merge so the round commits stay traceable) |
+| O15 | Whether the example and `dadl init` setups keep `source.type: spdc-cw`, or ship `cw` with a comment for T3 users (changing a template changes what new users declare) | r9 Rd3 | New | Keep `spdc-cw`; the T3 refusal text explains |
+| O16 | Extend M9 to chunked analyses: coincidences, shifted counts, cross-correlation histograms and gap statistics over time blocks, plus the per-pair difference extraction (Pf8). Plan text and milestone scope | r9 Pf4, Pf8 | New | Adopt into M9; README limit until then |
+| O17 | The analytic gradient of the peak fit (Pf7) in the M10 performance pass, with its acceptance run (forward-check p within optimiser tolerance, flagged counts equal at 200 replicates) as the entry test | r9 Pf7 | New | Schedule in M10 |
+| O18 | CI budget: the gate jobs are 477-494 of about 700-790 job-minutes, and the 20-job concurrency limit sets the wall time. Buy concurrency, or run the propagation gate nightly and on release rather than on every push | r9 Pf5 | New | Owner's choice |
 
 ## Risks
 

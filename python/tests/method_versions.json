@@ -12,12 +12,13 @@
     "version": "2"
   },
   "deadtime": {
-    "sha256": "8938dd9ab258f2fe9bfcadcfb0d6653c50de0b9f584f67b775aebab28b2d947a",
+    "notes": "code changed, outputs byte-identical (council r9 Pf6)",
+    "sha256": "76a3145bd14aeb6ef990bfa5acec876fbd92d92aa922a13896bf4ff3b91754b6",
     "version": "7"
   },
   "delay": {
-    "sha256": "8b88d3ab054d75f89902669462cc7d22f879a30e4daced75af36355ff645e818",
-    "version": "9"
+    "sha256": "856408d39817802a393bc4a2d28d49d0fda185523eba26a5489a40db97b4b765",
+    "version": "10"
   },
   "heralding": {
     "sha256": "861ebb9f5cfb4cb9c3ec2f834c50f0c393885139981435a0217a2042e3279b81",

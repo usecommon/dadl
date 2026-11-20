@@ -35,6 +35,7 @@ from dadl.analysis._twopoint import (
 )
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
+from dadl.coincidences import as_sorted as _as_sorted
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId, runs_lattice
 from dadl.forward_check import NO_LATTICE
@@ -103,7 +104,7 @@ def fringe_from_tags(
     def reduce(name: str):
         run = runs[name]
         c = grid_coincidences(run["A"], run["B"], window.width_ps, da, db)
-        side = shifted_coincidences(np.sort(run["A"]), np.sort(run["B"]), window.width_ps, da, db, offsets)
+        side = shifted_coincidences(_as_sorted(run["A"]), _as_sorted(run["B"]), window.width_ps, da, db, offsets)
         return c, side, span_ps(run, FRINGE_CHANNELS)
 
     c_max, side_max, t_max = reduce("max")
@@ -127,7 +128,7 @@ def fringe_from_tags(
     }
     offpeak_labels: tuple[str, ...] = ()
     if subtract_accidentals or calibrations is not None:
-        counts["offpeak_p"], offpeak_labels = offpeak_check(
+        counts["offpeak_p"], offpeak_labels, counts["offpeak_draws"] = offpeak_check(
             "bell_visibility", {"max": side_max, "min": side_min}, offsets, policy
         )
     drift = False
@@ -176,7 +177,7 @@ def fringe_from_tags(
             result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids,
             corrected_labels=tuple(dict.fromkeys(lab for lab in corrected_labels if lab not in labels)),
         )
-    if interrupted(*([np.sort(runs[k][ch]) for ch in FRINGE_CHANNELS] for k in FRINGE_SETTINGS)):
+    if interrupted(*([_as_sorted(runs[k][ch]) for ch in FRINGE_CHANNELS] for k in FRINGE_SETTINGS)):
         labels += (INTERRUPTED,)
     return dataclasses.replace(result, labels=labels, counts=counts), counts
 

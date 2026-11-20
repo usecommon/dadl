@@ -235,3 +235,43 @@ def test_unsupported_source_types_are_refused(tmp_path):
     bad = write(tmp_path, GOOD.replace("source: {", "source: {type: spdc-pulsed-80MHz, "))
     with pytest.raises(ConfigError, match="not supported"):
         load_setup(bad)
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def test_init_prints_both_first_runs(tmp_path, capsys):
+    # Council round 9 (Tw8): init named only the quickstart, which refuses `backend: file`.
+    assert main(["init", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "dadl quickstart" in out and "backend: file" in out and "dadl calibrate dark" in out
+    assert "# hardware:" in EXAMPLE.read_text()
+
+
+def test_the_cli_prints_a_skipped_forward_check(capsys):
+    # Council round 9 (Rd5): the note was only in the counts.
+    import dataclasses
+
+    from dadl.cli import _print_forward
+    from dadl.forward_check import NO_LATTICE
+    from dadl.result import Estimate, LabelledValue
+
+    result = LabelledValue(analysis="hom_visibility", raw=Estimate(0.9, 0.01), corrected=Estimate(0.91, 0.01),
+                           labels=(), corrections=("dead_time",))
+    _print_forward(dataclasses.replace(result, corrected_labels=()), {"forward_check_note": NO_LATTICE})
+    assert f"Note: {NO_LATTICE}" in capsys.readouterr().out
+
+
+def test_analyze_labels_a_dark_dead_time_far_below_the_declared_one():
+    # Council round 9 (Rd1b): an echo-set 50 ns bound on a 1 us detector passed every check.
+    from test_forward import _dark, _member_set
+
+    from dadl.cli import _dead_time_far_below_labels
+
+    setup = load_setup(EXAMPLE)
+    name = "A+"
+    declared = setup.detectors[name].dead_time_ps
+    cset = _member_set("chsh", [_dark(setup.channel_id(name), bound=0.1 * declared)])
+    labels = _dead_time_far_below_labels(cset, setup, ("A+", "A-", "B+", "B-"))
+    assert len(labels) == 1 and labels[0].startswith("the dark dead time of A+") and "below half the declared" in labels[0]
+    assert _dead_time_far_below_labels(None, setup, ("A+",)) == ()

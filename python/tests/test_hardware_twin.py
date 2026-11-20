@@ -460,3 +460,27 @@ def test_t3_delay_at_the_lattice_is_calibrated():
         covered += cal.estimates["jitter_sigma_ps"].contains(100 * 2**0.5)
         assert not any("tick grid" in n for n in cal.notes)
     assert misfit == 0 and covered >= 19
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def test_a_single_ptu_file_is_read_as_setting_0_and_only_the_used_settings_are_read(tmp_path):
+    # Council round 9 (Tw6): one dark PTU file needed copies as setting1-3 ("missing setting1.ptu"),
+    # or failed as "tag files must be .npz or .csv".
+    from dadl.tagfile import ptu_file, ptu_files, tagger_settings
+
+    rng = np.random.default_rng(4)
+    tags = {1: np.sort(rng.integers(0, 10**11, 3000)), 2: np.sort(rng.integers(0, 10**11, 3000))}
+    one = write_ptu(tmp_path / "dark.ptu", tags)
+    got = read_tags(one, {1: "A", 2: "B"}, ("dip", "reference"))
+    np.testing.assert_array_equal(got["dip"]["A"], tags[1])
+    assert got["reference"]["A"].size == 0 and ptu_files(one) == [one]
+    assert tagger_settings(one)["tagger_mode"] == 2.0
+    folder = tmp_path / "f"
+    folder.mkdir()
+    write_ptu(ptu_file(folder, 1), tags)
+    with pytest.raises(ConfigError, match="missing setting0.ptu"):
+        read_tags(folder, {1: "A", 2: "B"}, ("dip", "reference"))
+    got = read_tags(folder, {1: "A", 2: "B"}, ("dip", "reference"), only=(1,))
+    np.testing.assert_array_equal(got["reference"]["B"], tags[2])
