@@ -51,7 +51,7 @@ only. If adopted, design.md's phase table row changes to name all three.
 
 One PR each. Dependencies are on merged milestones. Rough order: M0 and M4 can start at once;
 M1 → M2 → M3 is the critical path; M6 → M7 needs only M1. Council round 8 split M5 into M5a and
-M5b and moved most of M10's smaller items into M2b, M3b and M4b.
+M5b and moved most of M10's smaller items into the new M2b/M3b/M4b milestones.
 
 | # | Milestone | Depends on |
 | --- | --- | --- |
@@ -208,6 +208,9 @@ round 8 moved the entry items that do not need NUTS here.
 - Minimum method version at use (council round 5, V4): a table (kind, method) -> version in
   `propagate` that refuses or labels older artifacts, with a test, before anything reads
   `deadtime-series` artifacts.
+- Condition keys of series artifacts (council round 10, Rg3): `uncompared_conditions` labels any
+  recorded key containing "temperature", so the series artifact's `dark_temperature_K` would read
+  "recorded, not compared" on every use once series artifacts load; exclude `dark_*` keys.
 - Shared row index (B5): a series tau_p's draws lose their correlation (about 0.3) with the dark
   afterpulse draws they were propagated from; `CalibrationSet.draws` needs a shared row index
   across a series artifact and its cited dark artifact, with the reviewer's correlation test.
@@ -409,13 +412,16 @@ before any run (owner item O8).
   and signing sections reconciled with what was built; README "Known limits" updated (corrected
   values, series model, plans and what signatures do not prove); the site (`docs/index.html`),
   which still describes 0.1.1 as released; CHANGELOG 0.2.0.
+- Output pass (owner item O21): label severity groups ("Affects this value", "You overrode", "For
+  the record"; council round 10, Ux6) and a short printed code after each label (council round 10,
+  Ux8), with a severity on every label constant and tests.
 - A review cycle in the format of `docs/reviews/2026-11-review-cycles.md`, before release, with
   at least a Bayesian computation, a Bell-test red team and a security lens.
 
 ### Smaller items assigned to phase 3
 
 From the review records; each can ride with the milestone named or go to 0.2.x. Council round 8
-moved most rows from M10 to M2b, M3b, M4b and M5a.
+moved most rows from M10 to the M2b/M3b/M4b/M5a milestones.
 
 | Item | Source | Where |
 | --- | --- | --- |
@@ -466,29 +472,40 @@ D2 is a preference going into M0; the benchmark still has to confirm it.
 
 ## Owner items
 
-Consolidated from council rounds 4-8. Each needs the owner; the council's recommendation is in
+Consolidated from council rounds 4-10 (the round-10 ruling's final table; record:
+`docs/reviews/2026-11-phase3-council.md`). Each needs the owner; the council's recommendation is in
 the last column.
+
+**Before merge**
 
 | # | Item | Source | Status | Recommendation |
 | --- | --- | --- | --- | --- |
-| O1 | Make "Statistical gates" (which now needs the slow-test job) a required check on `main` | r4 C1, r8 Pl5 | Open | Edit ruleset 27075146 |
-| O2 | Release requires gates on the tagged SHA (or a RELEASING policy); forbid direct pushes to main | r7 S6 | Open | Require it in `release.yml`'s `check` job |
-| O3 | Dev version (still 0.1.1; delay is at method 10, deadtime at 7) | r5 V2, r6, r7 | Open | 0.2.0.dev0 before more artifacts |
+| O14 | Merge method: linear history is required, so squash or rebase-merge (a merge commit needs a ruleset bypass). Review cap: this round is the last | r8 Pl6, r10 Mg3 | Open | Rebase-merge, so each round's commit stays traceable from the record (Fix 7). Squash is acceptable now that the record carries the ids |
+| O1 | Make "Statistical gates" (and the slow-test job it needs) required on `main` (ruleset 27075146). Until then, check the gates by hand | r4 C1, r8 Pl5, r10 Mg2 | Open | Do it before merging #26, not after: cheap, and it protects this merge |
+| O19 | Publishing the review record in the repo: the AI reviewer reports and rulings verbatim (about 600 KB, paths scrubbed) under `docs/reviews/phase3/` | r10 Mg4 | New | Publish, as phase 2 did; the summary states that reviewers are AI agents |
+| O20 | Only if Fix 1's Linux run deviates by more than 1e-8 relative: accept per-platform fixtures (macOS and Linux, from a run whose gates are green) instead of one tolerance | r10 Mg1 | New | Accept, with the observed deviation recorded in the test |
+
+**After merge, in this order**
+
+| # | Item | Source | Status | Recommendation |
+| --- | --- | --- | --- | --- |
+| O3 | Dev version 0.2.0.dev0 (still 0.1.1; delay at 10, deadtime at 8) | r5 V2, r6, r7 | Open | First, before more artifacts are written from main |
 | O4 | Calibration schema `$id` | r5 V7 | Open | With O3 |
-| O5 | D4 decision text ("0.1.x readers refuse") | r5 V6 | Open | Reword as r5 L2 |
-| O6 | M5 scope (B1), now M5a / M5b; whether M5a joins the gate minimum | r6 B1, r8 Pl1 | Open | Split; M5a in the gate minimum |
-| O7 | Accept the behaviour changes in release notes: refusal above 20% dead fraction; T3 needs `source.type: cw`; `t3-range` refusal; off-peak refusal of pulsed light on T2 and plain tags; forward check at 4e-4 and drift at 3.72 sd; the 1e-3 per-analysis refusal budget as the stated standard. Round 9: on T3 only `source.type: cw` declares the clock (the templates' `spdc-cw` is refused); the gap tests have their own override `dead_time_contradicted` (`calibration_outside_validity` no longer covers them); the off-peak check can now refuse in CHSH; the upward gap test tolerates a few short gaps | r6, r7, r8, r9 | Partly in CHANGELOG | Accept |
-| O8 | Pre-register gate and regime changes in one sitting: rotating seeds with a second seed, the tau_np gate, the D3 union with chsh-dead-time, past-maximum with declaration and flip search, unidentified tau_p, 5/22 ns, regimes closer to real labs (Ph6), a control regime that survives the M5a truncation | r1-r8 | Open | One sitting before any M4b or M5a run |
-| O9 | Purge the bench binaries from history | r7 S5 | Removed from the tree | Leave (default) |
+| O2 | Release requires gates on the tagged SHA; forbid direct pushes to main | r7 S6 | Open | In `release.yml`'s `check` job |
+| O8 | Pre-register gate and regime changes in one sitting (rotating seeds, tau_np gate, D3 union, past-maximum, unidentified tau_p, 5/22 ns, realistic regimes, a control regime that survives M5a); add a coarse-tick (T3) series regime, so Rg1's case is gated | r1-r8, r10 Rg1 | Open | One sitting before any M4b or M5a run |
+| O12 | Propagation gate tolerance: at most 5 refused per 1,000, binomial misfit and flag caps; the quick-run control rule (Rg4) | r8 St2, St5, r10 Rg4 | New | Adopt (a gate rule) |
+| O6 | M5 split into M5a / M5b; M5a in the gate minimum; Rg3 is an M5a entry item | r6 B1, r8 Pl1, r10 Rg3 | Open | Split; M5a in the gate minimum |
+| O13 | Which of M2b, M3b, M4b may slip to 0.2.x | r8 Pl2 | New | M4b gates with M5a; M3b may slip |
+| O16 | M9 extended to chunked analyses (Pf4, Pf8) | r9 Pf4, Pf8 | New | Adopt into M9; README limit until then |
+| O17 | Pf7 analytic gradient in M10, with its acceptance run as entry test | r9 Pf7 | New | Schedule in M10 |
+| O21 | M10 output pass: label severity groups (Ux6) and printed label codes (Ux8) | r10 Ux6, Ux8 | New | Schedule in M10 |
+| O18 | CI budget: buy concurrency, or run the propagation gate nightly and on release | r9 Pf5 | New | Owner's choice |
+| O15 | Templates keep `spdc-cw` or ship `cw` | r9 Rd3 | New | Keep `spdc-cw` |
 | O10 | A real divided T3 file | r7 G5 | Open | Source it, or ship the refusal |
-| O11 | Withdrawn deferral (pending afterpulse moved into M4) | r5 item 4 | Plan updated | Close |
-| O12 | Propagation gate refusal tolerance: replace "any refusal fails" with at most 5 refused per 1,000 (binomial at 1e-3, `FALSE_FAIL`), refused counted as not covered; the misfit (at most 18) and flag caps in the same binomial form; check the p < 0.01 share too | r8 St2, St5 | New | Adopt (a gate rule, so the owner's) |
-| O13 | Which of M2b, M3b and M4b may slip to 0.2.x | r8 Pl2 | New | M4b gates with M5a; M3b may slip |
-| O14 | PR #26 merge method, and whether fixes to merged milestones go in their own PRs or reviews are capped at a number of rounds | r8 Pl6 | New | Owner's choice (the reviewer advises a non-squash merge so the round commits stay traceable) |
-| O15 | Whether the example and `dadl init` setups keep `source.type: spdc-cw`, or ship `cw` with a comment for T3 users (changing a template changes what new users declare) | r9 Rd3 | New | Keep `spdc-cw`; the T3 refusal text explains |
-| O16 | Extend M9 to chunked analyses: coincidences, shifted counts, cross-correlation histograms and gap statistics over time blocks, plus the per-pair difference extraction (Pf8). Plan text and milestone scope | r9 Pf4, Pf8 | New | Adopt into M9; README limit until then |
-| O17 | The analytic gradient of the peak fit (Pf7) in the M10 performance pass, with its acceptance run (forward-check p within optimiser tolerance, flagged counts equal at 200 replicates) as the entry test | r9 Pf7 | New | Schedule in M10 |
-| O18 | CI budget: the gate jobs are 477-494 of about 700-790 job-minutes, and the 20-job concurrency limit sets the wall time. Buy concurrency, or run the propagation gate nightly and on release rather than on every push | r9 Pf5 | New | Owner's choice |
+| O5 | D4 decision text ("0.1.x readers refuse") | r5 V6 | Open | Reword as r5 L2 |
+| O7 | Accept every behaviour change in the release notes (the CHANGELOG list from Fix 8, round 10 included) | r6-r10 | In CHANGELOG; acceptance open | Accept at release |
+| O9 | Purge the bench binaries from history | r7 S5 | Removed from the tree | Leave (default) |
+| O11 | Withdrawn deferral (pending afterpulse into M4) | r5 item 4 | Plan updated | Close |
 
 ## Risks
 

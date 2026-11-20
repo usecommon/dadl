@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from pathlib import Path
 
 import pytest
 
@@ -210,39 +212,143 @@ def test_a_chsh_dead_time_replicate_carries_the_dead_time_above_gaps_label():
     # essentially every channel of this regime; the corrected value says so.
     from dadl.analysis.propagation import REGIMES, _analyse
     from dadl.calibration.coverage import _children
-    from dadl.forward import DEAD_TIME_ABOVE_GAPS
+    # Council round 10 (Rg2): a bound has its own wording, which says the bound is loose.
+    from dadl.forward import DEAD_TIME_ABOVE_GAPS, DEAD_TIME_ABOVE_GAPS_BOUND
 
     child = next(iter(_children(20261118, 200, range(0, 1), "chsh-dead-time")))
     result, _ = _analyse(REGIMES["chsh-dead-time"], child)
-    head = DEAD_TIME_ABOVE_GAPS.split("{name}")[0]
-    assert any(lab.startswith(head) for lab in result.corrected_labels)
+    heads = [t.split("{name}")[0] for t in (DEAD_TIME_ABOVE_GAPS, DEAD_TIME_ABOVE_GAPS_BOUND)]
+    assert any(lab.startswith(h) for lab in result.corrected_labels for h in heads)
 
 
 # --- Council round 9 ----------------------------------------------------------------------------
 
-#: SHA-256 (first 16 hex digits) of three gate replicates per regime, off-peak keys left out: the
-#: round-8 code with only the delay method version raised to 10 (artifact IDs seed the calibration
-#: draws) gives these, so the performance changes (as_sorted, one-pass de-duplication, memoised grid
-#: counts, one quantile call, cached series constants) change no value (council round 9, Pf2-Pf8).
-R8_REPLICATE_HASHES = {
-    "hom-snspd": "8d494923702d38aa",
-    "hom-bright": "d5d75abf34eaf9af",
-    "chsh-spad": "5aa8e5cff09ddac9",
-    "hom-crosstalk": "6dff3feb3e607303",
-    "chsh-dead-time": "20c150e54b341803",
-}
+#: The flattened values of three gate replicates per regime, off-peak keys left out, pinned in
+#: ``tests/data/r8_gate_replicates.json``: the round-8 code with only the delay method version raised to
+#: 10 (artifact IDs seed the calibration draws) gives these, so the performance changes (as_sorted,
+#: one-pass de-duplication, memoised grid counts, one quantile call, cached series constants) change no
+#: value (council round 9, Pf2-Pf8). Round 9 pinned a SHA-256 of full-precision ``repr`` floats, which
+#: differs on Linux libm/BLAS in the last bits (council round 10, Mg1); the fixture compares integers,
+#: strings, booleans and None exactly and floats to a relative 1e-9.
+#:
+#: Generated on macOS, one BLAS thread, at e8c1aba after checking that the five round-9 hashes still
+#: matched (``8d494923702d38aa``, ``d5d75abf34eaf9af``, ``5aa8e5cff09ddac9``, ``6dff3feb3e607303``,
+#: ``20c150e54b341803``), with, from ``python/``:
+#:
+#:     OPENBLAS_NUM_THREADS=1 python -c "import sys; sys.path.insert(0, 'tests'); \
+#:         import test_propagation as t; t.write_r8_fixture()"
+R8_FIXTURE = Path(__file__).parent / "data" / "r8_gate_replicates.json"
+R8_REGIMES = ("chsh-dead-time", "chsh-spad", "hom-bright", "hom-crosstalk", "hom-snspd")
+R8_REL_TOL, R8_ABS_TOL = 1e-9, 1e-12
+
+
+def _flatten(x, out, path=""):
+    import numpy as np
+
+    if isinstance(x, dict):
+        for k in sorted(x):
+            _flatten(x[k], out, f"{path}.{k}")
+    elif isinstance(x, (list, tuple)):
+        for i, v in enumerate(x):
+            _flatten(v, out, f"{path}[{i}]")
+    elif isinstance(x, np.generic):
+        out.append([path, x.item()])
+    elif hasattr(x, "__dict__") and not isinstance(x, (str, bytes)):
+        _flatten(vars(x), out, path)
+    else:
+        out.append([path, x])
+
+
+def _flatten_replicates(regime):
+    from dadl.analysis import propagation as P
+
+    out = []
+    for i, child in enumerate(P._children(20261118, 1000, range(0, 3), regime)):
+        r, mis = P._analyse(P.REGIMES[regime], child)
+        counts = {k: v for k, v in (r.counts or {}).items() if k not in ("offpeak_p", "offpeak_draws")}
+        _flatten((r.raw, r.corrected, counts, mis), out, f"r{i}")
+    return out
+
+
+def write_r8_fixture(path=R8_FIXTURE):
+    path.parent.mkdir(exist_ok=True)
+    blocks = []
+    for r in R8_REGIMES:
+        rows = ",\n".join(f"  {json.dumps(row)}" for row in _flatten_replicates(r))
+        blocks.append(f"{json.dumps(r)}: [\n{rows}\n]")
+    path.write_text("{\n" + ",\n".join(blocks) + "\n}\n")
+
+
+def _same(a, b):
+    """(equal, relative difference): floats to R8_REL_TOL, NaN equal to NaN, everything else exactly."""
+    if type(a) is float and type(b) is float:
+        if math.isnan(a) or math.isnan(b):
+            return (True, 0.0) if math.isnan(a) and math.isnan(b) else (False, math.inf)
+        rel = abs(a - b) / max(abs(a), abs(b)) if a != b else 0.0
+        return math.isclose(a, b, rel_tol=R8_REL_TOL, abs_tol=R8_ABS_TOL), rel
+    equal = type(a) is type(b) and a == b
+    return equal, (0.0 if equal else math.inf)
+
+
+def compare_to_fixture(got, pinned):
+    """Problems between two flattened value lists: path differences, then the five worst values."""
+    gp, pp = [p for p, _ in got], [p for p, _ in pinned]
+    if gp != pp:
+        missing, extra = sorted(set(pp) - set(gp)), sorted(set(gp) - set(pp))
+        return [f"paths differ: missing {missing[:5]}, extra {extra[:5]}" + ("" if missing or extra else ", order")]
+    bad = []
+    for (path, a), (_, b) in zip(got, pinned):
+        ok, rel = _same(a, b)
+        if not ok:
+            bad.append((rel, path, a, b))
+    bad.sort(key=lambda t: -t[0])
+    return [f"{path}: got {a!r}, pinned {b!r} (relative difference {rel:.3g})" for rel, path, a, b in bad[:5]]
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("regime", sorted(R8_REPLICATE_HASHES))
+@pytest.mark.parametrize("regime", R8_REGIMES)
 def test_the_performance_changes_leave_the_gate_replicates_unchanged(regime):
-    import hashlib
+    pinned = json.loads(R8_FIXTURE.read_text())[regime]
+    problems = compare_to_fixture(_flatten_replicates(regime), pinned)
+    assert not problems, "\n".join(problems)
 
+
+def test_the_replicate_fixture_comparison_catches_a_changed_count_and_a_changed_value():
+    # Council round 10 (Mg1, Fix 1): the test of the test. A count changed by 1 and a float changed by
+    # 1e-6 relative both fail; last-bit noise and NaN against NaN pass.
+    pinned = json.loads(R8_FIXTURE.read_text())["hom-snspd"]
+    assert compare_to_fixture(pinned, pinned) == []
+    i_int = next(i for i, (_, v) in enumerate(pinned) if type(v) is int)
+    i_float = next(i for i, (_, v) in enumerate(pinned) if isinstance(v, float) and v != 0 and math.isfinite(v))
+    count = [list(x) for x in pinned]
+    count[i_int][1] += 1
+    assert len(compare_to_fixture(count, pinned)) == 1
+    value = [list(x) for x in pinned]
+    value[i_float][1] *= 1 + 1e-6
+    assert len(compare_to_fixture(value, pinned)) == 1
+    noise = [list(x) for x in pinned]
+    noise[i_float][1] *= 1 + 1e-14
+    assert compare_to_fixture(noise, pinned) == []
+    assert compare_to_fixture([["a", math.nan]], [["a", math.nan]]) == []
+    assert compare_to_fixture([["a", 1]], [["a", 1.0]]) != []
+    assert compare_to_fixture([["b", 1]], [["a", 1]]) != []
+
+
+# --- Council round 10 ---------------------------------------------------------------------------
+
+
+def test_describe_says_the_control_rule_needs_about_400_replicates():
+    # Council round 10 (Rg4, Fix 6): at 100 replicates chsh-dead-time's control (true 87.5%) lands
+    # inside the band about one run in three; `passed` is unchanged (a gate rule, O12).
     from dadl.analysis import propagation as P
 
-    h = hashlib.sha256()
-    for child in P._children(20261118, 1000, range(0, 3), regime):
-        r, mis = P._analyse(P.REGIMES[regime], child)
-        counts = {k: v for k, v in (r.counts or {}).items() if k not in ("offpeak_p", "offpeak_draws")}
-        h.update(repr((r.raw, r.corrected, counts, mis)).encode())
-    assert h.hexdigest()[:16] == R8_REPLICATE_HASHES[regime]
+    def result(n, regime):
+        covered = {k: 0 for k in KEYS}
+        covered[P.CORRECTED] = int(0.95 * n)
+        covered[CONTROL] = int(0.93 * n)
+        return P.CoverageResult(P.result_name(regime), n, covered, P.gate(n, 1))
+
+    note = "control rule not decidable below about 400 replicates"
+    assert note in P.describe(result(100, "chsh-dead-time")) and not P.passed(result(100, "chsh-dead-time"))
+    assert note not in P.describe(result(400, "chsh-dead-time"))
+    assert note not in P.describe(result(100, "chsh-spad"))

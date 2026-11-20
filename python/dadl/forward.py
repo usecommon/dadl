@@ -73,10 +73,18 @@ DEAD_TIME_BELOW_DARK = (
     "channel for a dark run this short): its dead-time correction is likely too large; a longer dark run, or an "
     "illuminated calibration for an SNSPD, resolves it"
 )
-#: The dark dead time (point, or bound) is longer than many analysed gaps (council round 8, Ph4).
+#: The dark dead time is longer than many analysed gaps (council round 8, Ph4). It fires on most
+#: clean analyses, so it says how often (council round 10, Rg2), and it is left out for a channel that
+#: already carries `DEAD_TIME_BELOW_DARK` or a gap problem.
 DEAD_TIME_ABOVE_GAPS = (
-    "the dark dead time of {name} ({x}) is longer than {k} of the analysed gaps (shortest {g}); a "
-    "non-paralyzable dead time cannot be. The correction uses the dark value and its uncertainty (see Known limits)"
+    "the dark dead time of {name} ({x}) is longer than {k} of the analysed gaps (shortest {g}); this fires on most "
+    "analyses whose dark run is short against the analysed one (council round 8, 400 of 400 chsh-dead-time "
+    "replicates). The correction uses the dark value and its uncertainty (see Known limits)"
+)
+#: The same for a dark dead time known only as an upper limit (council round 10, Rg2).
+DEAD_TIME_ABOVE_GAPS_BOUND = (
+    "the dark run bounds the dead time of {name} below {x}; {k} analysed gaps are shorter, so the bound is loose; "
+    "the correction uses the bound (see Known limits)"
 )
 #: HOM and fringe forward-model values (council round 6, R3), as CHSH's model label says for S.
 SECONDARY_V = "secondary; the headline is raw V"
@@ -102,12 +110,22 @@ DEAD_TIME_RANGE_WIDE = (
     "quote the range"
 )
 JITTER_BOUND = "delay jitter known only as an upper limit: window capture at the bound"
+#: HOM and fringe without dark artifacts, in CHSH's words (`chsh_model_label`; council round 10, Ux12).
+DEAD_TIME_UNMODELLED = "dead time (no dark artifacts) not modelled"
 CORRECTED_ABOVE_ONE = "corrected value above 1: the accidentals fluctuate above the minimum count; quote the interval"
 AFTERPULSING_UNMODELLED = (
     "afterpulsing reported by a dark calibration is not in the forward model (no kernel propagated)"
 )
 #: Relative change of a window capture between jitter 0 and its bound above which the bound is labelled.
 JITTER_BOUND_RTOL = 1e-3
+
+
+def _policy_labels(policy: Policy) -> list[str]:
+    """`POLICY_MODIFIED` on a corrected value under a modified policy (council round 10, Ux2: the
+    raw value says it is unchanged instead, `Policy.labels_for`)."""
+    from dadl.guardrails import POLICY_MODIFIED
+
+    return [POLICY_MODIFIED] if policy.is_modified else []
 
 
 @dataclass(frozen=True)
@@ -403,7 +421,9 @@ def check_dead_time_gaps(
 
     Above the gaps: a dark dead time (point, or bound) longer than more than max(`GAP_COUNT`,
     `GAP_SHARE` x gaps) of the analysed gaps is labelled `DEAD_TIME_ABOVE_GAPS` (council round 8,
-    Ph4); the correction keeps the dark value (README, Known limits).
+    Ph4), or `DEAD_TIME_ABOVE_GAPS_BOUND` for a bound; the correction keeps the dark value (README,
+    Known limits). The label is left out on a channel that already carries `DEAD_TIME_BELOW_DARK` or a
+    gap problem (council round 10, Rg2).
 
     A refused dead time raises `StaleCalibration`, unless the policy allows
     `dead_time_contradicted` (then `DEAD_TIME_CONTRADICTED`, with the problems; council round 9,
@@ -454,9 +474,11 @@ def check_dead_time_gaps(
             if floor <= 0:
                 floor, kind = None, None
         floors[name], kinds[name] = floor, kind
+        flagged = False  # this channel already carries DEAD_TIME_BELOW_DARK or a gap problem
         if floor is not None:
             k = int(np.searchsorted(gaps, floor))
             if k > count_rule:
+                flagged = True
                 if kind != "lower end (label only)":
                     problems.append(
                         f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter, "
@@ -467,10 +489,6 @@ def check_dead_time_gaps(
         upper = float(tau.high)
         used = upper if bound else float(tau.value)
         above = int(np.searchsorted(gaps, used))
-        if above > count_rule:
-            below.append(DEAD_TIME_ABOVE_GAPS.format(
-                name=f"{name} ({cid})", x=_duration(used), k=above, g=_duration(float(gaps[0]))
-            ))
         edge = upward_gap_excess(gaps, upper)
         if edge is not None:
             excess, j, m = edge
@@ -480,6 +498,10 @@ def check_dead_time_gaps(
                     f"{what} ns of {name} ({cid}): the analysed gap {j + 1} from the shortest is "
                     f"{gaps[j] / 1000:.4g} ns, longer than its upper end by {excess:.0f} mean edge spacings"
                 )
+                flagged = True
+        if above > count_rule and not flagged:
+            text = DEAD_TIME_ABOVE_GAPS_BOUND if bound else DEAD_TIME_ABOVE_GAPS
+            below.append(text.format(name=f"{name} ({cid})", x=_duration(used), k=above, g=_duration(float(gaps[0]))))
     labels: tuple[str, ...] = ()
     counts: dict[str, object] = {}
     if problems:
@@ -545,11 +567,13 @@ def corrected_visibility(
         raise ValueError(f"no forward model for {analysis!r}")
     policy = policy or Policy.default()
     corrections: list[str] = []
-    labels: list[str] = [FORWARD_MODEL, SECONDARY_V]
+    labels: list[str] = [FORWARD_MODEL, SECONDARY_V] + _policy_labels(policy)
     dead = _dead_times(calibrations, channels, n_draws, seed)
     if dead is not None:
         policy.check_correction(analysis, "dead_time")
         corrections.append("dead_time")
+    else:
+        labels.append(DEAD_TIME_UNMODELLED)
     policy.check_correction(analysis, "accidental_subtraction")
     corrections.append("accidental_subtraction")
     capture = _capture(calibrations, channels, (high, low), window_ps, declared_delay_ps, n_draws, seed)
@@ -745,8 +769,8 @@ def _refuse_loose_bound(name: str, cid: ChannelId | None, hi_ps: float, rate_cps
     if worst > MAX_DEAD_FRACTION:
         raise GuardrailRefusal(
             f"the dead time of {_who(name, cid)} is known only below {_duration(hi_ps)} (the dark data did not "
-            f"identify it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above "
-            f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. No DADL calibration "
+            f"identify it); at the recorded rate that bound gives rate x dead time = {worst:.3g} (limit "
+            f"{MAX_DEAD_FRACTION:g}), so a correction between zero and the bound says nothing. No DADL calibration "
             f"can supply it yet (series dead-time artifacts are not used by analyses): {WITHOUT_DARK}."
         )
 
@@ -758,8 +782,8 @@ def _refuse_dead_fraction(name: str, cid: ChannelId | None, point_ps: float, rat
     worst = rate_cps * point_ps * 1e-12
     if worst > MAX_DEAD_FRACTION:
         raise GuardrailRefusal(
-            f"the dead time of {_who(name, cid)} is {_duration(point_ps)}; at the recorded rate that is a dead "
-            f"fraction of {worst:.3g}, above {MAX_DEAD_FRACTION:.0%}: there the pair term and the unmodelled "
+            f"the dead time of {_who(name, cid)} is {_duration(point_ps)}; at the recorded rate, rate x dead time = "
+            f"{worst:.3g} (limit {MAX_DEAD_FRACTION:g}): there the pair term and the unmodelled "
             f"paralyzable stage are not trusted, and a dark dead time this long is often a false identification. "
             f"Correcting with a series dead-time calibration is not yet supported (see Known limits); "
             f"{WITHOUT_DARK}."
@@ -868,7 +892,7 @@ def corrected_chsh(
     policy = policy or Policy.default()
     delays = dict(delays_ps or {})
     corrections: list[str] = []
-    labels: list[str] = [FORWARD_MODEL]
+    labels: list[str] = [FORWARD_MODEL] + _policy_labels(policy)
     dead = _channel_dead_times(calibrations, channels, n_draws, seed)
     if dead is not None:
         policy.check_correction("chsh", "dead_time")
@@ -896,7 +920,11 @@ def corrected_chsh(
     if have:
         if len(have) != len(OUTCOME_SIGNS):
             missing = [f"A{x}/B{y}" for (x, y), v in captures.items() if v is None]
-            raise ValueError(f"delay-jitter artifacts are given but not for {missing}: every channel pair needs one")
+            raise ValueError(
+                f"delay-jitter artifacts are given but not for {missing}: every channel pair needs one; take a "
+                "heralding run for each missing pair, or move the delay-jitter artifacts (.json and .posterior.npy) "
+                "out of the folder to correct without window capture"
+            )
         policy.check_correction("chsh", "window_capture")
         corrections.append("window_capture")
         if any(v[2] for v in captures.values()):
@@ -971,6 +999,8 @@ __all__ = [
     "CAPTURE_UNMODELLED",
     "DEAD_FRACTION_HIGH",
     "DEAD_TIME_ABOVE_GAPS",
+    "DEAD_TIME_ABOVE_GAPS_BOUND",
+    "DEAD_TIME_UNMODELLED",
     "DEAD_TIME_BELOW_DARK",
     "DEAD_TIME_BOUND",
     "FORWARD_MODEL",

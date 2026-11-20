@@ -179,6 +179,9 @@ REGIMES: dict[str, Regime] = {
 }
 #: Regimes where the uncertainty-off control must fall below the band.
 CONTROL_REGIMES = ("chsh-dead-time",)
+#: Below this many replicates the control rule is not decidable: chsh-dead-time's control covers
+#: about 87.5%, inside the 100-replicate band about one run in three (council round 10, Rg4).
+CONTROL_MIN_REPLICATES = 400
 
 CORRECTED = "corrected"
 CONTROL = "control"
@@ -352,6 +355,9 @@ def describe(result: CoverageResult) -> str:
             *refused,
         ])
     control = "must fall below the band" if regime_of(result) in CONTROL_REGIMES else "reported, not gated here"
+    if regime_of(result) in CONTROL_REGIMES and result.replicates < CONTROL_MIN_REPLICATES:
+        control += (f"; control rule not decidable below about {CONTROL_MIN_REPLICATES} replicates: a FAIL on it "
+                    "here is not evidence of a problem")
     return "\n".join([
         f"{result.calibration}: {result.replicates} replicates, gate {lo:.1%}-{hi:.1%}  {verdict}",
         f"  {CORRECTED:<17} {result.fraction(CORRECTED):.1%}",

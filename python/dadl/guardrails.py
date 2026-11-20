@@ -7,7 +7,9 @@ the headline) and where its coincidence window may come from.
 Users may loosen a rule, but never silently: loosening goes through
 `Policy.allow`, which needs a written reason; every result records the
 policy fingerprint and the overrides with their reasons, and any policy
-that differs from the shipped default is labelled "policy modified".
+that differs from the shipped default is labelled "policy modified" (on the
+raw value, "policy loosened for the corrected value only; raw value
+unchanged" when only corrections were allowed; council round 10).
 
 Refusals and their rates (council round 8): on clean data within the tested regimes, DADL refuses
 an analysis at analysis time with probability at most 1 in 1,000, all checks together: the
@@ -37,6 +39,10 @@ from dadl.errors import GuardrailRefusal
 from dadl.result import Estimate
 
 POLICY_MODIFIED = "policy modified"
+#: On a raw value when every override only allows corrections: raw values use none (council round
+#: 10, Ux2: "S = 2.6941 ± 0.0105 (policy modified)" read as corrected). The corrected value keeps
+#: `POLICY_MODIFIED`.
+POLICY_CORRECTED_ONLY = "policy loosened for the corrected value only; raw value unchanged"
 THRESHOLD_AFTER_CORRECTION = "threshold crossed only after correction"
 NEAR_THRESHOLD = "within 1.96 sigma of the threshold"
 GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
@@ -244,8 +250,9 @@ class Policy:
     def allow(self, analysis: str, correction: str, reason: str) -> Policy:
         """Return a new policy that allows `correction` for `analysis`.
 
-        A written reason is mandatory. Results under the new policy carry the
-        "policy modified" label and record the override with its reason.
+        A written reason is mandatory. Corrected values under the new policy carry
+        the "policy modified" label (raw values say they are unchanged), and results
+        record the override with its reason.
         """
         if correction not in KNOWN_CORRECTIONS:
             raise ValueError(f"unknown correction {correction!r}; known: {sorted(KNOWN_CORRECTIONS)}")
@@ -277,9 +284,13 @@ class Policy:
             )
 
     def labels_for(self, analysis: str) -> tuple[str, ...]:
+        """The raw value's policy labels. Overrides only allow corrections, which a raw value never
+        uses: when they are the only change from the default, the label says the raw value is
+        unchanged (`POLICY_CORRECTED_ONLY`); rules changed in any other way give `POLICY_MODIFIED`."""
         labels: list[str] = []
         if self.is_modified:
-            labels.append(POLICY_MODIFIED)
+            only_overrides = self.overrides and not Policy(rules=self.rules).is_modified
+            labels.append(POLICY_CORRECTED_ONLY if only_overrides else POLICY_MODIFIED)
         if analysis not in DEFAULT_RULES:
             labels.append(UNVALIDATED_ANALYSIS)
         return tuple(labels)

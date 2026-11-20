@@ -586,13 +586,14 @@ def _forward_check(
     runs, window: Window, policy: Policy, calibrations, channels, lattice=None
 ) -> tuple[float | None, tuple[str, ...]]:
     """The forward model's predictive check over all 16 histograms (4 settings x 4 outcome pairs),
-    or (None, ()) without delay-jitter artifacts: the shape check needs the calibrated jitter, as in
-    HOM and fringe (council round 4; an accidentals-only corrected S was refused). Skipped (None,
+    or (None, (`NO_PREDICTIVE_CHECK`,)) without delay-jitter artifacts: the shape check needs the
+    calibrated jitter, as in HOM and fringe (council round 4: an accidentals-only corrected S was
+    refused), and the label says so (council round 10, Ux7). Skipped (None,
     ()) when `lattice` is 0: T3 input with no integer lattice."""
     if lattice == 0:
         return None, ()
     from dadl.forward import OUTCOME_SIGNS
-    from dadl.forward_check import PairData, delay_start, enforce, run_check
+    from dadl.forward_check import NO_PREDICTIVE_CHECK, PairData, delay_start, enforce, run_check
 
     d = window.delays_ps
     pairs = []
@@ -603,7 +604,7 @@ def _forward_check(
             declared = float(d.get(b, 0) - d.get(a, 0))
             d_cal, jitter = delay_start(calibrations, channels[a], channels[b])
             if jitter is None:
-                return None, ()
+                return None, (NO_PREDICTIVE_CHECK,)
             pairs.append(PairData(
                 f"{key[0]},{key[1]} {a}/{b}", _as_sorted(tags[a]), _as_sorted(tags[b]), declared, window.width_ps,
                 d_cal - declared, jitter, lattice_ps=lattice, t3_period_ps=run_t3_period(tags),

@@ -275,3 +275,64 @@ def test_analyze_labels_a_dark_dead_time_far_below_the_declared_one():
     labels = _dead_time_far_below_labels(cset, setup, ("A+", "A-", "B+", "B-"))
     assert len(labels) == 1 and labels[0].startswith("the dark dead time of A+") and "below half the declared" in labels[0]
     assert _dead_time_far_below_labels(None, setup, ("A+",)) == ()
+
+
+# --- Council round 10 ---------------------------------------------------------------------------
+
+ROOT_README = Path(__file__).resolve().parents[2] / "README.md"
+
+
+def _labels_table() -> str:
+    text = ROOT_README.read_text(encoding="utf-8")
+    start = text.index("**Labels and refusals.**")
+    return text[start : text.index("\n\n", text.index("| --- |", start))]
+
+
+@pytest.mark.skipif(not ROOT_README.exists(), reason="repository README not present")
+def test_every_override_name_is_in_the_readme_table_and_the_help(capsys):
+    # Council round 10 (Ux9, Fix 5): the README table listed 4 of the 9 names `--allow` accepts, and
+    # the help one example.
+    from dadl.guardrails import KNOWN_CORRECTIONS
+
+    table = _labels_table()
+    with pytest.raises(SystemExit):
+        main(["analyze", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    for name in sorted(KNOWN_CORRECTIONS):
+        assert f"`{name}`" in table, name
+        assert name in help_text, name
+    assert "--accept-misfit" in table and "--allow-condition-mismatch" in table
+
+
+def test_analyze_prints_overrides_and_says_when_allow_does_nothing(tmp_path, capsys):
+    # Council round 10 (Ux1, Ux2): analyze printed only "Policy: ... (modified)", and raw S carried
+    # "policy modified" under --allow with no calibrations at all.
+    from dadl.guardrails import POLICY_CORRECTED_ONLY
+
+    tags = tmp_path / "run.npz"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    capsys.readouterr()
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--allow", "dead_time=x is the reason"]) == 0
+    out = capsys.readouterr().out
+    raw_block = out.split("Policy:")[0]
+    assert "policy modified" not in raw_block and POLICY_CORRECTED_ONLY in raw_block
+    assert "  Overrides:\n    dead_time: x is the reason\n" in out
+    assert "--allow had no effect: no corrected value" in out
+    # One label per line.
+    assert "  Labels:\n    - " in out
+
+
+def test_an_error_follows_the_header_in_a_redirected_log(tmp_path):
+    # Council round 10 (Ux13): stdout is flushed before the error goes to stderr; in a log written
+    # with `> log.txt 2>&1` the error landed above the "DADL ... analyze" header.
+    import subprocess
+    import sys
+
+    tags = tmp_path / "run.npz"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    log = tmp_path / "log.txt"
+    with open(log, "w") as f:
+        code = subprocess.run([sys.executable, "-m", "dadl", "analyze", "chsh-spad", "--tags", str(tags),
+                               "--allow", "dead_time"], stdout=f, stderr=subprocess.STDOUT).returncode
+    text = log.read_text()
+    assert code == 1 and -1 < text.index("analyze: ") < text.index("dadl: error: --allow needs")

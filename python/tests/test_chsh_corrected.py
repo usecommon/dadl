@@ -392,8 +392,10 @@ def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
     # Under the override the gap check passes it, labelled; its dead fraction (0.74) is then
     # refused (council round 6, R1 b).
     labels, counts = check_dead_time_gaps(long, IDS, [runs[k] for k in runs], analysis="chsh", policy=loose)
-    # The 1 us point is also above the gaps: labelled (council round 8, DEAD_TIME_ABOVE_GAPS).
-    rest = tuple(lab for lab in labels if not lab.startswith("the dark dead time of"))
+    # The 1 us point is also above the gaps; a channel with a gap problem no longer carries
+    # DEAD_TIME_ABOVE_GAPS too (council round 10, Rg2).
+    assert not any(lab.startswith("the dark dead time of") for lab in labels)
+    rest = labels
     assert len(rest) == 1 and rest[0].startswith("dead time contradicted by the analysed gaps, accepted: dead time 1000 ns")
     assert OUTSIDE_VALIDITY not in labels and len(counts["dead_time_gap_problems"]) == 4
     assert 45_000 < counts["min_gap_ps"]["A+"] < 51_000
@@ -697,3 +699,45 @@ def test_chsh_and_the_gap_check_do_not_modify_the_caller_s_tags(data):
     chsh(runs, WINDOW, POLICY, calibrations=cset, channels=IDS, seed=1)
     check_dead_time_gaps(cset, IDS, [runs[k] for k in runs], analysis="chsh", policy=POLICY)
     assert all(np.array_equal(runs[k][c], before[k][c]) for k in runs for c in runs[k])
+
+
+# --- Council round 10 ---------------------------------------------------------------------------
+
+
+def test_missing_pairs_say_how_to_proceed_and_no_check_is_labelled(data):
+    # Council round 10 (Ux3): the refusal for three missing delay-jitter pairs had no remedy. (Ux7):
+    # without delay-jitter artifacts the predictive check does not run, and the label says so.
+    from dadl.calibration.dark import KIND as DARK_KIND
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.forward_check import NO_PREDICTIVE_CHECK
+
+    runs, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    one_pair = CalibrationSet(cset.analysis, tuple(
+        m for m in cset.members if m.kind == DARK_KIND or set(m.channels) == {IDS["A+"], IDS["B+"]}
+    ), cset.labels)
+    with pytest.raises(ValueError, match=r"take a heralding run for each missing pair, or move the delay-jitter "
+                       r"artifacts \(\.json and \.posterior\.npy\) out of the folder"):
+        chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=one_pair, channels=IDS, seed=1)
+    darks = CalibrationSet(cset.analysis, tuple(m for m in cset.members if m.kind == DARK_KIND), cset.labels)
+    r = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=darks, channels=IDS, seed=1)
+    assert NO_PREDICTIVE_CHECK in r.corrected_labels and "forward_check_p" not in r.counts
+    full = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    assert NO_PREDICTIVE_CHECK not in full.all_labels
+    assert all(m.kind != DELAY_KIND for m in darks.members)
+
+
+def test_raw_s_under_a_correction_override_is_not_marked_policy_modified():
+    # Council round 10 (Ux2): raw S carried "policy modified" under --allow dead_time with no
+    # calibrations; the raw value is unchanged.
+    from dadl.guardrails import POLICY_CORRECTED_ONLY
+
+    runs = simulate_chsh(SRC, dict.fromkeys(IDS, DET), 0.02, np.random.default_rng(3), SETTINGS)
+    r = chsh(runs, WINDOW, _policy("dead_time"), settings_deg=SETTINGS)
+    assert POLICY_MODIFIED not in r.labels and POLICY_CORRECTED_ONLY in r.labels
+    assert r.raw == chsh(runs, WINDOW, settings_deg=SETTINGS).raw
+    # Rules changed otherwise than by overrides keep "policy modified".
+    from dadl.guardrails import DEFAULT_RULES, STRICTEST
+
+    stricter = Policy(rules={**DEFAULT_RULES, "hom_visibility": STRICTEST}).allow("hom_visibility", "dead_time", "x")
+    assert stricter.labels_for("hom_visibility") == (POLICY_MODIFIED,)

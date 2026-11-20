@@ -12,9 +12,8 @@
     "version": "2"
   },
   "deadtime": {
-    "notes": "code changed, outputs byte-identical (council r9 Pf6)",
-    "sha256": "76a3145bd14aeb6ef990bfa5acec876fbd92d92aa922a13896bf4ff3b91754b6",
-    "version": "7"
+    "sha256": "b926650d5f6d21fd793968847584723990995717bf5782aaaff2f616904e3574",
+    "version": "8"
   },
   "delay": {
     "sha256": "856408d39817802a393bc4a2d28d49d0fda185523eba26a5489a40db97b4b765",

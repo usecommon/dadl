@@ -35,14 +35,17 @@ class Interval:
 
     def __str__(self) -> str:
         """The value and interval with its level, rounded so the smaller half-width shows two
-        significant figures (GUM 7.2.6; council round 6, T7). Display only: stored values keep
-        full precision."""
+        significant figures (GUM 7.2.6; council round 6, T7), and every nonzero end at least two
+        (council round 10, Rg5). Display only: stored values keep full precision."""
         level = f"{self.level:.0%} interval"
         ends = (self.value, self.low, self.high)
         widths = [w for w in (self.value - self.low, self.high - self.value) if w > 0]
         if not widths or not all(math.isfinite(x) for x in ends):
             return f"{self.value:.6g} ({level} [{self.low:.6g}, {self.high:.6g}])"
         d = 1 - math.floor(math.log10(min(widths)))
+        # A positive end never rounds to 0: every nonzero end shows two significant figures (an
+        # identified 281 ns lower end printed as [0, ...] read as an upper limit; council round 10, Rg5).
+        d = max([d] + [1 - math.floor(math.log10(abs(x))) for x in ends if x != 0])
 
         def show(x: float) -> str:
             return f"{round(x, d):.{max(d, 0)}f}"

@@ -596,6 +596,24 @@ def test_a_false_snspd_dead_time_at_a_low_rate_is_labelled(hom_snspd):
     assert counts["gap_check_floor_kind"]["A"] == "lower end (label only)"
 
 
+def test_a_channel_never_carries_both_dead_time_labels(hom_snspd):
+    # Council round 10 (Rg2): at about 4 kcps the false SNSPD identification of seed 58 carried
+    # DEAD_TIME_BELOW_DARK ("likely too large") and DEAD_TIME_ABOVE_GAPS ("uses the dark value") on the
+    # same channel: 4 dead-time labels for 2 channels (r10-reg p/r6/snspd.py, keep 0.045).
+    from dadl.forward import DEAD_TIME_ABOVE_GAPS, DEAD_TIME_ABOVE_GAPS_BOUND, DEAD_TIME_BELOW_DARK
+
+    setup, tags = hom_snspd
+    rng = np.random.default_rng(1)
+    thin = {k: {c: np.sort(v[c][rng.random(v[c].size) < 0.045]) for c in v} for k, v in tags.items()}
+    r, _ = _snspd_hom(hom_snspd, 58, thin)
+    heads = [t.split("{name}")[0] for t in (DEAD_TIME_BELOW_DARK, DEAD_TIME_ABOVE_GAPS, DEAD_TIME_ABOVE_GAPS_BOUND)]
+    dead = [lab for lab in r.corrected_labels if any(lab.startswith(h) for h in heads)]
+    assert dead
+    for name in ("A", "B"):
+        tag = f"{name} ({setup.channel_id(name)})"
+        assert sum(tag in lab for lab in dead) <= 1, dead
+
+
 def _chsh_spad_gap_check(r: int):
     from dadl.cli import example_path
     from dadl.config import load_setup
@@ -632,14 +650,14 @@ def test_an_identified_dead_time_above_the_dead_fraction_limit_is_refused():
     run = RunCounts(coincidences=50_000, offpeak_sum=1_000, offpeak_shifts=10, duration_s=0.1,
                     singles_a=1_000_000, singles_b=1_000_000)
     cset = _member_set("hom_visibility", [_dark(CA, 22_000, 300), _dark(CB, 22_000, 300, seed=1)])
-    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22.*pair term and the unmodelled paralyzable stage"):
+    with pytest.raises(GuardrailRefusal, match=r"rate x dead time = 0.22 \(limit 0.2\).*pair term and the unmodelled paralyzable stage"):
         corrected_visibility("hom_visibility", run, run, (CA, CB), calibrations=cset, policy=POLICY)
     slow = dataclasses_replace_run(run, 500_000)
     corrected_visibility("hom_visibility", slow, slow, (CA, CB), calibrations=cset, policy=POLICY)
     # The faster of the two runs sets the dead fraction (council round 7, Q3).
-    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22"):
+    with pytest.raises(GuardrailRefusal, match="rate x dead time = 0.22"):
         corrected_visibility("hom_visibility", run, slow, (CA, CB), calibrations=cset, policy=POLICY)
-    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22"):
+    with pytest.raises(GuardrailRefusal, match="rate x dead time = 0.22"):
         corrected_visibility("hom_visibility", slow, run, (CA, CB), calibrations=cset, policy=POLICY)
 
 
@@ -670,7 +688,9 @@ def test_corrected_labels_are_kept_apart_from_the_raw_ones(setup):
     r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3,
                               reference_delay_ps=20.0)
     assert FORWARD_MODEL in r.corrected_labels and FORWARD_MODEL not in r.labels
-    assert SECONDARY_V in r.corrected_labels and POLICY_MODIFIED in r.labels
+    # Council round 10 (Ux2): "policy modified" is on the corrected value, not the raw one.
+    assert SECONDARY_V in r.corrected_labels and POLICY_MODIFIED in r.corrected_labels
+    assert POLICY_MODIFIED not in r.labels
     rec = r.as_record()
     assert FORWARD_MODEL in json.loads(rec["corrected_labels"]) and FORWARD_MODEL not in json.loads(rec["labels"])
     # R4: what the calibration part leaves out, from the artifacts.
@@ -701,12 +721,45 @@ def test_fringe_forward_value_is_secondary():
     assert SECONDARY_V in c.labels
 
 
+def test_hom_and_fringe_without_dark_artifacts_say_dead_time_is_not_modelled():
+    # Council round 10 (Ux12): CHSH said so, HOM and fringe did not.
+    from dadl.forward import DEAD_TIME_UNMODELLED, chsh_model_label
+
+    run = RunCounts(coincidences=10_000, offpeak_sum=100, offpeak_shifts=10, duration_s=1.0, singles_a=10**5,
+                    singles_b=10**5)
+    low = RunCounts(coincidences=500, offpeak_sum=100, offpeak_shifts=10, duration_s=1.0, singles_a=10**5,
+                    singles_b=10**5)
+    assert DEAD_TIME_UNMODELLED.split(" not")[0] in chsh_model_label(("accidental_subtraction",))
+    for analysis in ("bell_visibility", "hom_visibility"):
+        policy = Policy.default().allow(analysis, "accidental_subtraction", "test")
+        c = corrected_visibility(analysis, run, low, (CA, CB), calibrations=None, policy=policy)
+        assert DEAD_TIME_UNMODELLED in c.labels
+    dark = _member_set("hom_visibility", [_dark(CA, 20_000), _dark(CB, 20_000, seed=1)])
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    c = corrected_visibility("hom_visibility", run, low, (CA, CB), calibrations=dark, policy=policy)
+    assert DEAD_TIME_UNMODELLED not in c.labels
+
+
 def test_calibration_part_prints_two_significant_figures():
     # Council round 6 (R4): "calibration 0.0000" read as exactly known.
     from dadl.result import Estimate
 
     text = str(Estimate(0.9198, 0.0012, 0.9175, 0.9222, stderr_statistical=0.0012, stderr_calibration=1.3e-6))
-    assert "stat 0.0012, calibration 1.3e-06" in text
+    assert "stat 0.0012, calibration part 1.3e-06 (statistical part of the artifacts only)" in text
+    # Council round 10 (Ux11): the corrected "±" is one sd, the interval 95%.
+    assert text.startswith("0.9198 ± 0.0012 (1 sd) (95%: [")
+
+
+def test_a_zero_calibration_part_prints_as_zero():
+    # Council round 10 (Rg5 a): an exactly-zero part printed as "calibration 4.4e-16".
+    from dadl.result import Estimate
+
+    for cal in (0.0, 4.4e-16, 2.2e-16):
+        text = str(Estimate(2.6947, 0.0105, 2.67, 2.71, stderr_statistical=0.0105, stderr_calibration=cal))
+        assert "calibration part 0 (" in text
+    assert "calibration part 6.3e-06" in str(Estimate(2.69, 0.01, 2.67, 2.71, 0.01, 6.3e-06))
+    # A raw value keeps its exact-interval wording and no "(1 sd)".
+    assert str(Estimate(0.92, 0.01, 0.90, 0.94)) == "0.9200 ± 0.0100 (exact 95%: [0.9000, 0.9400])"
 
 
 def test_hom_refusals_say_hom_and_how_to_drop_the_dark_artifacts():
@@ -935,7 +988,7 @@ def test_the_downward_floor_follows_the_dark_run_s_gap_law():
 
 def test_a_dark_dead_time_above_the_analysed_gaps_is_labelled():
     # Council round 8 (Ph4, Fix 7): a dark point above many analysed gaps is labelled; the
-    # correction keeps it.
+    # correction keeps it. Council round 10 (Rg2): the label states how often it fires.
     from dadl.forward import DEAD_TIME_ABOVE_GAPS, check_dead_time_gaps
 
     rng = np.random.default_rng(4)
@@ -943,7 +996,7 @@ def test_a_dark_dead_time_above_the_analysed_gaps_is_labelled():
     cset = _member_set("hom_visibility", [_dark_counted(CA, 52_000, 2_000, 2_000, 20_000.0)])
     labels, _ = check_dead_time_gaps(cset, {"A": CA}, runs, analysis="hom_visibility")
     head = DEAD_TIME_ABOVE_GAPS.split("{name}")[0]
-    assert any(lab.startswith(head) and "52 ns" in lab for lab in labels)
+    assert any(lab.startswith(head) and "52 ns" in lab and "fires on most analyses" in lab for lab in labels)
     below = _member_set("hom_visibility", [_dark_counted(CA, 49_000, 2_000, 2_000, 20_000.0)])
     labels, _ = check_dead_time_gaps(below, {"A": CA}, runs, analysis="hom_visibility")
     assert not any(lab.startswith(head) for lab in labels)

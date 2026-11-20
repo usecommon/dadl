@@ -54,6 +54,11 @@ OVERRIDE = "misfit_forward_model"
 FORWARD_MISFIT_ACCEPTED = "forward-model misfit accepted: the predictive check failed (policy modified)"
 #: Recorded in the counts (`forward_check_note`) when the check is skipped for want of a lattice.
 NO_LATTICE = "forward check skipped: no integer lattice (T3 dtime resolution not a whole number of ps)"
+#: A corrected value without delay-jitter artifacts: the check needs the calibrated peak shape, so
+#: it does not run (council round 10, Ux7).
+NO_PREDICTIVE_CHECK = (
+    "no predictive check (needs delay-jitter artifacts): crosstalk and peak-shape misfits are not tested"
+)
 #: Fewest coincidences in the fit region for a histogram to be checked.
 MIN_COUNTS = 50
 #: Adjacent bins are merged until each expects at least this many counts.

@@ -556,3 +556,24 @@ def test_no_validity_labels_collapse_into_one(tmp_path):
     s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
     ids = [m.artifact_id for m in s.members]
     assert s.labels_for(ids) == (NO_VALIDITY_MANY.format(aids=", ".join(a[:12] for a in ids)),)
+
+
+# -- council round 10 -----------------------------------------------------------------------------
+
+
+def test_an_unknown_condition_names_the_flag_and_the_override_is_recorded(tmp_path):
+    # Council round 10 (Ux5): the refusal offered only the override; (Ux1) what the override let
+    # through was printed nowhere.
+    write(make_cal(A, seed=1, conditions={"temperature_K": 233.0}), tmp_path)
+    with pytest.raises(StaleCalibration, match=r"temperature_K = 233 recorded, not given for the dataset: pass "
+                       r"--condition temperature_K=<value at acquisition>\. If a condition is unknown: .*"
+                       r"--allow calibration_outside_validity=REASON"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    loose = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "forgot the temperature")
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, policy=loose, dataset=ctx())
+    assert OUTSIDE_VALIDITY in s.labels and len(s.overridden) == 1
+    assert "temperature_K = 233 recorded, not given for the dataset" in s.overridden[0]
+    assert s.overridden[0].startswith(f"{s.members[0].kind} artifact {s.members[0].artifact_id[:12]}: ")
+    assert CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions={"temperature_K": 233.0})).overridden == ()
+    # Without the CLI hint (calibrate deadtime's use), the text is as before.
+    assert condition_mismatches({"temperature_K": 233.0}, {}) == ["temperature_K = 233 recorded, not given for the dataset"]

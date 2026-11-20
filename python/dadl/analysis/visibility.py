@@ -29,6 +29,7 @@ from dadl.guardrails import (
     ACCIDENTALS_SUBTRACTED,
     CORRECTION_NOT_COMPUTED,
     LOW_COUNTS,
+    POLICY_MODIFIED,
     SINGLE_BASIS,
     WINDOW_UNDECLARED,
     Policy,
@@ -145,6 +146,10 @@ def _finish(
         # Teaching-lab review, cycle 4: the record said nothing about what the corrected value was.
         # Council round 6 (R2): the corrected value's labels are kept apart from the raw value's.
         corrected_labels = corrected_threshold_labels(analysis, raw, corrected) + (ACCIDENTALS_SUBTRACTED,)
+        if policy.is_modified:
+            # Council round 10 (Ux2): "policy modified" stays on the corrected value; the raw value
+            # says it is unchanged (`Policy.labels_for`).
+            corrected_labels = (POLICY_MODIFIED,) + corrected_labels
     return LabelledValue(
         analysis=analysis, raw=raw, corrected=corrected, labels=labels, corrected_labels=corrected_labels,
         **policy.provenance(),
@@ -168,7 +173,7 @@ def bell_visibility(
 
     Passing `accidentals` raises GuardrailRefusal under the default policy. Only
     a policy loosened with `Policy.allow(..., reason=...)` returns a corrected
-    value, and that result is labelled "policy modified".
+    value, and that value is labelled "policy modified".
     """
     policy = policy or Policy.default()
     n_max, n_min = _counts(n_max, n_min)

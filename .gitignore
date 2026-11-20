@@ -21,6 +21,8 @@ htmlcov/
 *.ptu
 *.ttbin
 data/
+# ... except the pinned test values (council round 10, Mg1), which are not tags
+!python/tests/data/
 
 # Keys: site signing keys are never committed
 *.key

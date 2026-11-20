@@ -90,7 +90,9 @@ likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
 likelihood's (chi-square(1)) on the decided branches (above); when it reaches tau_p = 0 the
 hard-edge model is not rejected and tau_p is an upper limit (unidentified; draws uniform below
-it, a stand-in). tau_p's point, upper end and draws are capped at tau_np's. 2 ln(likelihood
+it, a stand-in). tau_p's point, upper end and draws are capped at tau_np's. When the profile
+reaches the shortest gap, tau_p's upper end is raised to tau_np's (one tick above it; council round
+10, Rg1). 2 ln(likelihood
 ratio) against the hard-edge model is recorded (`two_ln_lr_hard_edge`).
 
 **Intervals.** The 95% interval of an identified tau_p combines the profile half-widths
@@ -142,7 +144,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "7"
+METHOD_VERSION = "8"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -602,6 +604,11 @@ def calibrate_deadtime_series(
     `allow_condition_mismatch` gives a reason, which is noted. Each run is fitted below the count-rate
     maximum unless the fit past it wins by `BRANCH_MARGIN` (module docstring, "Two rates per gap
     law"). `tick_ps` is the tagger's tick when the tags do not show it (PTU T3: the dtime resolution).
+
+    On a coarse tag tick (PTU T3, about 25-80 ps), a dead time close to fully paralyzable has tau_p's
+    upper end at tau_np's upper end, one tick above the shortest recorded gap, since either stage can
+    lie up to a tick above it. The interval is then about one tick wider than the profile alone
+    (council round 10, Rg1: coverage 60 / 60 against 7-8 / 60 before).
     """
     if len(runs) < MIN_RUNS:
         raise ValueError(f"need at least {MIN_RUNS} acquisitions at different rates; paralysis shows in how the "
@@ -792,6 +799,9 @@ def calibrate_deadtime_series(
     stat_low, stat_high = (low, high) if identified else (0.0, high)
     # tau_p <= tau_np: the point, the upper end and every draw (reviews S6, D8: the profile runs up
     # to the shortest gap, which can lie above tau_np's point and upper end).
+    if high >= tau_hi:  # the profile reached the shortest gap: tau_p, like tau_np, may sit a tick above it (r10 Rg1)
+        est_p = Interval(est_p.value, est_p.low, max(est_p.high, est_np.high))
+        stat_high = max(stat_high, est_np.high)
     cap_high = min(est_p.high, est_np.high)
     est_p = Interval(min(est_p.value, est_np.value), min(est_p.low, cap_high), cap_high)
     stat_high = min(stat_high, est_np.high)

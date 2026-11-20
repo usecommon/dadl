@@ -49,8 +49,14 @@ Run the gate of a calibration or analysis whose statistics you change, on the
 CI seed, before opening the pull request. A change to a pinned calibration
 module (`MODULES` in `python/tests/test_method_versions.py`), or to shared code
 they call (`calibration/base.py`), also needs a new `METHOD_VERSION` for each
-affected method; then `python python/tests/test_method_versions.py` regenerates the table that
+affected method, unless outputs are byte-identical: re-pin the hash and add `notes`. Then
+`python python/tests/test_method_versions.py` regenerates the table that
 `test_method_versions.py` checks. Never loosen a gate to make it pass.
+
+Quick gate runs (100-200 replicates) judge corrected coverage only. The control rule of
+chsh-dead-time needs about 400 replicates: its control covers about 87.5%, and at 100 replicates
+it lands inside the band about one run in three. A FAIL on the control rule in a quick run is not
+evidence of a problem; re-run at 400 or more.
 
 The CI job `gates` passes only when every coverage and propagation job
 passed. Once it is a required check on `main`, a failed gate blocks the merge.

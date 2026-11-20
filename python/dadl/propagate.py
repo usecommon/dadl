@@ -163,21 +163,34 @@ def _modes_differ(recorded: Mapping[str, float], dataset: Mapping[str, float]) -
     return MODE_KEY in recorded and MODE_KEY in dataset and recorded[MODE_KEY] != dataset[MODE_KEY]
 
 
-def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> list[str]:
+#: What to do about a recorded condition the dataset does not give (council round 10, Ux5).
+CONDITION_NOT_GIVEN = "{key} = {value} recorded, not given for the dataset: pass --condition {target}=<value at acquisition>"
+
+
+def condition_mismatches(
+    recorded: Mapping[str, float], dataset: Mapping[str, float], *, hint: bool = False
+) -> list[str]:
     """Why a calibration's recorded conditions do not cover the dataset's (empty if they do).
 
     `tagger_MeasDesc_GlobalResolution` is the T2 tick or the T3 sync period: it is compared only
     when both sides record the same `tagger_mode`, or either records none (council round 9, Tw2).
     A lone `<name>_min_<unit>` or `<name>_max_<unit>` is compared one-sided (council round 9, Rd4).
     Values are printed to 10 significant digits (council round 7, G2: `%g` showed two sync
-    periods 1e-7 apart as equal)."""
+    periods 1e-7 apart as equal). With `hint`, a condition not given for the dataset says which
+    `--condition` to pass (`CONDITION_NOT_GIVEN`)."""
     out: list[str] = []
+
+    def not_given(key: str, value: float, target: str) -> str:
+        if hint:
+            return CONDITION_NOT_GIVEN.format(key=key, value=f"{value:.10g}", target=target)
+        return f"{key} = {value:.10g} recorded, not given for the dataset"
+
     for key, value in sorted(recorded.items()):
         if key == MODE_KEY or (key == PERIOD_KEY and _modes_differ(recorded, dataset)):
             continue
         if key.startswith("tagger_") or key.startswith("bias"):
             if key not in dataset:
-                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
+                out.append(not_given(key, value, key))
             elif not np.isclose(dataset[key], value, rtol=setting_rtol(key), atol=0.0):
                 out.append(f"{key} = {value:.10g} recorded, {dataset[key]:.10g} for the dataset")
         elif "_min_" in key or "_max_" in key:
@@ -188,12 +201,12 @@ def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, fl
                 continue  # the pair is compared once, at its _min_ key
             lo, hi = recorded.get(low_key, -math.inf), recorded.get(high_key, math.inf)
             if target not in dataset:
-                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
+                out.append(not_given(key, value, target))
             elif not lo <= dataset[target] <= hi:
                 out.append(f"{target} = {dataset[target]:.10g} outside the calibrated {lo:.10g} to {hi:.10g}")
         elif key == "temperature_K":
             if key not in dataset:
-                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
+                out.append(not_given(key, value, key))
             elif abs(dataset[key] - value) > TEMPERATURE_TOLERANCE_K:
                 out.append(f"temperature_K = {value:.10g} recorded, {dataset[key]:.10g} for the dataset (tolerance "
                            f"{TEMPERATURE_TOLERANCE_K:g} K)")
@@ -279,7 +292,8 @@ def check_detectors(
 
 
 def _check(
-    member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None, setup: Mapping[ChannelId, ChannelId]
+    member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None, setup: Mapping[ChannelId, ChannelId],
+    accepted: list[str] | None = None,
 ) -> list[str]:
     """Refuse or label one artifact for this analysis; return its labels."""
     labels: list[str] = []
@@ -295,7 +309,7 @@ def _check(
     raw = {i[0] for i in cal.inputs if len(i) > 1 and i[1] in _RAW_ROLES}
     problems: list[str] = detector_mismatches(member, setup)
     if dataset is None:
-        return labels + _outside(problems, cal.kind, aid, analysis, rule)
+        return labels + _outside(problems, cal.kind, aid, analysis, rule, accepted)
     shared = raw & dataset.input_sha256
     if shared:
         raise GuardrailRefusal(
@@ -323,9 +337,9 @@ def _check(
     # must match in both (council round 5, V5).
     extra = (valid or {}).get("conditions") or {}
     merged = {**cal.conditions, **extra}
-    found = condition_mismatches(cal.conditions, dataset.conditions)
+    found = condition_mismatches(cal.conditions, dataset.conditions, hint=True)
     if extra:
-        found += condition_mismatches(merged, dataset.conditions)
+        found += condition_mismatches(merged, dataset.conditions, hint=True)
     changed = clock_changes(merged, dataset.conditions) if dataset.t3_cw and cal.kind in CLOCK_FREE_KINDS else None
     if changed:
         found = [f for f in found if not f.startswith(f"{PERIOD_KEY} = ")]
@@ -337,18 +351,24 @@ def _check(
         problems += tagger
     elif tagger:
         labels.append(OTHER_TAGGER)
-    return labels + _outside(problems, cal.kind, aid, analysis, rule)
+    return labels + _outside(problems, cal.kind, aid, analysis, rule, accepted)
 
 
-def _outside(problems: list[str], kind: str, aid: str, analysis: str, rule) -> list[str]:
-    """Refuse an artifact that does not cover the dataset, or label it under the override."""
+def _outside(
+    problems: list[str], kind: str, aid: str, analysis: str, rule, accepted: list[str] | None = None
+) -> list[str]:
+    """Refuse an artifact that does not cover the dataset, or label it under the override (and add
+    the problems to `accepted`, for `CalibrationSet.overridden`)."""
     if not problems:
         return []
     if "calibration_outside_validity" not in rule.allowed_corrections:
+        unknown = any("pass --condition" in p for p in problems)
         raise StaleCalibration(
             f"{kind} artifact {aid} does not cover this dataset: {'; '.join(problems)}. "
-            f"{override_hint(analysis, 'calibration_outside_validity')}"
+            f"{'If a condition is unknown: ' if unknown else ''}{override_hint(analysis, 'calibration_outside_validity')}"
         )
+    if accepted is not None:
+        accepted.extend(f"{kind} artifact {aid}: {p}" for p in problems)
     return [OUTSIDE_VALIDITY]
 
 
@@ -402,6 +422,9 @@ class CalibrationSet:
     dataset: DatasetContext | None = None
     #: Labels each artifact's checks added, by artifact ID (`labels_for`).
     member_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: What `calibration_outside_validity` let through: "<kind> artifact <id>: <problem>", one per
+    #: problem (printed by `dadl analyze`; council round 10, Ux1).
+    overridden: tuple[str, ...] = ()
 
     def labels_for(self, artifact_ids: Iterable[str]) -> tuple[str, ...]:
         """The set's labels, without those that only artifacts outside `artifact_ids` added (council
@@ -471,8 +494,9 @@ class CalibrationSet:
         members = list({m.artifact_id: m for m in members}.values())
         labels: list[str] = []
         per: dict[str, tuple[str, ...]] = {}
+        accepted: list[str] = []
         for m in members:
-            per[m.artifact_id] = tuple(_check(m, analysis, policy, dataset, setup))
+            per[m.artifact_id] = tuple(_check(m, analysis, policy, dataset, setup, accepted))
             labels += per[m.artifact_id]
         if skipped_series:
             labels.append(SERIES_UNUSED)
@@ -481,7 +505,7 @@ class CalibrationSet:
         if policy.is_modified:
             labels.insert(0, POLICY_MODIFIED)
         return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None, dataset,
-                   MappingProxyType(per))
+                   MappingProxyType(per), tuple(accepted))
 
     @property
     def artifact_ids(self) -> tuple[str, ...]:

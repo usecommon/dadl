@@ -128,16 +128,24 @@ def test_analyze_with_calibrations(tmp_path, capsys):
     assert main(["calibrate", "pairs", str(setup), "--tags", str(her), "--no-analysers", "--herald", "A", "--signal", "B", "--out", str(art)]) == 0
     assert main(["simulate", str(setup), "--out", str(tags)]) == 0
     capsys.readouterr()
-    # Dead time is not in the default HOM rule (decision D10): refused without --allow.
+    # Dead time is not in the default HOM rule (decision D10), and the delay-jitter artifact brings
+    # window capture, also an explicit override: one refusal names both (council round 10, Ux4: the
+    # user advocate needed a run per refusal).
     assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art)]) == 1
-    assert "dead_time" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.count("dadl: error") == 1
+    assert "--allow dead_time=REASON --allow window_capture=REASON" in err
     args = ["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art), "--allow", "dead_time=calibrated from dark runs"]
-    assert main(args) == 1  # the delay-jitter artifact brings window capture, also an explicit override
-    assert "window_capture" in capsys.readouterr().err
+    assert main(args) == 1
+    err = capsys.readouterr().err
+    assert "--allow window_capture=REASON" in err and "dead_time=" not in err
     assert main([*args, "--allow", "window_capture=delay and jitter from a pair run"]) == 0
     out = capsys.readouterr().out
     assert "Corrected (forward model: dead time, then accidental subtraction, then window capture): V = 0.9" in out
     assert "Calibrations: " in out and "(modified)" in out
+    # Council round 10 (Ux1): the overrides and their reasons are printed.
+    assert ("  Overrides:\n    dead_time: calibrated from dark runs\n"
+            "    window_capture: delay and jitter from a pair run\n") in out
     # --allow needs a reason.
     assert main(["analyze", str(setup), "--tags", str(tags), "--allow", "dead_time"]) == 1
     # Council round 4 (S2): a dark artifact for A only gave a KeyError traceback; now the reason.

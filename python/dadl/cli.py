@@ -30,7 +30,9 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.guardrails import ACCIDENTALS_SUBTRACTED, POLICY_MODIFIED, SIMULATED_INPUT, T3_CLOCK_SOURCE
+from dadl.guardrails import (
+    ACCIDENTALS_SUBTRACTED, KNOWN_CORRECTIONS, POLICY_MODIFIED, SIMULATED_INPUT, T3_CLOCK_SOURCE,
+)
 from dadl.closed_form import chsh_expected_grid, chsh_ideal, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
@@ -59,11 +61,43 @@ def _resolve(target: str) -> Path:
 _simulate = simulate_setup
 
 
-def _print_result(result: LabelledValue, symbol: str = "S") -> None:
+def _override_lines(overrides, details: dict[str, list[str]] | None = None, indent: str = "    ") -> list[str]:
+    """One line per override, "NAME: reason", from a result's `overrides` ("analysis: NAME (reason)"),
+    each followed by what it let through (`details`, by name) (council round 10, Ux1)."""
+    lines = []
+    for text in overrides:
+        _, _, rest = text.partition(": ")
+        name, _, reason = rest.partition(" (")
+        lines.append(f"{indent}{name}: {reason[:-1] if reason.endswith(')') else reason}")
+        lines += [f"{indent}  {d}" for d in (details or {}).get(name, ())]
+    return lines
+
+
+def _from_override(label: str) -> bool:
+    """Whether a label reports something the user's `--allow` let through."""
+    from dadl.guardrails import POLICY_CORRECTED_ONLY
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    return label in (POLICY_MODIFIED, POLICY_CORRECTED_ONLY, OUTSIDE_VALIDITY) or "accepted" in label.split(":")[0]
+
+
+def _print_labels(labels, head: str, indent: str) -> None:
+    """Labels one per line, indented, under `head`, those from the user's overrides first (council
+    round 10, Ux6: an override came 6th of 7 in one semicolon-separated line)."""
+    labels = sorted(labels, key=lambda lab: not _from_override(lab))
+    if not labels:
+        print(f"{indent}{head}: none")
+        return
+    print(f"{indent}{head}:")
+    for lab in labels:
+        print(f"{indent}  - {lab}")
+
+
+def _print_result(result: LabelledValue, symbol: str = "S", details: dict[str, list[str]] | None = None) -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
     # review, cycle 10; council round 6, R2: they are now recorded apart, as corrected_labels).
-    print(f"  Labels: {'; '.join(result.labels) or 'none'}")
+    _print_labels(result.labels, "Labels", "  ")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
             f"{k} {v['coincidences_per_singles_a']:.3f}/{v['coincidences_per_singles_b']:.3f}"
@@ -77,6 +111,11 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
+    if result.overrides:
+        # Council round 10 (Ux1): only the fingerprint was printed; the reasons were nowhere.
+        print("  Overrides:")
+        for line in _override_lines(result.overrides, details):
+            print(line)
 
 
 def _warn_angles(setup: Setup) -> None:
@@ -292,7 +331,9 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print()
     _print_result(result)
     _print_forward(corrected, corrected.counts or {}, "S")
-    print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}: " + "; ".join(corrected.overrides))
+    print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}, overrides:")
+    for line in _override_lines(corrected.overrides, indent="      "):
+        print(line)
     worst = max(d.dead_time_ps * 1e-12 * (setup.source.pair_rate_per_s * d.efficiency / 2 + d.dark_rate_cps) for d in setup.detectors.values())
     print(
         f"  Dead time not corrected: {QUICKSTART_CHSH_DARK_CPS_NOTE}; at these rates about {worst:.2%} of the time is dead."
@@ -314,8 +355,9 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
     print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a heralding run (no")
     print("  analysers): `dadl simulate chsh-spad --heralding --duration-s 2 --out her.npz`, then")
-    print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out artifacts/`.")
-    print(f"  {CHSH_FOUR_PAIRS}")
+    print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out pairs/`.")
+    print(f"  {CHSH_FOUR_PAIRS} Hence its own folder: `analyze --calibrations artifacts/` corrects without window")
+    print("  capture until pairs/ holds all four pairs; then pass both folders.")
     print(f"  Overview: {SITE}")
     return 0
 
@@ -980,7 +1022,7 @@ def _print_corrected_labels(result: LabelledValue) -> None:
     from dadl.forward import FORWARD_MODEL
 
     shown = [lab for lab in result.corrected_labels if lab not in (FORWARD_MODEL, ACCIDENTALS_SUBTRACTED)]
-    print(f"    Labels of the corrected value: {'; '.join(shown) or 'none'}")
+    _print_labels(shown, "Labels of the corrected value", "    ")
 
 
 def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> None:
@@ -1031,6 +1073,53 @@ def _dead_time_far_below_labels(cset, setup: Setup, names) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _print_no_effect(args: argparse.Namespace, result: LabelledValue) -> None:
+    if args.allow and result.corrected is None:
+        print("  --allow had no effect: no corrected value")
+
+
+def _preflight_corrections(sources, analysis: str, policy, channels) -> None:
+    """Refuse once, naming every `--allow` the calibrations need (council round 10, Ux4: HOM took three
+    runs, one refusal each). Asks `Policy.check_correction` about each correction the artifacts for
+    `channels` imply: dead time (dark artifacts), accidental subtraction (any corrected value) and
+    window capture (delay-jitter artifacts)."""
+    from dadl.artifact import load_calibration
+    from dadl.calibration.dark import KIND as DARK_KIND
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import REFUSAL_REASONS
+    from dadl.propagate import _artifact_files
+
+    wanted = set(channels)
+    kinds = {cal.kind for cal in map(load_calibration, _artifact_files(sources)) if wanted & set(cal.channels)}
+    needed = (["dead_time"] if DARK_KIND in kinds else []) + ["accidental_subtraction"]
+    needed += ["window_capture"] if DELAY_KIND in kinds else []
+    missing = []
+    for name in needed:
+        try:
+            policy.check_correction(analysis, name)
+        except GuardrailRefusal:
+            missing.append(name)
+    if missing:
+        why = REFUSAL_REASONS.get(analysis, "corrections are secondary values, allowed one by one")
+        raise GuardrailRefusal(
+            f"these calibrations need corrections the policy does not allow for '{analysis}' ({why}): pass "
+            + " ".join(f"--allow {name}=REASON" for name in missing)
+            + " (in Python, Policy.allow); see docs/design.md, 'Scientific guardrails'."
+        )
+
+
+def _override_details(cset, counts: dict | None) -> dict[str, list[str]]:
+    """What the validity and gap-test overrides let through, by override name (council round 10, Ux1)."""
+    out: dict[str, list[str]] = {}
+    if cset is not None and cset.overridden:
+        out["calibration_outside_validity"] = list(cset.overridden)
+    problems = (counts or {}).get("dead_time_gap_problems")
+    if problems:
+        out["dead_time_contradicted"] = list(problems)
+    return out
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
@@ -1044,6 +1133,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     policy = _policy(analysis, args.allow)
     names = ("A", "B") if setup.analysis_type == "hom" else ("A+", "A-", "B+", "B-")
     used = [setup.channel_id(name) for name in names]
+    if args.calibrations:
+        _preflight_corrections(args.calibrations, analysis, policy, used)
     cset = (
         _calibration_set(args, runs, _resolve(args.setup), analysis, policy, used, setup.source_type)
         if args.calibrations else None
@@ -1065,8 +1156,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print("  The tags are trusted as given.")
         print()
         print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
-        _print_result(result, "V")
+        _print_result(result, "V", _override_details(cset, counts))
         _print_hom_extras(result, counts, setup)
+        _print_no_effect(args, result)
         # Council round 6 (R8): as CHSH prints for its window.
         print(
             "  The dip and reference delays and the window must be declared before acquisition; choosing them from "
@@ -1084,9 +1176,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     _warn_angles(setup)
     print("  The tags are trusted as given; the headline is raw S." if cset is not None else "  The tags are trusted as given; raw S only.")
     print()
-    _print_result(result)
+    _print_result(result, "S", _override_details(cset, result.counts))
     if result.corrected is not None:
         _print_forward(result, result.counts or {}, "S")
+    _print_no_effect(args, result)
     print("  Inputs: " + ", ".join(f"{k} {v[:12]}" for k, v in result.inputs.items()))
     print(
         "  Choosing the window, delays or run after seeing the data inflates false violations (best of 72 "
@@ -1171,7 +1264,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "<name>_min_<unit> / <name>_max_<unit>. Other recorded names are labelled 'recorded, not compared'")
     an.add_argument(
         "--allow", action="append", default=[], metavar="CORRECTION=REASON",
-        help="loosen the default policy for this analysis (e.g. dead_time='calibrated from dark runs'); labelled 'policy modified'",
+        help="loosen the default policy for the corrected value (e.g. dead_time='calibrated from dark runs'); "
+        "printed with its reason and labelled 'policy modified'. Names: " + ", ".join(sorted(KNOWN_CORRECTIONS)),
     )
     an.set_defaults(func=cmd_analyze)
 
@@ -1266,6 +1360,8 @@ def main(argv: list[str] | None = None) -> int:
     except (DadlError, ValueError, OverflowError, OSError) as exc:
         # Library input errors (ValueError, OverflowError) reach CLI users as a message, not a
         # traceback (software review, cycle 2).
+        # Council round 10 (Ux13): in a redirected log the error landed above the header.
+        sys.stdout.flush()
         print(f"dadl: error: {exc}", file=sys.stderr)
         return 1
 

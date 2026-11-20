@@ -150,6 +150,11 @@ plainly:
   such a detector shows as a misfit. With few gaps, or when the recovery is
   close to fully paralyzable, it can pass with an effective tau_p near tau_np
   that describes the scanned rates but not rates above them.
+  On a coarse tag tick (PTU T3, about 25-80 ps), a dead time close to fully
+  paralyzable has tau_p's upper end at tau_np's upper end, one tick above the
+  shortest recorded gap, since either stage can lie up to a tick above it.
+  The interval is then about one tick wider than the profile alone (council
+  round 10, Rg1: coverage 60 / 60 against 7-8 / 60 before).
   The scan needs steady light: an attenuated CW laser with its intensity
   stable to about 1-2% over each run, not pulsed light or a mains-powered
   lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz
@@ -192,8 +197,8 @@ plainly:
   V cancel much of it.
   The forward model takes each channel's non-paralyzable dead time from the
   dark artifact. At high analysed rates the analysed gaps measure it more
-  precisely, and often show it to be shorter than the dark value (label
-  `DEAD_TIME_ABOVE_GAPS`). The pair live fraction is first order: the term
+  precisely, and often show it to be shorter than the dark value (label "the
+  dark dead time of ... is longer than ... of the analysed gaps"). The pair live fraction is first order: the term
   r_c·tau·(fa + fb) is not included. In the chsh-dead-time regime the two
   effects cancel: the corrected S covers at 95.5% with mean z −0.43
   statistical se. Neither effect is corrected alone, because each alone
@@ -361,10 +366,13 @@ plainly:
   as a bound have `value: null` and `bound: "upper"`, and draw columns that
   are stand-ins rather than a posterior are listed in `posterior.stand_in`.
   Artifacts written by 0.1.x start their validity at creation
-  (`valid_for.from` = created); this branch starts it at acquisition. For
+  (`valid_for.from` = created); unreleased versions start it at acquisition. For
   data taken between an old artifact's acquisition and its creation, pass
   the validity override or rewrite the artifact with `--supersedes`. Until
   the next release the package still reports version 0.1.1.
+  Delay artifacts from 0.1.x (method 8) still load. Their misfit flag was
+  computed before round 8's (groups - 1) degrees of freedom; refit them if
+  it matters. No method version is checked at use until M5a.
 - **Interactive use, not unattended operation yet.** Setups have exactly the
   four CHSH roles (or two HOM ones), so an 8-input tagger is calibrated as two
   setups; output is text, with no `--json`; nothing compares a calibration
@@ -473,7 +481,8 @@ validity, and a dark dead time the analysed gaps contradict is refused on its ow
 overridable).
 
 Refusals name their override; on the CLI each is `--allow NAME=REASON`, and the reason is
-recorded. The names:
+printed, and kept in the result's `overrides`. When the calibrations need several corrections
+the policy does not allow, one refusal lists every `--allow` they need. The names:
 
 | Override | What it accepts |
 | --- | --- |
@@ -510,8 +519,10 @@ time in the setup (`detectors.<name>.dead_time_ps`), DADL labels a dark dead tim
 be sure, look at the dark artifact's notes, which say when a single short gap set its bound.
 When the floor reaches below zero, nothing is refused downward; the 95% lower end is then tested
 for a label only (`gap_check_floor_kind` "lower end (label only)"): it misses in 5% of channels
-by design. A dark dead time longer than many analysed gaps is labelled
-(`DEAD_TIME_ABOVE_GAPS`; see Known limits).
+by design. A dark dead time longer than many analysed gaps is labelled ("the dark dead time of
+... is longer than ... of the analysed gaps", or for a bound "the dark run bounds the dead time
+of ... below ..."; see Known limits), unless the channel already carries the lower-end label or
+a gap problem.
 
 An identified dark dead time can be wrong when the detector's dead time is far below the
 spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark runs reports a microsecond-scale dead
@@ -524,6 +535,44 @@ refused: there the pair term and the unmodelled paralyzable stage are not truste
 dead time this long is often a false identification. Correcting with a series dead-time
 calibration is not yet supported. To correct the rest, move the dark artifacts out
 of the calibrations folder.
+
+**Labels and refusals.** What `dadl analyze` prints (opening words), whether it refuses or labels,
+which value it qualifies, what to do, and the override (`--allow NAME=REASON`). Labels are printed
+one per line, those from your overrides first, then the fixed "Calibration part excludes" list.
+
+| Printed (opening words) | Kind | Value | What to do | Override |
+| --- | --- | --- | --- | --- |
+| "these calibrations need corrections the policy does not allow" | refusal | corrected | add every `--allow` it lists, with your reason | `dead_time`, `accidental_subtraction`, `window_capture` |
+| "Correction '...' is not allowed" | refusal (Python API) | corrected | `Policy.allow(analysis, NAME, reason)` | any name here |
+| (none) | — | — | known names that no analysis applies yet: afterpulsing is labelled "not in the forward model", efficiencies are not corrected; allowing them only changes the policy fingerprint | `afterpulse`, `efficiency` |
+| "Overrides:" | printout | — | the names and reasons you passed, with what each let through | — |
+| "policy loosened for the corrected value only; raw value unchanged" | label | raw | nothing: overrides only allow corrections | any |
+| "policy modified" | label | corrected | quote it with the value | any |
+| "--allow had no effect: no corrected value" | printout | — | nothing was corrected | any |
+| "... artifact ... does not cover this dataset" | refusal | corrected | pass the dataset's `--acquired` and `--condition NAME=VALUE`, or use an artifact that covers it | `calibration_outside_validity`; in `calibrate deadtime`, `--allow-condition-mismatch` for the dark artifact |
+| "calibration outside its validity" | label | corrected | the Overrides lines say what was overridden | `calibration_outside_validity` |
+| "... artifact ... is a misfit" | refusal | corrected | re-take that calibration run | `misfit_calibration`; `calibrate --accept-misfit` writes such an artifact |
+| "misfit calibration accepted" | label | corrected | quote it with the value | `misfit_calibration` |
+| "the dark artifacts do not describe the analysed detectors" | refusal | corrected | a dark run of the analysed detectors, or move the dark artifacts out | `dead_time_contradicted` |
+| "dead time contradicted by the analysed gaps, accepted" | label | corrected | quote it with the value | `dead_time_contradicted` |
+| "the dead time of ... ; at the recorded rate, rate x dead time = ..." | refusal | corrected | move the dark artifacts out (each `.json` with its `.posterior.npy`) to correct the rest | — |
+| "the analysed gaps put the dead time of ... below the dark artifact's 95% lower end" | label | corrected | a longer dark run, or an illuminated calibration for an SNSPD | — |
+| "the dark dead time of ... is longer than ... of the analysed gaps" | label | corrected | none needed (see Known limits) | — |
+| "the dark run bounds the dead time of ... below ..." | label | corrected | none needed (see Known limits) | — |
+| "dead time known only as an upper limit" | label | corrected | quote the range from zero to the bound | — |
+| "dead time (no dark artifacts) not modelled" | label | corrected | add dark artifacts to correct it | — |
+| "no predictive check (needs delay-jitter artifacts)" | label | corrected | add delay-jitter artifacts for the check | — |
+| "delay-jitter artifacts are given but not for ..." | refusal | corrected | a heralding run for each missing pair, or move the delay-jitter artifacts out | — |
+| "the forward model does not fit the analysed coincidences" | refusal | corrected | find what the model lacks (crosstalk, an IRF tail, drift) | `misfit_forward_model` |
+| "the calibrated delays do not match the analysed pair peaks" | refusal | corrected | recalibrate the delays | `misfit_forward_model` |
+| "the off-peak windows are not flat" | refusal | corrected | CW light only; see Known limits | `misfit_forward_model` |
+| "forward-model misfit accepted", "delay drift accepted", "off-peak windows not flat, accepted" | label | corrected | quote it with the value | `misfit_forward_model` |
+| "T3 input from a sync source" | refusal | corrected | declare `source.type: cw` if the sync is a clock only | — |
+| "simulated data" | label | raw | — | — |
+
+Calibrate and analyze name two overrides differently: `calibrate --accept-misfit` corresponds to
+`misfit_calibration`, and `calibrate deadtime --allow-condition-mismatch` to
+`calibration_outside_validity`.
 
 CHSH results, raw and corrected, add these keys to `counts`:
 

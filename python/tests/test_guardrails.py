@@ -16,6 +16,7 @@ from dadl.guardrails import (
     DEFAULT_POLICY_FINGERPRINT,
     DEFAULT_RULES,
     NEAR_THRESHOLD,
+    POLICY_CORRECTED_ONLY,
     POLICY_MODIFIED,
     STRICTEST,
     THRESHOLD_AFTER_CORRECTION,
@@ -58,7 +59,9 @@ def test_loosened_policy_is_never_silent():
     result = bell_visibility(N_MAX, N_MIN, accidentals=ACCIDENTALS, policy=policy)
     assert result.raw.value == pytest.approx(0.45)
     assert result.corrected.value == pytest.approx(0.82, abs=1e-3)
-    assert POLICY_MODIFIED in result.labels
+    # Council round 10 (Ux2): on the corrected value; the raw value is marked unchanged.
+    assert POLICY_MODIFIED in result.corrected_labels and POLICY_MODIFIED not in result.labels
+    assert POLICY_CORRECTED_ONLY in result.labels
     assert THRESHOLD_AFTER_CORRECTION in result.corrected_labels
     assert result.overrides == ("bell_visibility: accidental_subtraction (reproducing Thompson's example)",)
 

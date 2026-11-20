@@ -45,12 +45,19 @@ class Estimate:
 
     def __str__(self) -> str:
         text = f"{self.value:.4f} ± {self.stderr:.4f}"
+        if self.stderr_calibration is not None:
+            # A corrected value's "±" is one sd; its interval is 95% (council round 10, Ux11).
+            text += " (1 sd)"
         if self.low is not None and self.high is not None:
             kind = "95%" if self.stderr_calibration is not None else "exact 95%"
             text += f" ({kind}: [{self.low:.4f}, {self.high:.4f}])"
         if self.stderr_calibration is not None:
-            # Two significant figures: "0.0000" read as exactly known (council round 6, R4).
-            text += f" [stat {self.stderr_statistical:.2g}, calibration {self.stderr_calibration:.2g}]"
+            # Two significant figures: "0.0000" read as exactly known (council round 6, R4). A part
+            # below 1e-12 of the value is floating-point noise, printed as 0 (council round 10, Rg5).
+            cal = self.stderr_calibration
+            shown = "0" if cal == 0 or abs(cal) < 1e-12 * abs(self.value) else f"{cal:.2g}"
+            text += (f" [stat {self.stderr_statistical:.2g}, calibration part {shown} (statistical part of the "
+                     "artifacts only)]")
         return text
 
     def __format__(self, spec: str) -> str:

@@ -265,16 +265,19 @@ def forward_check(
     (`dadl.forward_check`): the adjusted p-value and labels; refuses a misfit the policy does not allow.
 
     Runs only when a delay-jitter calibration gives the peak shape the model uses (window capture);
-    without one the model makes no claim about the shape (p is None). `lattice_ps` is the runs'
-    lattice (`dadl.data.runs_lattice`); at 0 (no integer lattice) the check is skipped (p None)."""
-    from dadl.forward_check import PairData, delay_start, enforce, run_check
+    without one the model makes no claim about the shape (p is None, labelled `NO_PREDICTIVE_CHECK`;
+    council round 10, Ux7). `lattice_ps` is the runs' lattice (`dadl.data.runs_lattice`); at 0 (no
+    integer lattice) the check is skipped (p None)."""
+    from dadl.forward_check import NO_PREDICTIVE_CHECK, PairData, delay_start, enforce, run_check
     from dadl.guardrails import Policy as _Policy
 
     a, b = names
     declared = float(delays_ps.get(b, 0) - delays_ps.get(a, 0))
     d_cal, jitter = delay_start(calibrations, *channels)
-    if jitter is None or lattice_ps == 0:
+    if lattice_ps == 0:
         return None, ()
+    if jitter is None:
+        return None, (NO_PREDICTIVE_CHECK,)
     pairs = [
         PairData(name, _as_sorted(run[a]), _as_sorted(run[b]), declared, window_ps, d_cal - declared, jitter, offsets,
                  lattice_ps, run_t3_period(run))

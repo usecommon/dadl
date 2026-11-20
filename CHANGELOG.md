@@ -7,10 +7,35 @@ and is versioned separately from the packages.
 
 ## Unreleased
 
-Artifacts written by 0.1.x start their validity at creation (`valid_for.from` = created); this
-branch starts it at acquisition. For data taken between an old artifact's acquisition and its
-creation, pass the validity override or rewrite the artifact with `--supersedes`. Until the next
-release the package still reports version 0.1.1.
+### Behaviour changes since 0.1.1
+
+Delay artifacts from 0.1.x (method 8) still load. Their misfit flag was computed before round 8's
+(groups - 1) degrees of freedom; refit them if it matters. No method version is checked at use
+until M5a.
+
+- New refusals: an identified dark dead time above a 20% dead fraction (rate x dead time); T3
+  input without an explicit `source.type: cw` (the templates' `spdc-cw` no longer counts); the T3
+  range and a divided T3 sync in `calibrate dark` and `calibrate deadtime`; off-peak windows that
+  are not flat (pulsed light), now in CHSH too; analysed gaps that contradict the dark dead time.
+- A new override, `dead_time_contradicted`; `calibration_outside_validity` no longer covers the
+  gap tests.
+- Refusal hints give the CLI form (`--allow NAME=REASON`); a recorded condition the dataset does
+  not give names the `--condition` to pass.
+- Method versions: delay `xcorr-gaussian-mle` 8 -> 10 (T3 lattice and sync edges; T2 outputs
+  unchanged); deadtime `series-gap-mle` is new, at 8; accidentals, dark, dcr and heralding are
+  unchanged.
+- Artifacts: still `calibration/1`, with the new kind `deadtime-series`. Artifacts written by 0.1.x
+  start their validity at creation (`valid_for.from` = created); unreleased versions start it at
+  acquisition. For data taken between an old artifact's acquisition and its creation, pass the
+  validity override or rewrite the artifact with `--supersedes`.
+- Known limit: analyses hold all tags in memory (about 80-150 GB for a 10-minute 1 Mcps CHSH run;
+  chunked analysis in M9).
+- The package still reports version 0.1.1 until the next release (owner item O3).
+- Round 10: `dadl analyze` prints the overrides with their reasons and what each let through; one
+  refusal lists every `--allow` the calibrations need; raw values are no longer labelled "policy
+  modified" (they say "policy loosened for the corrected value only; raw value unchanged", and
+  the corrected value keeps "policy modified"); labels print one per line; the corrected "±" is
+  marked "(1 sd)".
 
 ### Phase 3, M0: inference library benchmark
 
@@ -456,6 +481,40 @@ release the package still reports version 0.1.1.
     with 100% flagged), in 278 s against 371 s (chsh-spad 150 to 90 s). Off-peak p < 0.01 in 0.5%
     of clean chsh-spad and hom-snspd analyses. The named mutants and three new ones (the F
     threshold's degrees of freedom and alpha / K, the sequential stop) are all killed.
+
+- Review council round 10 (method `series-gap-mle` 8; `delay` stays 10; `accidentals`, `dark`,
+  `dcr`, `heralding` unchanged; record in
+  [docs/reviews/2026-11-phase3-council.md](docs/reviews/2026-11-phase3-council.md)):
+  - tau_p on a coarse tick: round 1's cap stopped tau_p's upper end at the shortest gap while
+    tau_np was widened a tick above it, so a nearly fully paralyzable detector on a 25-80 ps tick
+    was covered 7-8 / 60. When the profile reaches the shortest gap, tau_p's upper end is now
+    tau_np's (60 / 60); every other fit is unchanged. Limit L2 in README and the docstring;
+  - the replicate hash of round 9 was a single-platform pin (it failed on Linux in the last bits).
+    The gate replicates are compared against a pinned values file instead
+    (`python/tests/data/r8_gate_replicates.json`): integers, strings, booleans and None exactly,
+    floats to a relative 1e-9;
+  - the "dark dead time ... longer than ... of the analysed gaps" label says how often it fires,
+    has its own wording for a bound, and is left out on a channel that already carries the
+    lower-end label or a gap problem;
+  - display: an exactly-zero calibration part prints as 0, and an interval never rounds a positive
+    end to 0;
+  - `dadl analyze`: an `Overrides:` block (name, reason, and for `calibration_outside_validity` and
+    `dead_time_contradicted` what was overridden); one pre-flight refusal naming every missing
+    `--allow`; "--allow had no effect: no corrected value"; the missing-pairs refusal and the
+    condition refusal say what to do; "rate x dead time = 2.66 (limit 0.2)" for the dead-fraction
+    refusal; new corrected labels "no predictive check (needs delay-jitter artifacts)" and, on HOM
+    and fringe, "dead time (no dark artifacts) not modelled"; labels one per line, overrides first;
+    stdout flushed before an error. `--allow` help lists all nine names; README table "Labels and
+    refusals";
+  - the propagation gate's `describe` says the control rule is not decidable below about 400
+    replicates (L1, CONTRIBUTING);
+  - review record: the summary in `docs/reviews/2026-11-phase3-council.md` and the rulings and
+    reviewer reports verbatim in `docs/reviews/phase3/` (paths scrubbed), with a test that every
+    cited id resolves;
+  - gates: deadtime coverage at 1,000 replicates (CI seed) unchanged: tau_p 95.5% and tau_np 99.9% (series-spad), 94.6% and 99.0% (passive-quench); the CI regimes use a 1 ps tick, where the widening rarely applies; propagation at 200
+    replicates identical to round 9 in all five regimes, no refusals (hom-snspd 94.5/94.5,
+    hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0, hom-crosstalk 30.5/32.5
+    with 100% flagged). All 48 mutants killed (the 47 of round 9 and "drop the round-10 widening", which the 20-seed coarse-tick test kills on its own).
 
 ### Published results as executable tests
 

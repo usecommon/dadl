@@ -664,6 +664,10 @@ def test_interval_and_limit_print_their_level():
 
     assert str(Interval(39457.3, 28397.5, 41882.2)) == "39500 (95% interval [28400, 41900])"
     assert str(Interval(0.004461, 0.003512, 0.005633)) == "0.00446 (95% interval [0.00351, 0.00563])"
+    # Council round 10 (Rg5 b): an identified 281 ns lower end printed as 0, reading as an upper limit.
+    assert str(Interval(16e6, 281121, 3.2e7)) == "16000000 (95% interval [280000, 32000000])"
+    assert str(Interval(1, 0.98, 1.02)) == "1.000 (95% interval [0.980, 1.020])"
+    assert str(Interval(22000.0, 0.0, 23000.0)) == "22000 (95% interval [0, 23000])"
     limit = Calibration(kind="deadtime-series", method="m", method_version="6", channels=(CH,),
                         estimates={"dead_time_p_ps": Interval(0.0, 0.0, 772.203)}, units={"dead_time_p_ps": "ps"},
                         samples=np.zeros((1, 1)), sample_params=("dead_time_p_ps",), converged=True, ppc_pvalue=0.5,
@@ -861,3 +865,90 @@ def test_calibrate_deadtime_refuses_tags_in_ns(tmp_path, capsys):
     assert main(["calibrate", "deadtime", "chsh-spad", "--tags", str(tmp_path / "ns.npz"), "--channel", "A+",
                  "--out", str(tmp_path / "arts")]) == 1
     assert "Are the timestamps in picoseconds" in capsys.readouterr().err
+
+
+# --- Council round 10 ---------------------------------------------------------------------------
+
+_R10_BLOCK = """    if high >= tau_hi:  # the profile reached the shortest gap: tau_p, like tau_np, may sit a tick above it (r10 Rg1)
+        est_p = Interval(est_p.value, est_p.low, max(est_p.high, est_np.high))
+        stat_high = max(stat_high, est_np.high)
+"""
+
+
+def _method_7():
+    """The deadtime module without round 10's block (method 7's intervals), for the controls."""
+    import types
+
+    import dadl.calibration.deadtime as D
+
+    src = open(D.__file__, encoding="utf-8").read()
+    assert src.count(_R10_BLOCK) == 1
+    mod = types.ModuleType("dadl.calibration._deadtime_method_7")
+    mod.__file__ = D.__file__
+    exec(compile(src.replace(_R10_BLOCK, ""), D.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def _coarse_tick_scan(seed: int, tick: int, frac: float = 1.0):
+    """r10-council capfix.py: tau_np = 22000 + U(0, tick) ps off the tick grid, tau_p = frac tau_np,
+    2/5/10 Mcps for 20 ms, tags floored to the tick."""
+    rng = np.random.default_rng(seed)
+    tnp = 22_000 + int(rng.integers(0, tick))
+    tp = int(round(frac * tnp))
+    det = _det(tp, tnp, dark_rate_cps=500.0)
+    runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in (2e6, 5e6, 1e7)]
+    off = int(rng.integers(0, tick))
+    return [((r + off) // tick) * tick for r in runs], tp, tnp
+
+
+def _series(runs, module=None):
+    import dadl.calibration.deadtime as D
+
+    return (module or D).calibrate_deadtime_series(runs, CH, backend="sim", seed=1, n_draws=100)
+
+
+def _tau_p_within_tau_np(cal) -> None:
+    p, n = cal.estimates["dead_time_p_ps"], cal.estimates["dead_time_ps"]
+    assert p.value <= n.value + 1e-9 and p.high <= n.high + 1e-9
+    assert np.all(cal.samples[:, 0] <= cal.samples[:, 1])
+
+
+def _tau_p_covers(seed: int, tick: int) -> bool:
+    runs, tp, _ = _coarse_tick_scan(seed, tick)
+    cal = _series(runs)
+    _tau_p_within_tau_np(cal)
+    return cal.estimates["dead_time_p_ps"].contains(float(tp))
+
+
+def test_a_fully_paralyzable_tau_p_on_a_coarse_tick_reaches_a_tick_above_the_shortest_gap():
+    # Council round 10 (Rg1): the tau_p cap stopped at the shortest gap m while tau_np was widened a
+    # tick above it; on a 25 ps tick tau_p covered 8 of 60 fresh seeds (60 of 60 with the fix).
+    runs, tp, tnp = _coarse_tick_scan(9003, 25)
+    cal = _series(runs)
+    _tau_p_within_tau_np(cal)
+    p, n = cal.estimates["dead_time_p_ps"], cal.estimates["dead_time_ps"]
+    assert p.contains(float(tp)) and p.high == n.high
+    assert cal.conditions["dead_time_p_stat_high_ps"] == n.high
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("tick", [25, 80])
+def test_a_fully_paralyzable_tau_p_on_a_coarse_tick_covers_over_seeds(tick):
+    # Council round 10 (Rg1): 60 / 60 at both ticks (seeds 9000+); before, 8 / 60 and 7 / 60.
+    assert sum(_tau_p_covers(9000 + s, tick) for s in range(20)) >= 18
+
+
+@pytest.mark.parametrize("seed,tick,frac", [(9000, 1, 1.0), (500, 80, 0.8)])
+def test_the_tau_p_widening_costs_at_most_a_tick(seed, tick, frac):
+    # Council round 10 (Rg1): the controls. With tau_p = 0.8 tau_np on a tick of 80 the profile stops
+    # below the shortest gap and the interval equals method 7's. At tick 1 a fully paralyzable fit
+    # reaches it and the upper end moves by at most the tick (council: median width 1076 -> 1077 ps).
+    runs, _, _ = _coarse_tick_scan(seed, tick, frac)
+    new, old = _series(runs), _series(runs, _method_7())
+    _tau_p_within_tau_np(new)
+    p, q = new.estimates["dead_time_p_ps"], old.estimates["dead_time_p_ps"]
+    assert (p.value, p.low) == (q.value, q.low) and 0 <= p.high - q.high <= tick
+    if frac < 1:
+        assert p == q
+    assert new.estimates["dead_time_ps"] == old.estimates["dead_time_ps"]
+    assert np.array_equal(new.samples, old.samples)
