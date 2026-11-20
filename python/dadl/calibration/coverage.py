@@ -302,7 +302,9 @@ def pairs_coverage(
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
     r = PAIR_REGIMES[regime]
     truth = pairs_truth(regime)
-    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items() if kind not in r.skip}
+    # The misfit share is a key from the start, so the gate's Bonferroni count does not depend on
+    # whether a replicate ran (merge recomputes the gates from an empty run; council round 7, S1).
+    covered = {kind: {**dict.fromkeys(t, 0), MISFITS: 0} for kind, t in truth.items() if kind not in r.skip}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
     declared = {
@@ -352,7 +354,7 @@ IDEAL_SPACING = 2_000
 
 def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
     width = 1_000
-    covered = {"heralding_efficiency": 0}
+    covered = {"heralding_efficiency": 0, MISFITS: 0}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     for child in _children(seed, replicates, part, "ideal-accidentals"):
         sim_rng, fit_seed = child.spawn(2)
@@ -380,7 +382,7 @@ def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part:
 def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
     """DCR(T) gate: dark calibrations at each temperature, then the Arrhenius fit."""
     truth = {"dcr_ref_cps": DCR_REF_CPS, "activation_energy_ev": DCR_EA_EV}
-    covered = dict.fromkeys(truth, 0)
+    covered = {**dict.fromkeys(truth, 0), MISFITS: 0}
     channel = ChannelId("sim", 0)
     for child in _children(seed, replicates, part, "five-temperatures"):
         streams = child.spawn(len(DCR_TEMPS_K) + 1)
@@ -447,7 +449,7 @@ def deadtime_coverage(
     det = reg.detector
     truth_p = {"dead_time_p_ps": float(det.dead_time_p_ps)}
     truth_np = {"dead_time_ps": float(det.dead_time_ps)}
-    covered_p = dict.fromkeys(truth_p, 0)
+    covered_p = {**dict.fromkeys(truth_p, 0), MISFITS: 0}
     covered_np = dict.fromkeys(truth_np, 0)
     channel = ChannelId("sim", 0)
     for child in _children(seed, replicates, part, regime):
@@ -580,10 +582,16 @@ def shard_range(shard: str, replicates: int) -> range:
     return range((k - 1) * replicates // n, k * replicates // n)
 
 
-def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
+def shard_record(
+    results: list[CoverageResult], seed: int, part: range, family: str = "all", regimes: list[str] | None = None
+) -> dict:
+    """A shard's partial counts, with the family and regimes it was asked for (merge checks that
+    every result they produce is there)."""
     return {
         "seed": seed,
         "replicates": results[0].replicates if results else 0,
+        "family": family,
+        "regimes": sorted(regimes) if regimes is not None else None,
         "range": [part.start, part.stop],
         "results": [
             {"calibration": r.calibration, "covered": r.covered, "gate": list(r.gate), "at_least": r.at_least}
@@ -592,18 +600,47 @@ def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
     }
 
 
+def expected_results(family: str, regimes: list[str] | None, replicates: int, seed: int) -> dict[str, CoverageResult]:
+    """The results `run` produces for this family and regimes, with their gates from the code and
+    no replicate counted (each calibration run on an empty slice)."""
+    names = list(UNITS) if family == "all" else [family]
+    if any(n not in UNITS for n in names):
+        raise ValueError(f"unknown calibration {family!r}")
+    units = [(n, r) for n in names for r in UNITS[n] if regimes is None or r in regimes]
+    unknown = sorted(set(regimes or ()) - {r for _, r in units})
+    if unknown:
+        raise ValueError(f"unknown regime(s) {unknown} for {family!r}")
+    return {res.calibration: res for u in units for res in _unit((*u, replicates, seed, range(0)))}
+
+
 def merge(records: list[dict]) -> list[CoverageResult]:
-    """Sum shard records into gated results; refuses mixed seeds or totals and slices that do not
-    tile the replicates exactly."""
+    """Sum shard records into gated results; refuses mixed seeds, totals, families or regimes,
+    slices that do not tile the replicates exactly, a result set other than the one the family and
+    regimes produce (an empty one included), and a shard gate other than the code's. The gates
+    are the code's, not the shard file's (council round 7, S1: an empty or lax shard passed)."""
     if not records:
         raise ValueError("no shards to merge")
     seeds = {r["seed"] for r in records}
     totals = {r["replicates"] for r in records}
     if len(seeds) != 1 or len(totals) != 1:
         raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    if any("family" not in r or "regimes" not in r for r in records):
+        raise ValueError("a shard does not record its family and regimes; rerun it with this version")
+    asked = {(r["family"], tuple(r["regimes"]) if r["regimes"] is not None else None) for r in records}
+    if len(asked) != 1:
+        raise ValueError(f"shards disagree on the family or regimes: {sorted(asked, key=str)}")
+    family, regimes = asked.pop()
     replicates = totals.pop()
+    if not any(r["results"] for r in records):
+        raise ValueError("the shards hold no results")
+    expected = expected_results(family, list(regimes) if regimes is not None else None, replicates, seeds.pop())
+    found = list(dict.fromkeys(res["calibration"] for r in records for res in r["results"]))
+    if set(found) != set(expected):
+        missing, extra = sorted(set(expected) - set(found)), sorted(set(found) - set(expected))
+        raise ValueError(f"the shards' results are not those of {family} {list(regimes or ['(all)'])}: "
+                         f"missing {missing}, unexpected {extra}")
     out = []
-    for name in dict.fromkeys(res["calibration"] for r in records for res in r["results"]):
+    for name in expected:
         mine = [(r["range"], res) for r in records for res in r["results"] if res["calibration"] == name]
         nxt = 0
         for lo, hi in sorted(tuple(rng) for rng, _ in mine):
@@ -618,7 +655,13 @@ def merge(records: list[dict]) -> list[CoverageResult]:
         if any(tuple(res["gate"]) != tuple(first["gate"]) or bool(res["at_least"]) != bool(first["at_least"])
                for _, res in mine):
             raise ValueError(f"{name}: shards disagree on the gate or its rule")
-        out.append(CoverageResult(name, replicates, covered, tuple(first["gate"]), bool(first["at_least"])))
+        code = expected[name]
+        if not (np.allclose(first["gate"], code.gate, rtol=0, atol=1e-12) and bool(first["at_least"]) == code.at_least):
+            raise ValueError(f"{name}: the shards' gate {first['gate']} (at least: {first['at_least']}) is not the "
+                             f"code's {list(code.gate)} (at least: {code.at_least})")
+        if set(covered) != set(code.covered):
+            raise ValueError(f"{name}: the shards count {sorted(covered)}, the code {sorted(code.covered)}")
+        out.append(CoverageResult(name, replicates, covered, code.gate, code.at_least))
     return out
 
 
@@ -647,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes, part, log)
         if part is not None:
             with open(args.out, "w", encoding="utf-8") as fh:
-                json.dump(shard_record(results, args.seed, part), fh, indent=1)
+                json.dump(shard_record(results, args.seed, part, args.calibration, args.regimes), fh, indent=1)
             for r in results:
                 print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
             return 0

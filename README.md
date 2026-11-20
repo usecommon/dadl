@@ -45,7 +45,11 @@ experiment, its guardrails and its roadmap.
   the guardrail policy allows it. `dadl quickstart hom-snspd` simulates a HOM
   dip on two SNSPDs and analyses it from the tags.
 - **PicoQuant PTU files** (T2 and T3: PicoHarp, HydraHarp, TimeHarp 260,
-  MultiHarp) read by DADL's own adapter (phase 2; T3 unreleased).
+  MultiHarp) read by DADL's own adapter (phase 2; T3 unreleased). T3 files
+  come from a sync (usually pulsed) source. DADL models CW light: in a T3 file
+  the sync is used as a clock only. Corrected values are refused on T3 input
+  unless the setup declares `source.type: cw`; pulsed accidentals sit in side
+  peaks at multiples of the repetition period, which DADL does not yet model.
 - Guardrails that refuse invalid corrections, and record the policy
   fingerprint, overrides and window on every result.
 - **Hardware twin** (phase 2): `dadl simulate SETUP --out DIR
@@ -283,7 +287,9 @@ plainly:
   puts the first detector on input 0, the sync input of HydraHarp and
   MultiHarp devices; recordings usually start detectors at input 1.
 - **Whole-file PTU reading.** A PTU file is decoded in memory at about 100
-  bytes per record (215 with many markers): a 4 GB file needs about 100 GB.
+  bytes per record in T2 (215 with many markers): a 4 GB file needs about
+  100 GB. T3 needs up to about 170 bytes per record (it adds a sync tag per
+  occupied sync period).
   Chunked reading is planned. Unrecognised special records and a divided sync
   input mapped as a detector are refused.
 - **Tagger settings** (input offsets, trigger levels, dead-time settings, the

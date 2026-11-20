@@ -27,8 +27,10 @@ REQUIRED_KEYS = ("schema_version", "name", "source", "detectors", "analysis")
 MAX_FILE_BYTES = 1_000_000
 
 TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy", "hardware"}
-#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned).
-SOURCE_TYPES = ("spdc-cw",)
+#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned). "cw"
+#: declares CW light without naming the process; on PTU T3 input a declared type is what lets the
+#: analyses correct (council round 7, G3).
+SOURCE_TYPES = ("spdc-cw", "cw")
 HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
@@ -80,6 +82,8 @@ class Setup:
     detector_serials: dict[str, str] = field(default_factory=dict)
     #: HOM only: the path delay of the reference acquisition, far from the dip.
     reference_delay_ps: float | None = None
+    #: `source.type` as declared in the file, or None when it is left out (the default spdc-cw).
+    source_type: str | None = None
 
     def channel_id(self, name: str):
         """The ChannelId of a channel name: tagger serial (or "sim") and input number, with role and detector."""
@@ -335,4 +339,5 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         tagger=tagger,
         detector_serials=serials,
         reference_delay_ps=reference_delay,
+        source_type=src.get("type"),
     )

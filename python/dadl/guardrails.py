@@ -60,6 +60,17 @@ INTERRUPTED = (
     "interrupted: a channel has a gap far longer than its count rate allows (latch, shutdown or lost data); "
     "the result is not reliable"
 )
+#: Council round 7 (G3, G5): PTU T3 input comes from a sync (usually pulsed) source.
+T3_INPUT = "T3 input: DADL models CW light (see README)"
+T3_SOURCE_REFUSAL = (
+    "T3 input from a sync source: the side-window accidentals assume CW light; pulsed accidentals sit in side "
+    "peaks. Declare `source.type: cw` in the setup if the source is CW and the sync is a clock only"
+)
+T3_DIVIDER = (
+    "T3 sync divider {divider}: the divider convention is unverified; rates may be off by the divider"
+)
+#: Source types that declare CW light (`source_type=`, setup.yaml's `source.type`).
+CW_SOURCE_TYPES = ("cw", "spdc-cw")
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
 KNOWN_CORRECTIONS = frozenset(
@@ -345,3 +356,23 @@ def corrected_threshold_labels(
     if near:
         labels.append(near)
     return tuple(labels)
+
+
+def t3_input(runs: Mapping, source_type: str | None, corrected: bool) -> tuple[tuple[str, ...], bool]:
+    """Labels for runs read from PTU T3 files (`dadl.data.RunTags` metadata), and whether a
+    corrected value may be computed.
+
+    On T3 input a corrected value is refused (`GuardrailRefusal`) when `corrected` (one is asked
+    for) and the source is not declared CW; when it is not asked for, the second value is False
+    if the source is not declared CW. Other input passes unlabelled.
+    """
+    metas = [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m and m.get("sync_period_ps")]
+    if not metas:
+        return (), True
+    labels = [T3_INPUT]
+    dividers = sorted({int(m["sync_divider"]) for m in metas if m.get("sync_divider")})
+    labels += [T3_DIVIDER.format(divider=d) for d in dividers]
+    cw = source_type in CW_SOURCE_TYPES
+    if corrected and not cw:
+        raise GuardrailRefusal(T3_SOURCE_REFUSAL)
+    return tuple(labels), cw

@@ -66,10 +66,31 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install
         run: python -m pip install -e "./python[test]"
-      - name: Test (guardrail regressions, shared vectors, closed forms, pull study)
-        run: python -m pytest python/tests -q
+      - name: Test (guardrail regressions, shared vectors, closed forms, pull study; slow tests in python-slow)
+        run: python -m pytest python/tests -q -m "not slow and not coverage"
       - name: Quickstart smoke test
         run: dadl quickstart chsh-spad
+
+  python-slow:
+    # Council round 7 (Q9): tests marked slow (seed sweeps, scans over 15 s) run once, on Linux.
+    name: Python 3.12, slow tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1, pinned by commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.1.0, pinned by commit SHA
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "./python[test]"
+      - name: Slow tests
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+        run: python -m pytest python/tests -q -m "slow and not coverage"
 
   python-minimum:
     name: Python 3.10 with the minimum declared dependencies
@@ -86,7 +107,7 @@ jobs:
       - name: Install the floors from pyproject.toml
         run: python -m pip install "numpy==1.24.*" "scipy==1.13.*" "pyyaml==6.0.*" -e "./python[test]"
       - name: Test
-        run: python -m pytest python/tests -q
+        run: python -m pytest python/tests -q -m "not slow and not coverage"
 
   bindings:
     name: Python bindings, Rust backend (${{ matrix.os }})
@@ -116,7 +137,7 @@ jobs:
           DADL_BACKEND: rust
         run: |
           python -c "import dadl; assert dadl.backend() == 'rust'"
-          python -m pytest python/tests -q
+          python -m pytest python/tests -q -m "not slow and not coverage"
       - name: Throughput (recorded, not gated)
         run: python bindings/python/bench.py 1000000
 

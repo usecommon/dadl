@@ -22,7 +22,8 @@ Limits: two-fold HOM only (not four-fold heralded HOM between separate
 sources); a 50:50 beamsplitter (R:T imbalance caps V at 2RT / (R^2 + T^2));
 the reference delay must be small against the window minus the jitter, since
 the fixed grid loses part of the split peak at +-delay (V reads low: 0.86 at
-a 100 ps reference delay in a 200 ps window); CW sources.
+a 100 ps reference delay in a 200 ps window); CW sources (on PTU T3 input the corrected value
+needs the source declared CW: `source_type="cw"`).
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from dadl.analysis._twopoint import (
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
-from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels
+from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels, t3_input
 from dadl.propagate import CalibrationSet
 from dadl.stationarity import interrupted
 from dadl.result import LabelledValue
@@ -79,6 +80,7 @@ def hom_from_tags(
     channels: tuple[ChannelId, ChannelId] | None = None,
     seed: int = 0,
     reference_delay_ps: float | None = None,
+    source_type: str | None = None,
 ) -> tuple[LabelledValue, dict[str, float]]:
     """HOM visibility from `runs["dip"]` and `runs["reference"]` (each {"A": tags, "B": tags}).
 
@@ -94,8 +96,16 @@ def hom_from_tags(
     includes the fixed grid's capture at the dip and at the reference delay, where pairs arrive
     split by +-delay; without one, the corrected value is labelled.
 
+    On runs read from PTU T3 files (`dadl.tagfile.read_tags`) the result is labelled
+    `T3_INPUT`, and a corrected value is refused unless `source_type` declares CW light ("cw"):
+    the side-window accidentals assume CW (council round 7, G3). Without calibrations and
+    without a declaration, the default subtraction is left out.
+
     Returns the labelled result and the counts it used.
     """
+    t3_labels, cw = t3_input(runs, source_type, calibrations is not None or subtract_accidentals is True)
+    if not cw and subtract_accidentals is None:
+        subtract_accidentals = False
     if calibrations is not None:
         check_calibration_args(subtract_accidentals, channels)
         if not reference_delay_ps:
@@ -149,7 +159,7 @@ def hom_from_tags(
     else:
         result = hom_visibility(c_max, c_min, policy=policy, exposure_ratio=ratio)
     counts["subtracted"] = float(result.corrected is not None)
-    labels = result.labels + (TWO_POINT,)
+    labels = result.labels + (TWO_POINT,) + t3_labels
     if calibrations is not None:
         side_ref = shifted_coincidences(
             np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets

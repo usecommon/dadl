@@ -56,15 +56,27 @@ def data(tmp_path_factory):
     return runs, d
 
 
-def test_corrected_s_removes_the_dead_time_selection(data):
-    runs, d = data
-    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+@pytest.mark.slow
+def test_corrected_s_removes_the_dead_time_selection(tmp_path):
+    # Council round 7 (Q4): at 0.2 s the selection is about 1.6 raw standard errors, and "raw
+    # excludes the truth" held at 7 of 20 seeds. At 2 s it is about 4.7 (20 seeds: 2.6 to 7.0).
+    # The shift raw - corrected is checked against the dead-time model at the true dead time
+    # (50 ns on every channel): the calibrated correction agrees within 3 se (20 seeds: |d| < 0.9).
+    from test_forward import _dark
+
+    rng = np.random.default_rng(1001)
+    _calibrate(tmp_path, dict.fromkeys(IDS, DET), rng, dark_s=1.0, pairs_s=0.02, rate=SRC.pair_rate_per_s)
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=POLICY, dataset=CTX)
+    runs = simulate_chsh(SRC, dict.fromkeys(IDS, DET), 2.0, rng, SETTINGS)
     r = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
     raw_only = chsh(runs, WINDOW, settings_deg=SETTINGS)
     assert r.raw == raw_only.raw  # the headline is untouched
-    assert r.raw.value - 1.96 * r.raw.stderr > TRUTH  # raw S excludes the source's S (dead-time selection)
-    assert r.corrected.low <= TRUTH <= r.corrected.high
+    assert r.raw.value > TRUTH  # dead-time selection raises raw S
     assert r.corrected.value < r.raw.value
+    true = _with_darks(cset, [_dark(cid, 50_000, 1.0, seed=i) for i, cid in enumerate(IDS.values())])
+    model = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=true, channels=IDS, seed=1)
+    shift, expected = r.raw.value - r.corrected.value, r.raw.value - model.corrected.value
+    assert abs(shift - expected) < 3 * r.corrected.stderr
     assert r.corrections == ("dead_time", "accidental_subtraction", "window_capture")
     assert len(r.artifact_ids) == 8
     for label in (FORWARD_MODEL, chsh_model_label(r.corrections), POLICY_MODIFIED):
@@ -162,6 +174,11 @@ def test_a_stand_in_jitter_corrects_chsh(tmp_path):
     assert np.isfinite(c.estimate.value) and "window_capture" in c.corrections
     # Council round 5 (V3): the Monte Carlo seed and draw count go into the result's counts.
     assert c.counts["monte_carlo"] == {"seed": 0, "n_draws": 4000}
+    # Council round 7 (Q3): here the capture at the jitter bound differs from that at zero jitter,
+    # and the corrected S says so.
+    from dadl.forward import JITTER_BOUND
+
+    assert JITTER_BOUND in c.labels
 
 
 MISDECLARED_DET = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=150.0)
@@ -192,6 +209,7 @@ def test_delays_that_miss_the_pair_peaks_are_labelled():
     assert not any(lab.startswith(prefix) for lab in right.all_labels)
 
 
+@pytest.mark.slow
 def test_matched_delays_are_not_labelled():
     # chsh-spad physics (350 ps jitter, 2 ns window, afterpulsing): |raw - reweighted| stays well
     # under half a standard error.
@@ -451,3 +469,69 @@ def test_labels_of_unused_artifacts_are_left_out(data, tmp_path):
     used = [NO_VALIDITY.format(aid=aid[:12]) for aid in r.artifact_ids]
     assert len(used) == 4 and all(lab in r.corrected_labels and lab not in r.labels for lab in used)
     assert FORWARD_MODEL in r.corrected_labels and FORWARD_MODEL not in r.labels
+
+
+def test_chsh_takes_delay_artifacts_in_either_channel_order(tmp_path):
+    # Council round 7 (Q2): B+ and B- 400 ps late, declared; artifacts written (B, A) give the
+    # corrected S of artifacts written (A, B).
+    from test_forward import SIGN_DET, SIGN_LATE, assert_same_correction, sign_sets
+
+    rng = np.random.default_rng(32)
+    dets = {"A+": SIGN_DET, "A-": SIGN_DET, "B+": SIGN_LATE, "B-": SIGN_LATE}
+    pairs = {(IDS["A" + x], IDS["B" + y]): simulate_pairs(2e5, dets["A" + x], dets["B" + y], 0.05, rng)
+             for x in "+-" for y in "+-"}
+    policy = _policy("accidental_subtraction", "window_capture")
+    sets = sign_sets(tmp_path, "chsh", policy, pairs)
+    runs = simulate_chsh(PairSource(pair_rate_per_s=2e5, visibility=0.9), dets, 0.2, rng, SETTINGS)
+    window = Window(width_ps=200, source="plan", delays_ps={"B+": 400, "B-": 400})
+    ab, ba = (chsh(runs, window, policy, settings_deg=SETTINGS, calibrations=c, channels=IDS, seed=2) for c in sets)
+    assert ab.corrections == ("accidental_subtraction", "window_capture")
+    assert_same_correction((ab, ab.counts), (ba, ba.counts))
+
+
+
+# --- Council round 7 (Q3): CHSH labels and refusals through chsh() --------------------------------
+
+
+def test_chsh_labels_a_dark_dead_time_whose_lower_end_the_gaps_cross(data):
+    # 100 ns with a 95% lower end of 66 ns on 50 ns detectors: three widths below the point is under
+    # zero (not tested), the gaps fall below the lower end, and the dead fraction (0.08) is allowed.
+    from test_forward import _dark
+
+    from dadl.forward import DEAD_TIME_BELOW_DARK
+
+    runs, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    loose = _with_darks(cset, [_dark(cid, 100_000, 17_000, seed=i) for i, cid in enumerate(IDS.values())])
+    r = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=loose, channels=IDS, seed=1)
+    head = DEAD_TIME_BELOW_DARK.split("{name}")[0]
+    assert any(lab.startswith(head) for lab in r.corrected_labels)
+    assert r.counts["gap_check_floor_kind"]["A+"] == "lower end (label only)"
+
+
+def test_chsh_refuses_an_uninformative_dead_time_bound(data):
+    # The CHSH twin of the HOM test: a bound of 1 us at 750 kcps is a dead fraction of 0.75.
+    from test_forward import _dark
+
+    runs, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    bounded = _with_darks(cset, [_dark(cid, bound=1e6, seed=i) for i, cid in enumerate(IDS.values())])
+    with pytest.raises(GuardrailRefusal, match="known only below"):
+        chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=bounded, channels=IDS, seed=1)
+
+
+def test_chsh_threshold_labels_belong_to_the_corrected_value(data):
+    from dadl.guardrails import NEAR_THRESHOLD_EXACT, THRESHOLD_AFTER_CORRECTION
+
+    _, d = data
+    cset = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    # A source at S = 2.000 and a short run: the corrected interval holds the threshold at this seed
+    # (a 95% event; the label rule below holds at any seed).
+    src = PairSource(pair_rate_per_s=SRC.pair_rate_per_s, visibility=2**-0.5)
+    runs = simulate_chsh(src, dict.fromkeys(IDS, DET), 0.02, np.random.default_rng(2), SETTINGS)
+    r = chsh(runs, WINDOW, POLICY, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
+    c = r.corrected
+    assert (NEAR_THRESHOLD_EXACT in r.corrected_labels) == (c.low <= 2.0 <= c.high)
+    assert (THRESHOLD_AFTER_CORRECTION in r.corrected_labels) == (r.raw.value < 2.0 <= c.value)
+    assert NEAR_THRESHOLD_EXACT not in r.labels
+    assert c.low <= 2.0 <= c.high

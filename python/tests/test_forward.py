@@ -61,25 +61,43 @@ def setup(tmp_path_factory):
 
 
 def test_corrected_hom_recovers_the_injected_visibility(setup):
+    # Council round 7 (Q4): without a delay artifact the corrected V carries the unmodelled capture
+    # of the split reference (labelled; mean z -0.75, 69 of 80 seeds covered), so this tested a 95%
+    # event of a biased estimator at one seed. With the delay artifact the capture is modelled; the
+    # truth is asserted within 3 standard errors (20 of 20 seeds, rng 11 + 1000 s).
+    import dataclasses
+
+    from dadl.propagate import Member
+
     runs, cset = setup
+    a, b = simulate_pairs(SRC.pair_rate_per_s, DET, DET, 0.02, np.random.default_rng(12))
+    delay = calibrate_delay(a, b, (CA, CB), backend="sim", seed=1, n_draws=400)
+    full = dataclasses.replace(cset, members=cset.members + (Member("d" * 64, delay, {}),))
+    policy = POLICY.allow("hom_visibility", "window_capture", "delay and jitter from a separate pair run")
     raw_only, _ = hom_from_tags(runs, WINDOW, subtract_accidentals=False)
-    r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3, reference_delay_ps=20.0)
+    r, counts = hom_from_tags(runs, WINDOW, policy=policy, calibrations=full, channels=(CA, CB), seed=3,
+                              reference_delay_ps=20.0)
     c = r.corrected
-    # Raw is biased low by the accidentals: its exact interval excludes the truth, the corrected
-    # one contains it. Dead time nearly cancels in this ratio (live fractions 0.914 and 0.913:
-    # the reference run's higher coincidence rate offsets its higher singles), so the
-    # calibration part of the error is small.
+    # Raw is biased low by the accidentals. Dead time nearly cancels in this ratio (live fractions
+    # 0.914 and 0.913: the reference run's higher coincidence rate offsets its higher singles), so
+    # the calibration part of the error is small.
     assert r.raw.value == pytest.approx(raw_only.raw.value)
-    assert r.raw.high < TRUE_V
-    assert c.low <= TRUE_V <= c.high
+    assert r.raw.value < c.value
+    assert abs(c.value - TRUE_V) < 3 * c.stderr
+    assert CAPTURE_UNMODELLED not in r.all_labels
     assert c.stderr_calibration > 0 and c.stderr_statistical > 0
     assert c.stderr == pytest.approx(np.hypot(c.stderr_statistical, c.stderr_calibration), rel=0.3)
-    assert r.corrections == ("dead_time", "accidental_subtraction")
-    assert r.artifact_ids == cset.artifact_ids and len(r.artifact_ids) == 2
+    assert r.corrections == ("dead_time", "accidental_subtraction", "window_capture")
+    assert len(r.artifact_ids) == 3
     assert FORWARD_MODEL in r.all_labels and POLICY_MODIFIED in r.all_labels
     rec = r.as_record()
     assert rec["corrected_stderr_calibration"] == c.stderr_calibration
     assert "calibration" in rec["corrected_uncertainty"]
+    # Without the delay artifact the split reference's capture is unmodelled, and labelled.
+    r2, _ = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3,
+                          reference_delay_ps=20.0)
+    assert CAPTURE_UNMODELLED in r2.all_labels and r2.corrections == ("dead_time", "accidental_subtraction")
+    assert np.isfinite(r2.corrected.value)
 
 
 def test_the_record_carries_the_monte_carlo_seed_and_draws(setup):
@@ -115,6 +133,8 @@ def test_without_calibrations_behaviour_is_unchanged(setup):
 def test_live_fraction_closed_form():
     # 1e5 cps on each side, 50 ns dead time: (1 - 0.005)^2, times 1 + r_c tau
     assert float(live_fraction(1e5, 1e5, 50e-9, 50e-9, 1e4)) == pytest.approx(0.995**2 * (1 + 1e4 * 50e-9))
+    # Unequal dead times (council round 7, Q3): a pair is lost to the shorter one's recovery only.
+    assert float(live_fraction(1e5, 2e5, 50e-9, 20e-9, 1e4)) == pytest.approx(0.995 * 0.996 * (1 + 1e4 * 20e-9))
 
 
 def test_forward_model_closed_form_without_dead_time():
@@ -138,24 +158,21 @@ def test_fringe_correction_is_refused_under_the_default_policy():
         corrected_visibility("bell_visibility", high, low, (CA, CB), calibrations=None)
 
 
-def _bounded_set(tmp_path, dark_rate_cps):
-    """Dark artifacts whose dead time is stored only as an upper limit (too few short gaps)."""
-    rng = np.random.default_rng(5)
-    det = DetectorParams(efficiency=0.5, dark_rate_cps=dark_rate_cps, dead_time_ps=60_000)
-    for ch in (CA, CB):
-        cal = calibrate_dark(simulate_dark(det, 1.0, rng), ch, backend="sim", seed=1, n_draws=200)
-        write_artifact(cal, tmp_path, accept_misfit=True, created=dt.datetime(2026, 11, 1, tzinfo=UTC))
-    policy = POLICY.allow("hom_visibility", "misfit_calibration", "test")
-    cset = CalibrationSet.load(tmp_path, analysis="hom_visibility", dataset=DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC)), policy=policy)
-    if not all("dead_time_ps" in m.calibration.unidentified for m in cset.members):
-        pytest.skip("dead time was identified at this seed")
-    return cset, policy, rng
+def _bounded_set(tmp_path, bound_ps):
+    """Dark artifacts whose dead time is stored only as an upper limit (as a dark run with too few
+    short gaps gives it), built directly: council round 7 (Q8) found the simulated version
+    identified the dead time, and skipped, at 6 of 20 seeds."""
+    for i, ch in enumerate((CA, CB)):
+        write_artifact(_dark(ch, bound=bound_ps, seed=i), tmp_path, created=dt.datetime(2026, 11, 1, tzinfo=UTC))
+    cset = CalibrationSet.load(tmp_path, analysis="hom_visibility", dataset=DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC)), policy=POLICY)
+    assert all("dead_time_ps" in m.calibration.unidentified for m in cset.members)
+    return cset, POLICY, np.random.default_rng(5)
 
 
 def test_unidentified_dead_time_is_corrected_at_the_bound_and_reported_as_a_range(tmp_path):
     # 3,000 cps of dark counts bound the dead time below a few hundred ns; at 50k cps singles that
     # is a dead fraction of about 1%, an informative range.
-    cset, policy, rng = _bounded_set(tmp_path, 3_000.0)
+    cset, policy, rng = _bounded_set(tmp_path, 300_000.0)
     src = PairSource(pair_rate_per_s=2.0e5, visibility=TRUE_V, coherence_time_ps=2.0)
     runs = {k: simulate_hom(src, DET, DET, d, 0.5, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
     r, counts = hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
@@ -166,7 +183,7 @@ def test_unidentified_dead_time_is_corrected_at_the_bound_and_reported_as_a_rang
 def test_an_uninformative_dead_time_bound_is_refused(tmp_path):
     # 30 cps of dark counts bound the dead time only below about a millisecond: at 750k cps the
     # "range" would run from no correction to a negative live fraction.
-    cset, policy, rng = _bounded_set(tmp_path, 30.0)
+    cset, policy, rng = _bounded_set(tmp_path, 1e9)
     runs = {k: simulate_hom(SRC, DET, DET, d, 0.1, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
     with pytest.raises(GuardrailRefusal, match="known only below"):
         hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
@@ -618,6 +635,11 @@ def test_an_identified_dead_time_above_the_dead_fraction_limit_is_refused():
         corrected_visibility("hom_visibility", run, run, (CA, CB), calibrations=cset, policy=POLICY)
     slow = dataclasses_replace_run(run, 500_000)
     corrected_visibility("hom_visibility", slow, slow, (CA, CB), calibrations=cset, policy=POLICY)
+    # The faster of the two runs sets the dead fraction (council round 7, Q3).
+    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22"):
+        corrected_visibility("hom_visibility", run, slow, (CA, CB), calibrations=cset, policy=POLICY)
+    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22"):
+        corrected_visibility("hom_visibility", slow, run, (CA, CB), calibrations=cset, policy=POLICY)
 
 
 def dataclasses_replace_run(run, singles):
@@ -722,3 +744,154 @@ def test_cli_hom_prints_the_corrected_labels_and_caveats(tmp_path, capsys):
     assert "forward model" not in raw and "no validity range" not in raw
     assert "Labels of the corrected value:" in out and "Calibration part excludes: tagger timebase" in out
     assert "choosing them from the data biases V upward" in out
+
+
+# --- Council round 7 (Q2): a delay-jitter artifact in the other channel order -------------------
+
+#: B 400 ps late on 25 ps detectors: the declared window delay is +400 ps.
+SIGN_DET = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+SIGN_LATE = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=30_000, jitter_sigma_ps=25.0, delay_ps=400)
+
+
+def sign_sets(tmp_path, analysis, policy, pairs):
+    """For each order, (A, B) and (B, A), a CalibrationSet of one delay-jitter artifact per channel
+    pair, fitted from the same pair runs. `pairs` maps (id_a, id_b) to (tags_a, tags_b)."""
+    created = dt.datetime(2026, 11, 1, tzinfo=UTC)
+    ctx = DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC))
+    out = {}
+    for order in ("ab", "ba"):
+        d = tmp_path / order
+        d.mkdir()
+        for (ia, ib), (a, b) in pairs.items():
+            cal = (calibrate_delay(a, b, (ia, ib), backend="sim", seed=1, n_draws=400) if order == "ab"
+                   else calibrate_delay(b, a, (ib, ia), backend="sim", seed=1, n_draws=400))
+            write_artifact(cal, d, accept_misfit=True, created=created)
+        out[order] = CalibrationSet.load(d, analysis=analysis, dataset=ctx, policy=policy)
+    return out["ab"], out["ba"]
+
+
+def assert_same_correction(ab, ba):
+    """The corrected values of the two orders agree (only their Monte Carlo draws differ), and the
+    predictive check ran on the analysed peak in both."""
+    (r_ab, c_ab), (r_ba, c_ba) = ab, ba
+    assert np.isfinite(r_ab.corrected.value)
+    assert r_ba.corrected.value == pytest.approx(r_ab.corrected.value, abs=0.1 * r_ab.corrected.stderr)
+    assert r_ba.corrected.stderr == pytest.approx(r_ab.corrected.stderr, rel=0.05)
+    assert "forward_check_p" in c_ab and "forward_check_p" in c_ba
+    assert c_ba["forward_check_p"] == pytest.approx(c_ab["forward_check_p"], rel=1e-6)
+
+
+def test_fringe_takes_a_delay_artifact_in_either_channel_order(tmp_path):
+    # Fringe V is a ratio of two runs' signals at one capture, so a capture computed at the wrong
+    # delay cancels unless it vanishes: 10 ps detectors make a capture 700 ps off exactly 0.
+    import dataclasses
+
+    rng = np.random.default_rng(31)
+    det, late = (dataclasses.replace(d, jitter_sigma_ps=10.0) for d in (SIGN_DET, SIGN_LATE))
+    dets = {"A+": det, "A-": det, "B+": late, "B-": det}
+    pair = simulate_pairs(2e5, det, late, 0.05, rng)
+    policy = (Policy.default().allow("bell_visibility", "accidental_subtraction", "test")
+              .allow("bell_visibility", "window_capture", "test"))
+    sets = sign_sets(tmp_path, "bell_visibility", policy, {(CA, CB): pair})
+
+    def run(alpha, beta):
+        tags = simulate_chsh_setting(PairSource(pair_rate_per_s=2e5, visibility=0.95), alpha, beta, dets, 0.2, rng)
+        return {"A": tags["A+"], "B": tags["B+"]}
+
+    runs = {"max": run(0.0, 0.0), "min": run(0.0, 90.0)}
+    window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
+    ab, ba = (fringe_from_tags(runs, window, policy=policy, calibrations=c, channels=(CA, CB), seed=2) for c in sets)
+    assert ab[0].corrections == ("accidental_subtraction", "window_capture")
+    assert_same_correction(ab, ba)
+    c = ab[0].corrected
+    assert abs(c.value - 0.95) < 4 * c.stderr
+
+
+# --- Council round 7 (Q3): labels and refusals observed through the analysis path -------------
+
+
+def _with_dataset(analysis, cals):
+    """A set of these artifacts checked against a dataset context, as `CalibrationSet.load` makes it."""
+    from types import MappingProxyType
+
+    from dadl.propagate import Member
+
+    ctx = DatasetContext(acquired=dt.datetime(2026, 11, 2, tzinfo=UTC))
+    members = tuple(Member(f"{i:064x}", c, MappingProxyType({})) for i, c in enumerate(cals, start=7))
+    return CalibrationSet(analysis, members, (), True, ctx)
+
+
+def test_fringe_checks_the_dark_dead_times_against_the_analysed_gaps(fringe_setup):
+    # The fringe twin of the HOM test: refused when the gaps rule the dark dead time out, labelled
+    # when only its lower end is below them; the check's p and the dataset are recorded.
+    from dadl.errors import StaleCalibration
+    from dadl.forward import DEAD_TIME_BELOW_DARK
+
+    runs, _ = fringe_setup
+    policy = FRINGE_POLICY.allow("bell_visibility", "window_capture", "test")
+    a, b = simulate_pairs(2e5, DET, DET, 0.05, np.random.default_rng(22))
+    delay = calibrate_delay(a, b, (CA, CB), backend="sim", seed=1, n_draws=400)
+    kw = {"policy": policy, "channels": (CA, CB), "seed": 1}
+    long = _with_dataset("bell_visibility", [_dark(CA, 1e6), _dark(CB, 1e6, seed=1), delay])
+    with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
+        fringe_from_tags(runs, FRINGE_WINDOW, calibrations=long, **kw)
+    # 120 ns with a 95% lower end of 80 ns on 60 ns detectors: three widths below the point is at 0
+    # (not tested), and the gaps fall below the lower end: a label, not a refusal.
+    loose = _with_dataset("bell_visibility", [_dark(CA, 120_000, 20_000), _dark(CB, 120_000, 20_000, seed=1), delay])
+    r, counts = fringe_from_tags(runs, FRINGE_WINDOW, calibrations=loose, **kw)
+    head = DEAD_TIME_BELOW_DARK.split("{name}")[0]
+    assert any(lab.startswith(head) for lab in r.corrected_labels)
+    assert counts["gap_check_floor_kind"]["A"] == "lower end (label only)"
+    assert 0.0 <= counts["forward_check_p"] <= 1.0
+    assert counts["dataset"]["acquired"] == "2026-11-02T00:00:00+00:00"
+
+
+def test_a_wide_dead_time_range_is_labelled_on_hom():
+    # D3 range wider than the corrected value's error is labelled (the CHSH copy was the only one tested).
+    from dadl.analysis._twopoint import forward_from_counts
+    from dadl.forward import DEAD_TIME_RANGE_WIDE
+
+    high = RunCounts(200_000, 4_000, 20, 1.0, 600_000, 600_000, (20.0, -20.0))
+    low = RunCounts(20_000, 4_000, 20, 1.0, 600_000, 600_000)
+    seen = {}
+    for bound in (20_000.0, 60_000.0):
+        cset = _member_set("hom_visibility", [_dark(CA, bound=bound), _dark(CB, bound=bound, seed=1)])
+        fwd, extra = forward_from_counts("hom_visibility", high, low, (CA, CB), calibrations=cset, policy=POLICY,
+                                         seed=1, window_ps=1_000, declared_delay_ps=0.0)
+        width = abs(extra["corrected_at_bound_dead_time"] - extra["corrected_at_zero_dead_time"])
+        seen[bound] = width / fwd.estimate.stderr
+        assert (DEAD_TIME_RANGE_WIDE in fwd.labels) == (width > fwd.estimate.stderr)
+    assert seen[20_000.0] < 1.0 < seen[60_000.0] < 10.0
+
+
+def test_fringe_subtracts_each_acquisition_s_own_accidentals(fringe_setup, monkeypatch):
+    # Council round 7 (Q3): the maximum's accidentals taken from the minimum's side windows survived.
+    from dadl.analysis import fringe
+
+    runs, cset = fringe_setup
+    seen = []
+    real = fringe.forward_from_counts
+
+    def spy(analysis, high, low, *args, **kwargs):
+        seen.append((high, low))
+        return real(analysis, high, low, *args, **kwargs)
+
+    monkeypatch.setattr(fringe, "forward_from_counts", spy)
+    _, counts = fringe_from_tags(runs, FRINGE_WINDOW, policy=FRINGE_POLICY, calibrations=cset, channels=(CA, CB), seed=4)
+    (high, low), = seen
+    assert counts["accidentals_max"] != counts["accidentals"]
+    assert high.accidentals == counts["accidentals_max"] and low.accidentals == counts["accidentals"]
+
+
+def test_hom_subtracts_the_reference_s_own_accidentals(setup):
+    # Council round 7 (Q3): the reference's accidentals taken from the dip's side windows survived
+    # (equal singles in simulation); under drift they differ.
+    from dadl.calibration.accidentals import shifted_coincidences, side_offsets
+
+    runs, cset = setup
+    _, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3,
+                              reference_delay_ps=20.0)
+    ref = shifted_coincidences(np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), WINDOW.width_ps, 0, 0,
+                               side_offsets(WINDOW.width_ps))
+    assert counts["accidentals_reference"] == ref.sum() / ref.size
+    assert counts["accidentals_reference"] != counts["accidentals"]

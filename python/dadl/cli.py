@@ -36,7 +36,9 @@ from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
-from dadl.tagfile import ptu_file, read_tags, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags
+from dadl.tagfile import (
+    ptu_file, read_tags, t3_folder, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags,
+)
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -509,6 +511,21 @@ def _backend(setup, tags_path: str) -> str:
     return "hardware"
 
 
+#: Council round 7 (G5): whether a T3 file's sync period counts divided or undivided syncs is not
+#: settled (M9 item: one real divided T3 file).
+T3_DIVIDER_REFUSAL = (
+    "the T3 sync divider convention is unverified (HWSync_Divider {divider}); rates may be off by the divider. "
+    "Record dark and dead-time runs with the divider at 1, or in T2"
+)
+
+
+def _refuse_t3_divider(tags_path: str) -> None:
+    """Refuse dark, dead-time and DCR calibration from T3 files with a sync divider above 1."""
+    info = t3_folder(tags_path)
+    if info and info["sync_divider"]:
+        raise DadlError(f"{tags_path}: " + T3_DIVIDER_REFUSAL.format(divider=info["sync_divider"]))
+
+
 def _check_time_units(runs: dict, setup) -> None:
     """Refuse tags whose gaps are impossible in picoseconds for the declared dead times.
 
@@ -577,6 +594,7 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_dark
 
     setup = load_setup(_resolve(args.setup))
+    _refuse_t3_divider(args.tags)
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
     keys = setup.setting_keys
     if not 0 <= args.setting < len(keys):
@@ -679,6 +697,7 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
     from dadl.calibration.deadtime import calibrate_deadtime_series
 
     setup = load_setup(_resolve(args.setup))
+    _refuse_t3_divider(args.tags)
     runs = read_tags(args.tags, setup.channels, setup.setting_keys)
     keys = setup.setting_keys
     settings = args.settings if args.settings else [
@@ -696,6 +715,8 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
     _check_time_units(runs, setup)
     print(f"DADL {__version__} calibrate deadtime: {setup.name}, tags from {args.tags} (settings {settings})")
     write, extra, inputs = _record(args, _resolve(args.setup))
+    # Council round 7 (G1): on T3 data the tick is the dtime resolution, which the tags do not show.
+    tick = tag_tick_ps(args.tags)
     failed: list[str] = []
     for name in wanted:
         channel = setup.channel_id(name)
@@ -712,7 +733,7 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
             cal = calibrate_deadtime_series(
                 acquisitions, channel, afterpulse=afterpulse, backend=backend, seed=setup.seed,
                 conditions={"settings": float(len(settings)), **extra},
-                allow_condition_mismatch=args.allow_condition_mismatch,
+                allow_condition_mismatch=args.allow_condition_mismatch, tick_ps=tick,
             )
         except (DadlError, ValueError) as exc:
             print()
@@ -913,8 +934,22 @@ def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, ana
     if tags_path.is_file():
         hashes.add(hashlib.sha256(tags_path.read_bytes()).hexdigest())
     conditions = {**tagger_settings(args.tags), **_conditions(args.condition)}
-    dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions, input_sha256=frozenset(hashes))
+    dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions,
+                             input_sha256=frozenset(hashes), instrument=_instrument(args.tags))
     return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset, channels=channels)
+
+
+def _instrument(tags: str) -> dict[str, str]:
+    """The tagger model and serial from a folder of PTU files (as `_record` writes them), else {}."""
+    path = Path(tags)
+    files = sorted(path.glob("setting*.ptu")) if path.is_dir() else []
+    if not files:
+        return {}
+    from dadl.adapters.ptu import PtuFile
+
+    header = PtuFile(files[0]).header
+    found = {"model": header.get("HW_Type"), "serial": header.get("HW_SerialNo")}
+    return {k: str(v) for k, v in found.items() if v not in (None, "")}
 
 
 def _print_corrected_labels(result: LabelledValue) -> None:
@@ -965,7 +1000,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         channels = (setup.channel_id("A"), setup.channel_id("B")) if cset is not None else None
         result, counts = hom_from_tags(
             runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed,
-            reference_delay_ps=setup.reference_delay_ps,
+            reference_delay_ps=setup.reference_delay_ps, source_type=setup.source_type,
         )
         result = dataclasses.replace(
             result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra
@@ -983,7 +1018,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 0
     ids = {name: setup.channel_id(name) for name in ("A+", "A-", "B+", "B-")} if cset is not None else None
     result = chsh(
-        runs, setup.window, settings_deg=setup.settings_deg, policy=policy, calibrations=cset, channels=ids, seed=setup.seed
+        runs, setup.window, settings_deg=setup.settings_deg, policy=policy, calibrations=cset, channels=ids,
+        seed=setup.seed, source_type=setup.source_type,
     )
     result = dataclasses.replace(result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra)
     _warn_angles(setup)

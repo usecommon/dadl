@@ -260,3 +260,126 @@ def test_declared_tick_overrides_a_spoiled_gcd():
     a, b = a // 80 * 80, b // 80 * 80 + 30
     cal = calibrate_delay(a, b, (ChannelId("A", 0), ChannelId("B", 1)), tick_ps=80, n_draws=10)
     assert cal.conditions["tick_ps"] == 80 and any("tick grid" in n for n in cal.notes)
+
+
+# --- Council round 7: T3 input (tick, sync period, pulsed sources, dtime range, divider) ---------
+
+
+def _patch_float(path, key, value):
+    """Overwrite a float header entry in place (as the reviewers' realhead.py did)."""
+    import struct
+    from pathlib import Path
+
+    data = bytearray(Path(path).read_bytes())
+    i = data.index(key.encode().ljust(32, b"\0"))
+    struct.pack_into("<d", data, i + 40, value)
+    Path(path).write_bytes(bytes(data))
+
+
+def _t3_folder(d, sync_hz=(None, None), device="timeharp260p", n=2000):
+    """Two T3 files (25 ps dtime on the TimeHarp 260 P) at a 12.5 ns sync, the period then set to
+    1 / sync rate as an instrument measuring it would write it."""
+    from dadl.tagfile import ptu_file
+
+    d.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(1)
+    for i, hz in enumerate(sync_hz):
+        a, b = np.sort(rng.integers(0, 10**10, n)), np.sort(rng.integers(0, 10**10, n))
+        p = write_ptu(ptu_file(d, i), {1: a, 2: b}, device=device, sync_period_ps=12_500)
+        if hz is not None:
+            _patch_float(p, "MeasDesc_GlobalResolution", 1.0 / hz)
+    return d
+
+
+def test_the_t3_tick_is_the_dtime_resolution(tmp_path):
+    # G1: a measured (non-whole) sync period left a 1 ps tick, so tau_np widened by 1 ps on 25 ps data.
+    from dadl.tagfile import tag_tick_ps
+
+    whole = _t3_folder(tmp_path / "whole")
+    assert tag_tick_ps(whole) == 25 and PtuFile(whole / "setting0.ptu").tick_ps == 25
+    measured = _t3_folder(tmp_path / "measured", (79_999_870.0, 79_999_870.0))
+    # The dtime resolution, plus 1 ps for the rounding to whole ps.
+    assert tag_tick_ps(measured) == 26
+    tags = read_tags(measured, {1: "A", 2: "B"}, ("dip", "reference"))
+    assert tags["dip"].metadata["tick_ps"] == 26
+    assert tags["dip"].metadata["sync_period_ps"] == pytest.approx(1e12 / 79_999_870.0)
+
+
+def test_a_drifting_sync_period_is_one_setting_and_another_rate_is_not(tmp_path):
+    # G2: two files 10 Hz apart at 80 MHz were refused as different tagger settings.
+    from dadl.propagate import condition_mismatches
+    from dadl.tagfile import tagger_settings
+
+    a = tagger_settings(_t3_folder(tmp_path / "a", (79_999_870.0, 79_999_860.0)))
+    b = tagger_settings(_t3_folder(tmp_path / "b", (79_999_880.0, 79_999_880.0)))
+    assert condition_mismatches(a, b) == []
+    with pytest.raises(ConfigError, match=r"1.250002031e-08 in setting0.ptu, 1.315789474e-08 in setting1.ptu"):
+        tagger_settings(_t3_folder(tmp_path / "c", (79_999_870.0, 76e6)))
+    (msg,) = condition_mismatches(a, tagger_settings(_t3_folder(tmp_path / "d", (76e6, 76e6))))
+    assert "1.250002031e-08" in msg
+
+
+def test_a_t3_dtime_range_shorter_than_the_sync_period_is_refused(tmp_path):
+    # G4: a HydraHarp at 1 ps covers 32.8 ns; with a 100 ns sync, late photons are never recorded.
+    from dadl.errors import AdapterError
+    from dadl.tagfile import ptu_file
+
+    rng = np.random.default_rng(0)
+    t = np.sort(rng.integers(0, 10**10, 5000))
+    p = write_ptu(ptu_file(tmp_path, 0), {1: t, 2: t + 500}, device="hydraharp", sync_period_ps=12_500)
+    _patch_float(p, "MeasDesc_GlobalResolution", 100e-9)
+    reader = PtuFile(p)
+    tagset = reader.read()
+    assert "t3-range" in [e.kind for e in reader.events()]
+    assert "dtime range 32.77 ns < sync period 100 ns" in tagset.metadata["note"]
+    with pytest.raises(AdapterError, match="coarser"):
+        read_tags(tmp_path, {1: "A", 2: "B"}, ("dip",))
+
+
+def _t3_hom(d, extra=(), declared=None):
+    """A HOM experiment as two HydraHarp T3 files (1 ps dtime, 12.5 ns sync, marked simulated),
+    detectors on inputs 1 and 2, and its setup.yaml (source.type as `declared`)."""
+    from pathlib import Path
+
+    from dadl.sim import DetectorParams, PairSource, simulate_hom
+    from dadl.tagfile import ptu_file
+
+    det = DetectorParams(efficiency=0.8, dark_rate_cps=2e4, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    rng = np.random.default_rng(9)
+    for i, delay in enumerate((0.0, 15.0)):
+        run = simulate_hom(PairSource(pair_rate_per_s=1e5, coherence_time_ps=1.5), det, det, delay, 0.05, rng)
+        ev = []
+        for inp, t in ((1, run["A"]), (2, run["B"])):
+            t = t[t >= 0]
+            ev += [(int(x) // 12_500, "tag", inp, int(x) % 12_500) for x in t]
+        write_fixture(ptu_file(d, i), ptu.HYDRAHARP2_T3, ev, sync_period_s=12.5e-9,
+                      extra=[("DADL_Simulated", "bool", True), *extra])
+    text = Path(example_path("hom-snspd")).read_text().replace("channels: {0: A, 1: B}", "channels: {1: A, 2: B}")
+    text = text.replace("  type: spdc-cw\n", f"  type: {declared}\n" if declared else "")
+    (d / "setup.yaml").write_text(text)
+    return d / "setup.yaml"
+
+
+def test_t3_hom_corrects_only_from_a_declared_cw_source(tmp_path, capsys):
+    # G3: a pulsed T3 HOM read V 0.962 for 1, unlabelled; the source must be declared CW.
+    from dadl.guardrails import T3_INPUT
+
+    setup = _t3_hom(tmp_path)
+    assert main(["analyze", str(setup), "--tags", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert T3_INPUT in out and "Accidentals not subtracted" in out
+    _t3_hom(tmp_path, declared="cw")
+    assert main(["analyze", str(setup), "--tags", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert T3_INPUT in out and "Accidentals subtracted" in out
+
+
+def test_a_divided_t3_sync_is_refused_for_dark_and_labelled_in_analyses(tmp_path, capsys):
+    # G5: whether a divided T3 file's period counts divided syncs is unverified (M9).
+    setup = _t3_hom(tmp_path, extra=[("HWSync_Divider", "int", 2)], declared="cw")
+    assert main(["calibrate", "dark", str(setup), "--tags", str(tmp_path), "--out", str(tmp_path / "art")]) == 1
+    assert "T3 sync divider convention is unverified" in capsys.readouterr().err
+    assert main(["calibrate", "deadtime", str(setup), "--tags", str(tmp_path), "--out", str(tmp_path / "art")]) == 1
+    assert "T3 sync divider convention is unverified" in capsys.readouterr().err
+    assert main(["analyze", str(setup), "--tags", str(tmp_path)]) == 0
+    assert "T3 sync divider 2: the divider convention is unverified" in capsys.readouterr().out

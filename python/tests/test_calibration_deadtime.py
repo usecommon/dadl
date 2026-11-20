@@ -7,6 +7,8 @@ passive-quench); these tests check recovery at a few points and the mechanics.
 from __future__ import annotations
 
 import datetime as dt
+import math
+import re
 
 import numpy as np
 import pytest
@@ -86,6 +88,9 @@ def test_survival_is_continuous_where_the_exact_series_hands_over():
     [(20_000, 50_000, (2e6, 5e6, 1e7)), (40_000, 45_000, (1e6, 3e6, 6e6)), (5_000, 22_000, (5e6, 1.5e7, 3e7))],
 )
 def test_recovery_at_three_points(tau_p, tau_np, rates):
+    """Smoke test at one seed: it asserts 95% intervals once, so it is not a coverage check (about 86% of
+    seeds pass all three points). Coverage is gated by `coverage deadtime` in the series-spad and
+    passive-quench regimes; the 5 ns / 22 ns point is in neither (M10)."""
     cal = calibrate_deadtime_series(_runs(_det(tau_p, tau_np), rates, 0.01, tau_p), CH, backend="sim", seed=1, n_draws=200)
     assert cal.kind == KIND and cal.status == "ok"
     assert cal.estimates["dead_time_p_ps"].contains(tau_p)
@@ -104,6 +109,9 @@ def test_hard_edge_detector_gives_an_upper_limit():
 
 
 def test_afterpulsing_is_held_at_the_dark_artifact():
+    """Smoke test at one seed: it asserts 95% intervals once, so it is not a coverage check (about 86% of
+    seeds pass all three points). Coverage is gated by `coverage deadtime` in the series-spad and
+    passive-quench regimes; the 5 ns / 22 ns point is in neither (M10)."""
     det = _det(30_000, 50_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
     rng = np.random.default_rng(9)
     dark = calibrate_dark(simulate_dark(_det(30_000, 50_000, dark_rate_cps=50_000.0, afterpulse_prob=0.03,
@@ -113,6 +121,12 @@ def test_afterpulsing_is_held_at_the_dark_artifact():
     assert with_ap.estimates["dead_time_p_ps"].contains(30_000)
     assert with_ap.conditions["afterpulse_prob_held"] == pytest.approx(dark.estimates["afterpulse_prob"].value)
     assert any("held at the dark artifact" in n for n in with_ap.notes)
+    # Council round 7 (Q6): the afterpulse shift widens each half of the profile interval in quadrature.
+    c, e = with_ap.conditions, with_ap.estimates["dead_time_p_ps"]
+    u = 1.96 * c["dead_time_p_u_afterpulse_ps"]
+    assert u > 50.0
+    assert e.high - e.value == pytest.approx(math.hypot(c["dead_time_p_stat_high_ps"] - e.value, u), rel=1e-9)
+    assert e.value - e.low == pytest.approx(math.hypot(e.value - c["dead_time_p_stat_low_ps"], u), rel=1e-9)
 
 
 def test_the_dark_artifact_is_cited():
@@ -317,6 +331,7 @@ def test_pending_fraction_matches_the_simulator():
     assert pi == pytest.approx(dtm.pending_fraction(rate / 1e12, tp, tnp, p, tau_a), rel=1e-3)
 
 
+@pytest.mark.slow
 def test_unmodelled_pending_afterpulses_are_noted():
     from dadl.calibration.coverage import DEADTIME_REGIMES
     from dadl.calibration.deadtime import UNMODELLED_Z
@@ -346,6 +361,9 @@ def test_unmodelled_pending_afterpulses_are_noted():
     [(10_000, 22_000, (5e5, 1e6, 2e6), 2), (50_000, 50_000, (2e6, 5e6, 1e7), 3)],
 )
 def test_tau_p_never_exceeds_tau_np(tau_p, tau_np, rates, seed):
+    """Smoke test at one seed: it asserts 95% intervals once, so it is not a coverage check (about 86% of
+    seeds pass all three points). Coverage is gated by `coverage deadtime` in the series-spad and
+    passive-quench regimes; the 5 ns / 22 ns point is in neither (M10)."""
     det = DetectorParams(efficiency=1.0, dark_rate_cps=500.0, dead_time_ps=tau_np, dead_time_p_ps=tau_p,
                          jitter_sigma_ps=0.0)
     rng = np.random.default_rng(seed)
@@ -356,6 +374,7 @@ def test_tau_p_never_exceeds_tau_np(tau_p, tau_np, rates, seed):
     assert np.all(cal.samples[:, 0] <= cal.samples[:, 1])
 
 
+@pytest.mark.slow
 def test_afterpulse_uncertainty_widens_an_upper_limit():
     det = _det(0, 50_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
     runs = _runs(det, (2e6, 5e6, 1e7), 0.01, 27)  # tau_p MLE 0: the case that took no afterpulse uncertainty
@@ -438,6 +457,14 @@ def test_a_false_branch_switch_becomes_a_union():
     assert 3.0 < cal.conditions["branch_nll_gain"] <= 5.0
     assert any("fit about as well past the count-rate maximum" in n for n in cal.notes)
     assert cal.estimates["dead_time_p_ps"].contains(40_000.0)
+    # Council round 7 (Q6): the statistical interval is the union of the two fits' intervals.
+    note = next(n for n in cal.notes if "fit about as well" in n)
+    ends = [float(x) for pair in re.findall(r"\(([0-9.e+]+) to ([0-9.e+]+) ps\)", note) for x in pair]
+    lows, highs = ends[0::2], ends[1::2]
+    assert len(lows) == 2 and max(lows) - min(lows) > 100.0
+    assert cal.conditions["dead_time_p_stat_low_ps"] == pytest.approx(min(lows), rel=1e-3)
+    assert cal.conditions["dead_time_p_stat_high_ps"] == pytest.approx(
+        min(max(highs), cal.estimates["dead_time_ps"].high), rel=1e-3)
 
 
 def _passive_quench_scan(i: int):
@@ -556,6 +583,7 @@ def test_tau_np_covers_an_off_grid_truth():
     assert covered >= 95
 
 
+@pytest.mark.slow
 def test_a_dark_artifact_under_other_conditions_is_refused():
     # Council round 6 (T2): a 25 V / 233 K dark artifact was held for a 30 V / 300 K scan, silently.
     from dadl.errors import StaleCalibration
@@ -579,6 +607,8 @@ def test_a_dark_artifact_under_other_conditions_is_refused():
 
 @pytest.mark.slow
 def test_the_tau_p_budget_is_recorded():
+    """Characterisation test (values from one run): the oracle is the code itself. The behavioural
+    checks of the interval logic are the council round 7 tests below."""
     # Council round 6 (T3, T6, T8): on the metrologist's pq.py replicate the statistical-only
     # interval was [28421.5, 41770.3] ps (from a refit with the afterpulse draws collapsed) and the
     # combined one [28397.5, 41882.2]; neither the split nor the sensitivities were recorded.
@@ -639,3 +669,195 @@ def test_interval_and_limit_print_their_level():
                         samples=np.zeros((1, 1)), sample_params=("dead_time_p_ps",), converged=True, ppc_pvalue=0.5,
                         inputs=(), unidentified=("dead_time_p_ps",))
     assert "<= 772.2 (95% upper limit only)" in str(limit)
+
+
+# Review council, round 7.
+
+
+def _t3_hard_edge(rate_cps: float, duration_s: float, tau_ps: float, rng, period_ps=12_500.3, res_ps=25):
+    """A continuous-time hard-edge detector read as PTU T3 tags: each time floored to its dtime bin
+    within its sync period, then converted by the reader's own arithmetic (rounded to whole ps)."""
+    from dadl.adapters.ptu import _t3_to_ps
+
+    t = np.sort(rng.uniform(0, duration_s * 1e12, rng.poisson(rate_cps * duration_s)))
+    out, last = [], -1e30
+    for x in t:
+        if x - last >= tau_ps:
+            out.append(x)
+            last = x
+    t = np.array(out)
+    nsync = np.floor(t / period_ps).astype(np.int64)
+    dtime = np.floor((t - nsync * period_ps) / res_ps).astype(np.int64)
+    ps, exact = _t3_to_ps(nsync, dtime, period_ps * 1e-12, res_ps * 1e-12)
+    assert not exact
+    return ps
+
+
+def _t3_tick_covers(seed: int) -> bool:
+    rng = np.random.default_rng(seed)
+    tau = 22_000.0 + rng.uniform(0, 25)
+    runs = [_t3_hard_edge(r, 0.01, tau, rng) for r in (2e6, 5e6)]
+    # The tick a T3 file declares at 25 ps with rounded tags (PtuFile.tick_ps): 25 + 1.
+    cal = calibrate_deadtime_series(runs, CH, seed=seed, n_draws=20, tick_ps=26)
+    assert cal.conditions["tag_tick_ps"] == 26.0 and cal.conditions["tag_tick_declared"] == 1.0
+    return cal.estimates["dead_time_ps"].contains(tau)
+
+
+def test_the_t3_tick_widens_tau_np():
+    # Council round 7 (G1): at 25 ps dtime and a 12500.3 ps sync the tags show a 1 ps tick, and
+    # the round-6 widening by one tick covered 10 of 20 seeds.
+    assert _t3_tick_covers(2)
+    rng = np.random.default_rng(2)
+    runs = [_t3_hard_edge(r, 0.01, 22_006.5, rng) for r in (2e6, 5e6)]
+    shown = calibrate_deadtime_series(runs, CH, seed=2, n_draws=20)
+    assert shown.conditions["tag_tick_ps"] == 1.0 and shown.conditions["tag_tick_declared"] == 0.0
+    # A declared tick below the tags' own is not used.
+    assert calibrate_deadtime_series(runs, CH, seed=2, n_draws=20, tick_ps=1).conditions["tag_tick_declared"] == 0.0
+
+
+@pytest.mark.slow
+def test_the_t3_tick_covers_tau_np_over_seeds():
+    assert sum(_t3_tick_covers(s) for s in range(20)) >= 19
+
+
+def _profile_check(runs, cal):
+    """2 ln LR of the profile likelihood at the recorded statistical ends of tau_p (no afterpulsing)."""
+    from dadl.calibration import deadtime as dtm
+    from dadl.data import tag_tick
+
+    gaps = [np.diff(t) for t in runs]
+    m = min(int(g.min()) for g in gaps)
+    which = int(np.argmin([g.min() for g in gaps]))
+    shifted = []
+    for i, g in enumerate(gaps):
+        x = g.astype(float) - m
+        shifted.append(np.delete(x, int(np.argmin(x))) if i == which else x)
+    fit = dtm._Fit([dtm._Run(x, tag_tick(*runs), None, float(m)) for x in shifted], 0.0, None)
+    fit.both_branches = False
+    tau = cal.estimates["dead_time_p_ps"].value
+    nll_min = fit.profile(tau)
+    c = cal.conditions
+    return [2.0 * (fit.profile(c[k]) - nll_min) for k in ("dead_time_p_stat_low_ps", "dead_time_p_stat_high_ps")]
+
+
+def test_the_profile_interval_is_at_chi_square_3_84():
+    # Council round 7 (Q6): a 90% interval (2.71) passed every behavioural test.
+    runs = _runs(_det(20_000, 50_000), (2e6, 5e6, 1e7), 0.01, 20_000)
+    cal = calibrate_deadtime_series(runs, CH, backend="sim", seed=1, n_draws=10)
+    assert "dead_time_p_ps" not in cal.unidentified
+    assert cal.conditions["dead_time_p_stat_high_ps"] < cal.estimates["dead_time_ps"].low
+    assert _profile_check(runs, cal) == [pytest.approx(3.841, abs=0.05)] * 2
+
+
+def test_tau_p_s_upper_end_is_capped_at_tau_np_s():
+    # Council round 7 (Q6): with the profile reaching the shortest gap, the afterpulse widening put
+    # tau_p's upper end 30 ps above tau_np's (fully paralyzable, 2% afterpulsing; seed 0).
+    det = _det(45_000, 45_000, dark_rate_cps=50_000.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0)
+    rng = np.random.default_rng(0)
+    ap = calibrate_dark(simulate_dark(det, 1.0, rng), CH, backend="sim", seed=1, n_draws=400)
+    runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in (1e6, 3e6, 6e6)]
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, seed=1, n_draws=50)
+    assert any("reaches tau_np" in n for n in cal.notes) and cal.conditions["dead_time_p_u_afterpulse_ps"] > 0
+    assert cal.estimates["dead_time_p_ps"].high <= cal.estimates["dead_time_ps"].high
+    assert np.all(cal.samples[:, 0] <= cal.samples[:, 1])
+
+
+def test_a_run_of_999_gaps_is_refused():
+    runs = _runs(_det(20_000, 50_000), (2e6, 5e6), 0.01, 3)
+    with pytest.raises(InsufficientCounts, match="at least 1000 gaps"):
+        calibrate_deadtime_series([runs[0][:1000], runs[1]], CH)
+
+
+def test_tau_np_draws_carry_the_tick_rounding():
+    # Council round 7 (Q6): at 80 ps the quantile draws all sit at the shortest gap; the draws add
+    # the triangular rounding of two floored times, so they spread over about two ticks.
+    rng = np.random.default_rng(0)
+    runs = [_ticked(r, 0.01, 21_960.0, 80, rng) for r in (2e6, 5e6)]
+    cal = calibrate_deadtime_series(runs, CH, seed=0, n_draws=200)
+    d = cal.samples[:, 1]
+    assert np.ptp(d) >= 80 and np.unique(d % 80).size > 10
+
+
+def test_the_edge_density_includes_afterpulses(monkeypatch):
+    # Council round 7 (Q6): the edge density sum_i N_i (n_i + p / tau_a) exp(-n_i tau_p) sets tau_np's
+    # quantile interval; dropping the afterpulse term survived every behavioural test.
+    from dadl.calibration import deadtime as dtm
+
+    seen = []
+    real = dtm._dead_time
+
+    def spy(m, k, f0, *args, **kwargs):
+        seen.append(f0)
+        return real(m, k, f0, *args, **kwargs)
+
+    monkeypatch.setattr(dtm, "_dead_time", spy)
+    det = _det(30_000, 50_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
+    dark = _afterpulse_artifact(0.03, 30_000.0, 0.02)
+    cal = calibrate_deadtime_series(_runs(det, (2e6, 5e6), 0.01, 10), CH, afterpulse=dark, seed=1, n_draws=10)
+    p, tau_a = cal.conditions["afterpulse_prob_held"], cal.conditions["afterpulse_tau_ps_held"]
+    tau = cal.estimates["dead_time_p_ps"].value
+    rates = [(float(a) / 1e12, int(b)) for a, b in (
+        re.search(r"\) ([0-9.e+]+) s\^-1 \(fitted\), (\d+) gaps", n).groups() for n in cal.notes if n.startswith("run "))]
+    expected = sum(k * (n + p / tau_a) * math.exp(-n * tau) for n, k in rates)
+    without = sum(k * n * math.exp(-n * tau) for n, k in rates)
+    assert expected > 1.1 * without
+    assert seen == [pytest.approx(expected, rel=2e-3)]
+
+
+def test_the_fitted_gaps_start_at_the_shortest(monkeypatch):
+    # Council round 7 (Q6): the gaps past tau_np are g - m, less the shortest (m itself); shifting
+    # them by one ps was caught only by the characterisation test.
+    from dadl.calibration import deadtime as dtm
+
+    seen = []
+
+    class Spy(dtm._Run):
+        def __init__(self, s, *args, **kwargs):
+            seen.append(np.array(s))
+            super().__init__(s, *args, **kwargs)
+
+    monkeypatch.setattr(dtm, "_Run", Spy)
+    runs = _runs(_det(20_000, 50_000), (2e6, 5e6), 0.01, 4)
+    cal = calibrate_deadtime_series(runs, CH, seed=1, n_draws=10)
+    gaps = [np.diff(t) for t in runs]
+    m = min(int(g.min()) for g in gaps)
+    assert sorted(np.concatenate(seen) + m) == sorted(np.concatenate(gaps))[1:]
+    assert cal.estimates["dead_time_ps"].contains(float(m))
+
+
+def test_the_dark_lookup_takes_the_channel_s_one_artifact(tmp_path):
+    # Council round 7 (Q8): `calibrate deadtime --dark DIR` matching any channel, or taking the first
+    # of several, survived.
+    from test_forward import _dark
+
+    from dadl.cli import _dark_artifact_for
+    from dadl.errors import DadlError
+
+    a, b = ChannelId("sim", 0), ChannelId("sim", 1)
+    created = dt.datetime(2026, 11, 1, tzinfo=UTC)
+    write_artifact(_dark(a, 22_000, 500), tmp_path, created=created)
+    write_artifact(_dark(b, 30_000, 500, seed=1), tmp_path, created=created)
+    for ch, tau in ((a, 22_000), (b, 30_000)):
+        _, cal = _dark_artifact_for(str(tmp_path), ch)
+        assert cal.channels == (ch,) and cal.estimates["dead_time_ps"].value == tau
+    write_artifact(_dark(a, 23_000, 500, seed=2), tmp_path, created=created)
+    with pytest.raises(DadlError, match="2 dark artifacts for sim:0"):
+        _dark_artifact_for(str(tmp_path), a)
+    with pytest.raises(DadlError, match="no dark artifact for sim:2"):
+        _dark_artifact_for(str(tmp_path), ChannelId("sim", 2))
+
+
+def test_calibrate_deadtime_refuses_tags_in_ns(tmp_path, capsys):
+    from dadl.cli import main
+    from dadl.tagfile import read_tags, write_tags
+
+    scan = tmp_path / "scan.npz"
+    assert main(["simulate", "chsh-spad", "--deadtime-scan", "--rates", "2e6,6e6", "--duration-s", "0.02",
+                 "--out", str(scan)]) == 0
+    runs = read_tags(scan)
+    ns = {k: {ch: t // 1000 for ch, t in run.items()} for k, run in runs.items()}
+    write_tags(tmp_path / "ns.npz", ns, simulated=True)
+    capsys.readouterr()
+    assert main(["calibrate", "deadtime", "chsh-spad", "--tags", str(tmp_path / "ns.npz"), "--channel", "A+",
+                 "--out", str(tmp_path / "arts")]) == 1
+    assert "Are the timestamps in picoseconds" in capsys.readouterr().err

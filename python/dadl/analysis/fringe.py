@@ -36,7 +36,7 @@ from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates
 from dadl.analysis.visibility import bell_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
-from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels
+from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels, t3_input
 from dadl.propagate import CalibrationSet
 from dadl.result import LabelledValue
 from dadl.stationarity import interrupted
@@ -73,8 +73,13 @@ def fringe_from_tags(
     calibrations: CalibrationSet | None = None,
     channels: tuple[ChannelId, ChannelId] | None = None,
     seed: int = 0,
+    source_type: str | None = None,
 ) -> tuple[LabelledValue, dict[str, float]]:
-    """Fringe visibility from `runs["max"]` and `runs["min"]`. Returns the result and its counts."""
+    """Fringe visibility from `runs["max"]` and `runs["min"]`. Returns the result and its counts.
+
+    On PTU T3 input a corrected value is refused unless `source_type` declares CW light ("cw"),
+    and the result is labelled (`dadl.guardrails.t3_input`)."""
+    t3_labels, _ = t3_input(runs, source_type, calibrations is not None or bool(subtract_accidentals))
     if calibrations is not None:
         check_calibration_args(subtract_accidentals, channels)
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
@@ -130,7 +135,7 @@ def fringe_from_tags(
         )
     else:
         result = bell_visibility(c_max, c_min, policy=policy, window=window)
-    labels = result.labels + (TWO_POINT,) + ((SINGLES_DRIFT,) if drift else ())
+    labels = result.labels + (TWO_POINT,) + ((SINGLES_DRIFT,) if drift else ()) + t3_labels
     if calibrations is not None:
         check_p, check_labels = forward_check(
             "bell_visibility", {"max": (runs["max"], (0.0,)), "min": (runs["min"], (0.0,))},

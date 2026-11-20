@@ -449,3 +449,39 @@ def test_valid_for_conditions_are_enforced(tmp_path):
     policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "same detector, recalibrated at 250 K")
     s = CalibrationSet.load(d, analysis=ANALYSIS, dataset=cold, policy=policy)
     assert OUTSIDE_VALIDITY in s.labels and POLICY_MODIFIED in s.labels
+
+
+# Council round 7.
+
+
+def test_the_t3_sync_period_is_compared_to_1e_4():
+    # G2: two acquisitions 10 Hz apart at 80 MHz were refused, and %g printed both as 1.25e-08.
+    key = "tagger_MeasDesc_GlobalResolution"
+    assert condition_mismatches({key: 1 / 79_999_870.0}, {key: 1 / 79_999_860.0}) == []
+    (msg,) = condition_mismatches({key: 1 / 79_999_870.0}, {key: 1 / 76e6})
+    assert "1.250002031e-08 recorded, 1.315789474e-08 for the dataset" in msg
+    # Other settings stay exact.
+    assert condition_mismatches({"tagger_HWSync_Offset": 1.0}, {"tagger_HWSync_Offset": 1.00001})
+
+
+def test_a_delay_artifact_from_another_tagger_is_refused(tmp_path):
+    # G6: the tagger's channel skew belongs to the instrument.
+    from dadl.propagate import OTHER_TAGGER
+
+    delay = make_cal(A, seed=1, kind="delay-jitter")
+    write(delay, tmp_path, instrument={"model": "HydraHarp", "serial": "1111111"})
+    other = ctx(instrument={"model": "HydraHarp", "serial": "2222222"})
+    with pytest.raises(StaleCalibration, match="tagger serial 1111111 recorded, 2222222"):
+        CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=other)
+    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "skew checked against the old tagger")
+    cset = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=other, policy=policy)
+    assert OUTSIDE_VALIDITY in cset.labels and "skew checked against the old tagger" in policy.provenance()["overrides"][0]
+    same = ctx(instrument={"model": "HydraHarp", "serial": "1111111"})
+    assert OUTSIDE_VALIDITY not in CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=same).labels
+    # Without the dataset's instrument nothing is compared.
+    CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx())
+    # A dark artifact from another tagger is labelled only.
+    d2 = tmp_path / "dark"
+    write(make_cal(A, seed=2), d2, instrument={"model": "HydraHarp", "serial": "1111111"})
+    labels = CalibrationSet.load(d2, analysis=ANALYSIS, dataset=other).labels
+    assert OTHER_TAGGER in labels and OUTSIDE_VALIDITY not in labels

@@ -79,7 +79,12 @@ lies up to one tick above the shortest gap and, with the edge excess, below the 
 lower end. The interval therefore allows one tick either side, and the draws add the triangular
 rounding of a difference of two floored times (tick x (u1 - u2)). The dark dead-time interval does
 not; it spans many ticks in any dark run, so the difference is below its resolution. On the
-simulator's grid (integer tau_np, 1 ps tags) the widening is pure conservatism. The gaps
+simulator's grid (integer tau_np, 1 ps tags) the widening is pure conservatism. The tick is the
+larger of `tick_ps`, when given, and the common divisor of the tags' offsets: on PTU T3 data the
+tags are nsync x period + dtime x resolution and a measured (non-whole) period leaves no common
+divisor, while each recorded gap is still within one dtime resolution of the true gap; the CLI
+passes the file's tick (`dadl.tagfile.tag_tick_ps`; council round 7, G1: at 25 ps the 1 ps
+widening covered 10 of 20). `tag_tick_ps` records the tick used, `tag_tick_declared` (1 or 0) and a note its source. The gaps
 past it are binned (fine uniform bins, then geometric ones) and fitted by multinomial maximum
 likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the profile
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
@@ -136,7 +141,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "6"
+METHOD_VERSION = "7"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -570,6 +575,7 @@ def calibrate_deadtime_series(
     n_draws: int = N_DRAWS,
     conditions: dict[str, float] | None = None,
     allow_condition_mismatch: str | None = None,
+    tick_ps: int | None = None,
 ) -> Calibration:
     """Fit tau_p and tau_np from illuminated acquisitions of one channel at two or more rates.
 
@@ -582,7 +588,7 @@ def calibrate_deadtime_series(
     temperature, tagger settings) do not cover `conditions` (`StaleCalibration`), unless
     `allow_condition_mismatch` gives a reason, which is noted. Each run is fitted below the count-rate
     maximum unless the fit past it wins by `BRANCH_MARGIN` (module docstring, "Two rates per gap
-    law").
+    law"). `tick_ps` is the tagger's tick when the tags do not show it (PTU T3: the dtime resolution).
     """
     if len(runs) < MIN_RUNS:
         raise ValueError(f"need at least {MIN_RUNS} acquisitions at different rates; paralysis shows in how the "
@@ -640,6 +646,13 @@ def calibrate_deadtime_series(
     if short:
         raise InsufficientCounts(f"need at least {MIN_GAPS} gaps per acquisition; run(s) {short} have fewer")
     tick = tag_tick(*tags)
+    tick_source = "tags"
+    if tick_ps is not None:
+        declared = _checks.integer(tick_ps, "tick_ps", minimum=1)
+        if declared > tick:
+            tick, tick_source = declared, "declared"
+    if tick_source == "declared":
+        notes.append(f"tag tick {tick} ps as declared (tick_ps), not the {tag_tick(*tags)} ps the tags show")
     rng = draws_rng(seed, *tags)
     p, tau_a, ap_draws = _afterpulse_params(afterpulse, notes)
 
@@ -800,7 +813,7 @@ def calibrate_deadtime_series(
     spans = np.array([float(t[-1] - t[0]) / PS_PER_S for t in tags])
     recorded = np.array([g.size for g in gaps]) / spans
     cond = {"runs": float(len(runs)), "two_ln_lr_hard_edge": lr, "gaps": float(sizes.sum()),
-            "tag_tick_ps": float(tick),
+            "tag_tick_ps": float(tick), "tag_tick_declared": float(tick_source == "declared"),
             "dead_time_p_stat_low_ps": float(stat_low), "dead_time_p_stat_high_ps": float(stat_high),
             "dead_time_p_u_afterpulse_ps": shift_sd,
             # Recorded count rates and run durations of the scan (council round 6, T6); named outside

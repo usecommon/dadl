@@ -20,5 +20,10 @@ an optional compiled core (`pip install "dadl-quantum[core]"`). Raw values carry
 statistical uncertainties; corrected values include calibration uncertainty.
 Read the known limits in the repository README before relying on a number.
 
+T3 files come from a sync (usually pulsed) source. DADL models CW light: in a
+T3 file the sync is used as a clock only. Corrected values are refused on T3
+input unless the setup declares `source.type: cw`; pulsed accidentals sit in
+side peaks at multiples of the repetition period, which DADL does not yet model.
+
 - Overview: https://usecommon.github.io/dadl/
 - Source, design doc and "using your own data": https://github.com/usecommon/dadl

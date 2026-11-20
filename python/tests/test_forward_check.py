@@ -127,3 +127,77 @@ def test_a_start_delay_tens_of_ps_off_does_not_stall_the_fit(tmp_path, seed):
     # The stalled fit read about 1e-6; the polished one is far above it. The threshold leaves room
     # for platform numerics (0.096 on Windows, Python 3.12, seed 43).
     assert pair_pvalue(pair) > 0.01
+
+
+# Council round 7 (Q7): the check's statistics, below the propagation gate.
+
+
+def test_grouped_pearson_degrees_of_freedom():
+    from scipy import stats
+
+    from dadl.forward_check import _grouped_pearson
+
+    mu = np.full(8, 10.0)
+    n = np.array([12, 8, 15, 5, 10, 11, 9, 10], dtype=float)
+    assert _grouped_pearson(n, mu) == pytest.approx(stats.chi2.sf(np.sum((n - mu) ** 2 / mu), 7), rel=1e-12)
+
+
+def test_bins_expecting_fewer_than_five_are_grouped():
+    from scipy import stats
+
+    from dadl.forward_check import MIN_EXPECTED, _grouped_pearson
+
+    mu = np.full(6, 2.0)  # grouped in threes: 6 expected each
+    n = np.array([0, 1, 0, 5, 4, 6], dtype=float)
+    o, e = np.array([1.0, 15.0]), np.array([6.0, 6.0])
+    assert MIN_EXPECTED == 5.0
+    assert _grouped_pearson(n, mu) == pytest.approx(stats.chi2.sf(np.sum((o - e) ** 2 / e), 1), rel=1e-12)
+
+
+def test_a_p_value_of_1e_4_is_flagged_and_bonferroni_applies():
+    from dadl.forward_check import MISFIT_ALPHA, CheckResult, _grouped_pearson
+
+    mu = np.full(10, 100.0)
+    n = mu + np.array([25, -25, 25, -25, 20, -20, 0, 0, 0, 0])  # p = 1.3e-4
+    p = _grouped_pearson(n, mu)
+    assert 1e-6 < p < 1e-3
+    assert CheckResult({"dip": p}, MISFIT_ALPHA).flagged
+    assert CheckResult({"a": 0.01, "b": 0.5}, MISFIT_ALPHA).pvalue == pytest.approx(0.02)
+    assert not CheckResult({"a": 0.0006, "b": 0.5}, MISFIT_ALPHA).flagged
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "council round 7 (G1, Fix 1): on T3 tags at 25 ps dtime and a 12500.3 ps sync the check reads p ~ 1e-100 "
+    "(it bins on the 1 ps tick the tags show); reported to the council, not loosened"))
+def test_t3_tags_with_a_measured_sync_period_are_not_flagged():
+    from dadl.adapters.ptu import _t3_to_ps
+    from dadl.forward_check import pair_pvalue
+    from dadl.sim import simulate_pairs
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=22_000, jitter_sigma_ps=100.0)
+
+    def t3(t, period=12_500.3, res=25):
+        nsync = np.floor(t / period).astype(np.int64)
+        dtime = np.floor((t - nsync * period) / res).astype(np.int64)
+        return _t3_to_ps(nsync, dtime, period * 1e-12, res * 1e-12)[0]
+
+    a, b = simulate_pairs(1e5, det, det, 0.5, np.random.default_rng(0))
+    a, b = a[a >= 0], b[b >= 0]
+    assert pair_pvalue(PairData("A/B", t3(a), t3(b), 0.0, 1_000, 0.0, 140.0)) > 1e-3
+
+
+def test_the_check_starts_from_the_artifact_in_either_order(tmp_path):
+    # Council round 7 (Q2): a (B, A) artifact gives the delay of B after A with its sign flipped.
+    from test_forward import CA, CB, SIGN_DET, SIGN_LATE, sign_sets
+
+    from dadl.forward_check import delay_start
+    from dadl.sim import simulate_pairs
+
+    pair = simulate_pairs(2e5, SIGN_DET, SIGN_LATE, 0.05, np.random.default_rng(34))
+    ab, ba = sign_sets(tmp_path, "hom_visibility", Policy.default(), {(CA, CB): pair})
+    d_ab, j_ab = delay_start(ab, CA, CB)
+    d_ba, j_ba = delay_start(ba, CA, CB)
+    # The two fits of one run, mirrored, agree to well under a ps.
+    assert d_ab == pytest.approx(400, abs=10) and d_ba == pytest.approx(d_ab, abs=1.0)
+    assert j_ba == pytest.approx(j_ab, rel=0.01)
+    assert delay_start(ba, CB, CA)[0] == pytest.approx(-d_ba, abs=1e-9)

@@ -298,6 +298,7 @@ def test_sparse_sharp_peak_still_gets_a_predictive_check_and_an_artifact(tmp_pat
     write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
 
 
+@pytest.mark.slow
 def test_every_regime_has_a_closed_form_truth_and_runs():
     from dadl.calibration.coverage import PAIR_REGIMES, UNITS, run
 

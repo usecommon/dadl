@@ -69,6 +69,21 @@ def tag_tick(*streams: np.ndarray) -> int:
     return max(g, 1)
 
 
+class RunTags(dict):
+    """One acquisition's tags by channel name, as `dadl.tagfile.read_tags` returns them, with the
+    file's metadata (`metadata`: for PTU T3 input `mode`, `sync_period_ps`, `tick_ps` and, when
+    divided, `sync_divider`). A plain dict works wherever this does; it has no metadata."""
+
+    def __init__(self, *args: Any, metadata: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.metadata: dict[str, Any] = dict(metadata or {})
+
+
+def runs_metadata(runs: Mapping[Any, Any]) -> list[Mapping[str, Any]]:
+    """The metadata of each acquisition in `runs` that carries any (`RunTags`)."""
+    return [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m]
+
+
 @dataclass(frozen=True)
 class TagSet:
     """The recorded tags of one acquisition, per channel, sorted int64 ps on one clock."""

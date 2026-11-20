@@ -233,10 +233,16 @@ def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, boo
         dets = dict.fromkeys(CHSH_CHANNELS, det)
         runs = simulate_chsh(regime.source, dets, regime.duration_s, run_rng, CHSH_SETTINGS)
         result = chsh(runs, window, POLICY, settings_deg=CHSH_SETTINGS, calibrations=cset, channels=CHSH_CHANNELS, seed=fit_seed)
-    c, truth = result.corrected, regime.truth
+    covered, control = covers(result.corrected, regime.truth)
+    return covered, control, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.all_labels
+
+
+def covers(c, truth: float) -> tuple[bool, bool]:
+    """Whether the corrected interval covers the truth, and whether the control does: the point
+    +- 1.96 statistical standard errors (calibration uncertainty off)."""
     half = 1.959964 * c.stderr_statistical
     covered = c.low <= truth <= c.high
-    return covered, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.all_labels
+    return covered, c.value - half <= truth <= c.value + half
 
 
 def propagation(
@@ -247,8 +253,23 @@ def propagation(
     for child in _children(seed, replicates, part, regime):
         for key, hit in zip(KEYS, _replicate(reg, child)):
             covered[key] += hit
-    name = "hom_visibility" if reg.analysis == "hom" else "chsh"
-    return CoverageResult(f"{name} [{regime}]", replicates, covered, gate(replicates, 1))
+    return CoverageResult(result_name(regime), replicates, covered, gate(replicates, 1))
+
+
+def regime_names(analysis: str, regimes: list[str] | None = None) -> list[str]:
+    """The regimes `run` covers for `analysis` ("hom", "chsh", "all") and `regimes`."""
+    names = [r for r, reg in REGIMES.items() if analysis in ("all", reg.analysis)]
+    if regimes is not None:
+        unknown = sorted(set(regimes) - set(names))
+        if unknown:
+            raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
+        names = [r for r in names if r in regimes]
+    return names
+
+
+def result_name(regime: str) -> str:
+    """The calibration name of a regime's result."""
+    return f"{'hom_visibility' if REGIMES[regime].analysis == 'hom' else 'chsh'} [{regime}]"
 
 
 def regime_of(result: CoverageResult) -> str:
@@ -320,12 +341,7 @@ def run(
 ) -> list[CoverageResult]:
     """Every regime of `analysis`, or only `regimes`; with `part`, only those replicates (a shard:
     the counts are partial and the result is not gated). `progress` gets a line per finished chunk."""
-    names = [r for r, reg in REGIMES.items() if analysis in ("all", reg.analysis)]
-    if regimes is not None:
-        unknown = sorted(set(regimes) - set(names))
-        if unknown:
-            raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
-        names = [r for r in names if r in regimes]
+    names = regime_names(analysis, regimes)
     span = part if part is not None else range(replicates)
     # Chunks no larger than a worker's share, so a shard keeps every worker busy (council round 4:
     # 125 replicates in chunks of 50 left one of four workers idle).
@@ -370,27 +386,52 @@ def run(
     return out
 
 
-def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
+def shard_record(
+    results: list[CoverageResult], seed: int, part: range, analysis: str = "all", regimes: list[str] | None = None
+) -> dict:
+    """A shard's partial counts, with the analysis and regimes it was asked for."""
     return {
         "seed": seed,
-        "replicates": results[0].replicates,
+        "replicates": results[0].replicates if results else 0,
+        "analysis": analysis,
+        "regimes": sorted(regimes) if regimes is not None else None,
         "range": [part.start, part.stop],
         "results": [{"calibration": r.calibration, "covered": r.covered} for r in results],
     }
 
 
 def merge(records: list[dict]) -> list[CoverageResult]:
-    """Sum shard records; refuses mixed seeds or totals, and a slice missing or run twice."""
+    """Sum shard records; refuses mixed seeds, totals, analyses or regimes, a slice missing or run
+    twice, an empty merge, and a result set other than the one the analysis and regimes produce.
+    The gate is the code's (council round 7, S1); a shard's own `gate`, if any, must agree."""
     if not records:
         raise ValueError("no shards to merge")
     seeds = {r["seed"] for r in records}
     totals = {r["replicates"] for r in records}
     if len(seeds) != 1 or len(totals) != 1:
         raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    if any("analysis" not in r or "regimes" not in r for r in records):
+        raise ValueError("a shard does not record its analysis and regimes; rerun it with this version")
+    asked = {(r["analysis"], tuple(r["regimes"]) if r["regimes"] is not None else None) for r in records}
+    if len(asked) != 1:
+        raise ValueError(f"shards disagree on the analysis or regimes: {sorted(asked, key=str)}")
+    analysis, regimes = asked.pop()
     replicates = totals.pop()
+    if not any(r["results"] for r in records):
+        raise ValueError("the shards hold no results")
+    expected = [result_name(r) for r in regime_names(analysis, list(regimes) if regimes is not None else None)]
+    found = list(dict.fromkeys(res["calibration"] for r in records for res in r["results"]))
+    if set(found) != set(expected):
+        missing, extra = sorted(set(expected) - set(found)), sorted(set(found) - set(expected))
+        raise ValueError(f"the shards' results are not those of {analysis} {list(regimes or ['(all)'])}: "
+                         f"missing {missing}, unexpected {extra}")
+    band = gate(replicates, 1)
+    for r in records:
+        for res in r["results"]:
+            if "gate" in res and not np.allclose(res["gate"], band, rtol=0, atol=1e-12):
+                raise ValueError(f"{res['calibration']}: the shard's gate {res['gate']} is not the code's {list(band)}")
     out = []
-    names = dict.fromkeys(res["calibration"] for r in records for res in r["results"])
-    for name in names:
+    for name in expected:
         mine = [(r["range"], res["covered"]) for r in records for res in r["results"] if res["calibration"] == name]
         seen = sorted(tuple(rng) for rng, _ in mine)
         expected_next = 0
@@ -400,8 +441,10 @@ def merge(records: list[dict]) -> list[CoverageResult]:
             expected_next = hi
         if expected_next != replicates:
             raise ValueError(f"{name}: shards cover replicates 0-{expected_next}, not all {replicates}")
+        if any(set(c) != set(KEYS) for _, c in mine):
+            raise ValueError(f"{name}: a shard does not count {list(KEYS)}")
         covered = {k: sum(c[k] for _, c in mine) for k in KEYS}
-        out.append(CoverageResult(name, replicates, covered, gate(replicates, 1)))
+        out.append(CoverageResult(name, replicates, covered, band))
     return out
 
 
@@ -430,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run(args.analysis, args.replicates, args.seed, args.jobs, args.regimes, part, log)
         if part is not None:
             with open(args.out, "w", encoding="utf-8") as fh:
-                json.dump(shard_record(results, args.seed, part), fh, indent=1)
+                json.dump(shard_record(results, args.seed, part, args.analysis, args.regimes), fh, indent=1)
             for r in results:
                 print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
             return 0

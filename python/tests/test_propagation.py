@@ -65,13 +65,75 @@ def test_shards_merge_to_the_whole(tmp_path, capsys):
     assert shard_range("4/4", 1000) == range(750, 1000)
 
 
-def test_misspecified_regime_is_flagged_and_gated_on_flags():
-    from dadl.analysis.propagation import FLAGGED, MIN_FLAG_SHARE, passed
+def test_misspecified_regime_is_flagged():
+    from dadl.analysis.propagation import FLAGGED
 
     assert REGIMES["hom-crosstalk"].misspecified and not REGIMES["hom-bright"].misspecified
     r = propagation(2, seed=7, regime="hom-crosstalk")
     assert r.covered[FLAGGED] == 2
-    assert passed(r) == (r.fraction(FLAGGED) >= MIN_FLAG_SHARE)
+
+
+def _result(regime, corrected=940, control=940, misfits=0, flagged=0):
+    from dadl.analysis.propagation import CORRECTED, FLAGGED, MISFITS, result_name
+    from dadl.calibration.coverage import CoverageResult, gate
+
+    covered = {CORRECTED: corrected, CONTROL: control, MISFITS: misfits, FLAGGED: flagged}
+    return CoverageResult(result_name(regime), 1000, covered, gate(1000, 1))
+
+
+@pytest.mark.parametrize("regime, counts, verdict", [
+    # Council round 7 (Q1): the verdicts on synthetic results, one rule at a time.
+    ("hom-bright", {}, True),
+    ("hom-bright", {"corrected": 900}, False),
+    ("hom-bright", {"corrected": 990}, False),
+    ("hom-bright", {"flagged": 20}, False),
+    ("hom-bright", {"flagged": 10}, True),
+    ("hom-bright", {"misfits": 30}, False),
+    ("hom-bright", {"misfits": 20}, True),
+    # The control regime must undercover with the calibration uncertainty off.
+    ("chsh-dead-time", {"control": 940}, False),
+    ("chsh-dead-time", {"control": 800}, True),
+    # The misspecified regime is gated on its flags only.
+    ("hom-crosstalk", {"flagged": 890, "corrected": 300}, False),
+    ("hom-crosstalk", {"flagged": 950, "corrected": 300}, True),
+])
+def test_gate_verdicts(regime, counts, verdict):
+    from dadl.analysis.propagation import passed
+
+    assert passed(_result(regime, **counts)) is verdict
+
+
+def test_the_control_drops_the_calibration_uncertainty():
+    from dadl.analysis.propagation import covers
+    from dadl.result import Estimate
+
+    c = Estimate(1.0, 0.05, 0.902, 1.098, stderr_statistical=0.01, stderr_calibration=0.049)
+    assert covers(c, 1.04) == (True, False)
+    assert covers(c, 1.01) == (True, True)
+    assert covers(c, 1.2) == (False, False)
+
+
+def test_merge_refuses_empty_lax_and_foreign_shards():
+    # Council round 7 (S1): an empty shard set exited 0, and a merge took its band from the file.
+    from dadl.analysis.propagation import shard_record
+
+    with pytest.raises(ValueError, match="family and regimes|analysis and regimes"):
+        merge([{"seed": 20261111, "replicates": 1000, "range": [0, 1000], "results": []}])
+    lax = {"seed": 1, "replicates": 1000, "range": [0, 1000], "results": [
+        {"calibration": "hom_visibility [hom-snspd]", "covered": dict.fromkeys(KEYS, 10), "gate": [0, 1000]}]}
+    with pytest.raises(ValueError, match="analysis and regimes"):
+        merge([lax])
+    good = shard_record([_result("hom-snspd")], 1, range(0, 1000), "hom", ["hom-snspd"])
+    assert merge([good])[0].gate == _result("hom-snspd").gate
+    with pytest.raises(ValueError, match="no results"):
+        merge([{**good, "results": []}])
+    with pytest.raises(ValueError, match="not the code's"):
+        merge([{**good, "results": [{**good["results"][0], "gate": [0, 1000]}]}])
+    with pytest.raises(ValueError, match="missing"):
+        merge([{**good, "regimes": ["hom-bright", "hom-snspd"]}])
+    with pytest.raises(ValueError, match="unexpected"):
+        merge([{**good, "results": good["results"] + [
+            {"calibration": "chsh [chsh-spad]", "covered": dict.fromkeys(KEYS, 0)}]}])
 
 
 @pytest.mark.slow

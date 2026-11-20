@@ -311,7 +311,11 @@ Promised for phase 2, marked planned in cycle 8.13.
 ### M9. Streaming O(n) coincidences and chunked PTU reading
 
 The design table puts streaming coincidences in phase 3. PTU files are read whole at about 100
-bytes per record (README limit; cycle 2.10).
+bytes per record in T2 and up to about 170 in T3 (README limit; cycle 2.10; council round 7, S3).
+
+Entry item (council round 7, G5): check the T3 sync divider convention on one real divided T3
+file (the nsync step against `TTResult_SyncRate`). Until then `calibrate dark` and `calibrate
+deadtime` refuse T3 files with `HWSync_Divider` > 1 and analyses label them.
 
 - Rust core: `grid_coincidences` and `occupied_slots` over chunks with carried state at chunk
   edges; Python binding taking an iterator of chunks. The pure-Python reference stays the
@@ -368,6 +372,9 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | A 0.5 s passive-quench probe (0.5 s coverage 92.5%, matching the no-afterpulse control's 93.1%: check the profile's calibration at 1e6 gaps) | M4 council round 5 (I2) | M10 |
 | The second-order pending-afterpulse term (two pending, or one beside the record's own), if a regime needs it | M4 council round 5 (I2) | M10 |
 | Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | M5 entry item, before M5 reads `deadtime-series` artifacts |
+| A series coverage regime at tau_p 5 ns / tau_np 22 ns, 5-30 Mcps (the third point of `test_recovery_at_three_points`, in no regime: 3 of 20 seeds missed there) | M4 council round 7 (Q5) | M10, next to rotating seeds (owner's agreement) |
+| Pulsed sources: side-peak accidentals at multiples of the repetition period, so T3 input can be corrected without declaring the source CW | M4 council round 7 (G3) | v0.2+ (with the pulsed-source item below) |
+| The predictive check on T3 tags with a measured sync period (it bins on the 1 ps tick the tags show and flags clean 25 ps data, p about 1e-100; an xfail test records it) | M4 council round 7 (G1, Fix 1) | reported to the council; not loosened |
 
 ## Decisions
 

@@ -9,12 +9,15 @@ used on its dataset:
   does not contain the dataset's acquisition time, or whose recorded conditions do not match the
   dataset's, raises `StaleCalibration` unless the policy allows `calibration_outside_validity`.
   Conditions compared (`condition_mismatches`): every `tagger_*` setting must be equal (cycle 2.8:
-  recorded but never compared at use); `bias*` values must be equal; a `<name>_min_<unit>` /
+  recorded but never compared at use; the T3 sync period to 1e-4, `SETTING_RTOL`); `bias*` values must be equal; a `<name>_min_<unit>` /
   `<name>_max_<unit>` pair must bracket the dataset's `<name>_<unit>`; a single `temperature_K`
   must be within `TEMPERATURE_TOLERANCE_K`. A setting, bias, bracket or temperature the artifact
   records but the dataset does not give is a mismatch (council round 3: leaving the condition out
   passed the check). Keys the artifact does not record are not compared. An artifact with no
   validity range is labelled `NO_VALIDITY`.
+- **Another tagger** (council round 7, G6): when the artifact's `instrument` and the dataset's
+  both give the tagger model or serial and they differ, a delay-jitter or deadtime-series
+  artifact is outside its validity as above; other kinds are labelled `OTHER_TAGGER`.
 - **Another detector** (council round 3): when the artifact's channel record and the setup's
   channel (`channels=`) both name a detector and they differ, the artifact is outside its
   validity as above. `ChannelId` equality is the tagger input; the detector is checked here.
@@ -62,6 +65,15 @@ from dadl.guardrails import POLICY_MODIFIED, Policy
 TEMPERATURE_TOLERANCE_K = 0.5
 #: Relative tolerance for settings that must be equal (floats from headers and the command line).
 EQUAL_RTOL = 1e-9
+#: Per-setting tolerances (council round 7, G2). In T3, MeasDesc_GlobalResolution is the source's
+#: repetition period, a laser property that drifts at the ppm level, not a setting that places
+#: tags: 1e-4 admits the drift and refuses another repetition rate. In T2 it is the tick, whose
+#: values are discrete, so 1e-4 is still exact there.
+SETTING_RTOL = {"tagger_MeasDesc_GlobalResolution": 1e-4}
+#: Kinds whose artifact belongs to the tagger that recorded it (its channel skew and own dead
+#: time): calibrated on another tagger, they do not cover the dataset (council round 7, G6).
+TAGGER_KINDS = ("delay-jitter", "deadtime-series")
+OTHER_TAGGER = "calibration taken on another tagger"
 
 MISFIT_ACCEPTED = "misfit calibration accepted"
 OUTSIDE_VALIDITY = "calibration outside its validity"
@@ -91,11 +103,15 @@ class DatasetContext:
     acquired: _dt.datetime | None = None
     conditions: Mapping[str, float] = field(default_factory=dict)
     input_sha256: frozenset[str] = frozenset()
+    #: The tagger that recorded the dataset (`model`, `serial`), as the artifact's `instrument`.
+    instrument: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.acquired is not None and self.acquired.tzinfo is None:
             raise ValueError("acquired must be timezone-aware (UTC)")
         object.__setattr__(self, "conditions", MappingProxyType({str(k): float(v) for k, v in self.conditions.items()}))
+        object.__setattr__(self, "instrument", MappingProxyType(
+            {str(k): str(v) for k, v in self.instrument.items() if v not in (None, "")}))
         object.__setattr__(self, "input_sha256", frozenset(str(h) for h in self.input_sha256))
 
 
@@ -120,29 +136,50 @@ def _parse_utc(text: str) -> _dt.datetime:
     return _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
+def setting_rtol(key: str) -> float:
+    """The relative tolerance within which a recorded setting must equal the dataset's."""
+    return SETTING_RTOL.get(key, EQUAL_RTOL)
+
+
 def condition_mismatches(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> list[str]:
-    """Why a calibration's recorded conditions do not cover the dataset's (empty if they do)."""
+    """Why a calibration's recorded conditions do not cover the dataset's (empty if they do).
+
+    Values are printed to 10 significant digits (council round 7, G2: `%g` showed two sync
+    periods 1e-7 apart as equal)."""
     out: list[str] = []
     for key, value in sorted(recorded.items()):
         if key.startswith("tagger_") or key.startswith("bias"):
             if key not in dataset:
-                out.append(f"{key} = {value:g} recorded, not given for the dataset")
-            elif not np.isclose(dataset[key], value, rtol=EQUAL_RTOL, atol=0.0):
-                out.append(f"{key} = {value:g} recorded, {dataset[key]:g} for the dataset")
+                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
+            elif not np.isclose(dataset[key], value, rtol=setting_rtol(key), atol=0.0):
+                out.append(f"{key} = {value:.10g} recorded, {dataset[key]:.10g} for the dataset")
         elif "_min_" in key:
             name, unit = key.split("_min_", 1)
             high_key, target = f"{name}_max_{unit}", f"{name}_{unit}"
             if high_key not in recorded:
                 continue
             if target not in dataset:
-                out.append(f"{key} = {value:g} recorded, not given for the dataset")
+                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
             elif not recorded[key] <= dataset[target] <= recorded[high_key]:
-                out.append(f"{target} = {dataset[target]:g} outside the calibrated {recorded[key]:g} to {recorded[high_key]:g}")
+                out.append(f"{target} = {dataset[target]:.10g} outside the calibrated {recorded[key]:.10g} to "
+                           f"{recorded[high_key]:.10g}")
         elif key == "temperature_K":
             if key not in dataset:
-                out.append(f"{key} = {value:g} recorded, not given for the dataset")
+                out.append(f"{key} = {value:.10g} recorded, not given for the dataset")
             elif abs(dataset[key] - value) > TEMPERATURE_TOLERANCE_K:
-                out.append(f"temperature_K = {value:g} recorded, {dataset[key]:g} for the dataset (tolerance {TEMPERATURE_TOLERANCE_K:g} K)")
+                out.append(f"temperature_K = {value:.10g} recorded, {dataset[key]:.10g} for the dataset (tolerance "
+                           f"{TEMPERATURE_TOLERANCE_K:g} K)")
+    return out
+
+
+def instrument_mismatches(recorded: Mapping[str, Any] | None, dataset: Mapping[str, Any] | None) -> list[str]:
+    """The tagger model and serial where the artifact's `instrument` record and the dataset's both
+    give them and differ (council round 7, G6)."""
+    out = []
+    for key in ("model", "serial"):
+        a, b = (recorded or {}).get(key), (dataset or {}).get(key)
+        if a and b and str(a).strip() != str(b).strip():
+            out.append(f"tagger {key} {a} recorded, {b} for the dataset")
     return out
 
 
@@ -220,6 +257,11 @@ def _check(
     if extra:
         found += condition_mismatches({**cal.conditions, **extra}, dataset.conditions)
     problems += list(dict.fromkeys(found))
+    tagger = instrument_mismatches(member.manifest.get("instrument"), dataset.instrument)
+    if tagger and cal.kind in TAGGER_KINDS:
+        problems += tagger
+    elif tagger:
+        labels.append(OTHER_TAGGER)
     return labels + _outside(problems, cal.kind, aid, analysis, rule)
 
 
@@ -405,6 +447,7 @@ __all__ = [
     "NO_VALIDITY",
     "NOT_CHECKED",
     "SERIES_UNUSED",
+    "OTHER_TAGGER",
     "OUTSIDE_VALIDITY",
     "TEMPERATURE_TOLERANCE_K",
     "CalibrationSet",
@@ -414,4 +457,6 @@ __all__ = [
     "condition_mismatches",
     "check_detectors",
     "detector_mismatches",
+    "instrument_mismatches",
+    "setting_rtol",
 ]

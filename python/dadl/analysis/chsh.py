@@ -39,6 +39,7 @@ from dadl.guardrails import (
     INTERRUPTED,
     Policy,
     corrected_threshold_labels,
+    t3_input,
     threshold_labels,
 )
 from dadl.stationarity import interrupted
@@ -345,6 +346,7 @@ def chsh(
     calibrations: "CalibrationSet | None" = None,
     channels: "dict[str, ChannelId] | None" = None,
     seed: int = 0,
+    source_type: str | None = None,
 ) -> LabelledValue:
     """Raw CHSH S from one run per setting pair, with a fixed window from the analysis plan.
 
@@ -357,8 +359,11 @@ def chsh(
     With `calibrations` (a `dadl.propagate.CalibrationSet`) and `channels` (each channel name's
     ChannelId), a corrected S from the forward model (`dadl.forward.corrected_chsh`) is added as a
     labelled secondary value; the headline stays raw. The default policy allows no correction
-    for CHSH, so each one needs `Policy.allow("chsh", correction, reason)`.
+    for CHSH, so each one needs `Policy.allow("chsh", correction, reason)`. On PTU T3 input the
+    corrected S is refused unless `source_type` declares CW light ("cw"), and the result is
+    labelled (`dadl.guardrails.t3_input`).
     """
+    t3_labels, _ = t3_input(runs, source_type, calibrations is not None)
     policy = policy or Policy.default()
     policy.check_window("chsh", window.source)
     check_delay_channels(window, CHANNELS)
@@ -376,7 +381,7 @@ def chsh(
         s += sign * e
         var += v
     raw = Estimate(s, math.sqrt(var))
-    labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw)
+    labels = (FAIR_SAMPLING, STATIC_SETTINGS) + policy.labels_for("chsh") + threshold_labels("chsh", raw) + t3_labels
     if interrupted(*([runs[k][ch] for ch in CHANNELS] for k in SIGNS)):
         labels += (INTERRUPTED,)
     counts: dict[str, object] = {f"{k[0]},{k[1]}": setting_counts(runs[k], window) for k in SIGNS}

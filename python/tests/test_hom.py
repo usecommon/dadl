@@ -181,3 +181,84 @@ def test_analyze_chsh_prints_the_dead_time_range(tmp_path, capsys):
     assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 0
     out = capsys.readouterr().out
     assert "Dead time known only as an upper limit: S = " in out and " at zero, " in out and " at the bound" in out
+
+
+def _pulsed(period, n_pulses, rng, p_single=0.01, p_pair=0.0, jitter=50.0):
+    """A pulsed source: per pulse, A and B each click with p_single, and a pair with p_pair."""
+    k = np.arange(n_pulses)
+    a, b, pair = (rng.random(n_pulses) < p for p in (p_single, p_single, p_pair))
+    out = {}
+    for name, hit in (("A", a | pair), ("B", b | pair)):
+        t = k[hit] * period + rng.normal(0, jitter, int(hit.sum())) + 1000
+        out[name] = np.unique(t.astype(np.int64))
+    return out
+
+
+def test_pulsed_t3_input_needs_a_declared_cw_source():
+    # Council round 7 (G3): at 76 MHz the side windows sample random phases of the pulse train and
+    # the accidentals read about W / period low; the corrected V was 0.962 for a true 1, unlabelled.
+    from dadl.data import RunTags
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import T3_INPUT
+
+    period = 13157.9
+    rng = np.random.default_rng(2)
+    plain = {"dip": _pulsed(period, 2_000_000, rng), "reference": _pulsed(period, 2_000_000, rng, p_pair=0.002)}
+    meta = {"mode": "T3", "sync_period_ps": period, "tick_ps": 2}
+    runs = {k: RunTags(v, metadata=meta) for k, v in plain.items()}
+    w = Window(1000, "plan")
+    with pytest.raises(GuardrailRefusal, match="Declare `source.type: cw`"):
+        hom_from_tags(runs, w, subtract_accidentals=True)
+    result, counts = hom_from_tags(runs, w)
+    assert result.corrected is None and T3_INPUT in result.labels
+    # Declared CW (the sync a clock only), the subtraction runs; here it is wrong, as the label says.
+    declared, _ = hom_from_tags(runs, w, source_type="cw")
+    assert declared.corrected is not None and T3_INPUT in declared.labels
+    assert counts["accidentals"] < 0.5 * counts["c_min"]
+    # T2 input (no sync period) is unaffected.
+    t2 = {k: RunTags(v, metadata={"mode": "T2", "tick_ps": 1}) for k, v in plain.items()}
+    for r in (t2, plain):
+        res, _ = hom_from_tags(r, w)
+        assert res.corrected is not None and T3_INPUT not in res.labels
+
+
+def test_hom_takes_a_delay_artifact_in_either_channel_order(tmp_path):
+    # Council round 7 (Q2): every artifact in the tests was in analysis order, every window delay 0;
+    # a sign error in the capture moved V by about 15 se unnoticed.
+    from test_forward import CA, CB, SIGN_DET, SIGN_LATE, assert_same_correction, sign_sets
+
+    from dadl.guardrails import Policy
+    from dadl.sim import simulate_pairs
+
+    rng = np.random.default_rng(30)
+    policy = Policy.default().allow("hom_visibility", "window_capture", "test")
+    sets = sign_sets(tmp_path, "hom_visibility", policy, {(CA, CB): simulate_pairs(2e5, SIGN_DET, SIGN_LATE, 0.05, rng)})
+    src = PairSource(pair_rate_per_s=2e5, visibility=0.92, coherence_time_ps=1.5)
+    runs = {k: simulate_hom(src, SIGN_DET, SIGN_LATE, d, 0.2, rng) for k, d in (("dip", 0.0), ("reference", 15.0))}
+    window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
+    ab, ba = (hom_from_tags(runs, window, policy=policy, calibrations=c, channels=(CA, CB), seed=2,
+                            reference_delay_ps=15.0) for c in sets)
+    assert ab[0].corrections == ("accidental_subtraction", "window_capture")
+    assert_same_correction(ab, ba)
+    c = ab[0].corrected
+    assert abs(c.value - 0.92) < 4 * c.stderr
+
+
+def test_the_predictive_check_looks_at_the_declared_delay(tmp_path):
+    # Council round 7 (Q2): crosstalk 100 ps beside the pair peak at the declared +400 ps is
+    # flagged; checked at -400 ps (a sign error) the window holds no peak and passes.
+    from test_forward import CA, CB, SIGN_DET, SIGN_LATE, sign_sets
+
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+    from dadl.sim import Crosstalk, simulate_pairs
+
+    rng = np.random.default_rng(33)
+    policy = Policy.default().allow("hom_visibility", "window_capture", "test")
+    ab, _ = sign_sets(tmp_path, "hom_visibility", policy, {(CA, CB): simulate_pairs(2e5, SIGN_DET, SIGN_LATE, 0.05, rng)})
+    src = PairSource(pair_rate_per_s=2e5, visibility=0.92, coherence_time_ps=1.5)
+    xt = (Crosstalk("A", "B", 0.02, 500.0, 20.0),)
+    runs = {k: simulate_hom(src, SIGN_DET, SIGN_LATE, d, 0.2, rng, xt) for k, d in (("dip", 0.0), ("reference", 15.0))}
+    window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
+    with pytest.raises(Misspecified):
+        hom_from_tags(runs, window, policy=policy, calibrations=ab, channels=(CA, CB), seed=2, reference_delay_ps=15.0)

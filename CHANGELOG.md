@@ -322,6 +322,46 @@ release the package still reports version 0.1.1.
     replicates: corrected 95.5%, control 87.5% (band 91.0-98.2%), misfit artifacts 0.8%, no flags,
     no refusals (the 1,000-replicate run is CI's).
 
+- Review council round 7 (method `series-gap-mle` 7; `dark`, `delay`, `accidentals` unchanged):
+  - T3 tick: a recorded T3 gap is within one dtime resolution of the true gap whatever the sync
+    period, but a measured (non-whole) period left the tags a 1 ps tick, so tau_np widened by
+    1 ps on 25 ps data (10 of 20 covered). `PtuFile.tick_ps` and `tag_tick_ps(folder)` give the
+    dtime resolution in T3 (plus 1 ps when tags are rounded); `calibrate_deadtime_series(...,
+    tick_ps=)` takes the larger of it and the tags' own, recorded as `tag_tick_ps` with
+    `tag_tick_declared`; `calibrate deadtime` and `calibrate pairs` pass it. tau_np then covers 20 of 20;
+  - the T3 sync period (`tagger_MeasDesc_GlobalResolution`) is compared to 1e-4, within a folder
+    and at use (two files 10 Hz apart at 80 MHz were refused; 80 against 76 MHz still is);
+    mismatches print 10 significant digits and both values;
+  - T3 input from a sync source: analyses label it ("T3 input: DADL models CW light") and refuse a
+    corrected value unless the source is declared CW (`source.type: cw`, `source_type="cw"`);
+    `read_tags` carries the sync period in each acquisition's metadata (`RunTags`). A pulsed
+    76 MHz HOM read V = 0.962 +- 0.001 for a true 1, unlabelled. Behaviour change: T3 users lose
+    corrected values until they declare the source;
+  - T3 files whose dtime range is shorter than the sync period get a `t3-range` event and note,
+    and `read_tags` refuses them; T3 with `HWSync_Divider` > 1 is refused by `calibrate dark` and
+    `calibrate deadtime` and labelled by analyses (convention unverified; M9 entry item);
+  - delay-jitter and deadtime-series artifacts from another tagger (model or serial in
+    `instrument`) are outside their validity; other kinds are labelled;
+  - sharded gate merges recompute the gates from the code, refuse an empty merge, and refuse a
+    result set other than the one the recorded family (or analysis) and regimes produce;
+  - a posterior `.npy` header is checked against the manifest before the table is read (a
+    192-byte file declaring 2^52 rows raised `MemoryError`);
+  - docs and hygiene: T3 memory figure (about 170 bytes per record), the T3 limit in the READMEs,
+    `persist-credentials: false` in `ppl-bench.yml`, the CmdStan binaries removed from the tree;
+  - tests: gate verdicts on synthetic results, coverage merge tiling, channel order and declared
+    delays on HOM, fringe and CHSH, wired labels observed through the analyses, behavioural oracles
+    for the dead-time intervals, the predictive check's statistics; two seed-fragile tests reworked
+    (CHSH selection at 2 s: 20 of 20 seeds; HOM with the capture modelled: 20 of 20 within 3 se);
+    slow tests run in one Linux CI job;
+  - known: the predictive check flags clean T3 tags with a measured sync period (p about 1e-100 at
+    25 ps, 12500.3 ps); reported to the council, not loosened (xfail test);
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p 95.5% (series-spad) and 94.6%
+    (passive-quench), tau_np 99.9% and 99.0%, misfits 0.3% and 0.0%: identical to round 6 (the
+    simulator's tags are on the 1 ps grid and no tick is declared);
+  - propagation gate at 200 replicates, unchanged: hom-snspd 94.5/94.5, hom-bright 95.0/95.5,
+    hom-crosstalk 30.5/32.5 with 100% flagged, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0;
+    both sharded merges run end to end; the 44 mutants the ruling names are all killed.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results
