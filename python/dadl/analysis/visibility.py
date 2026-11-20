@@ -32,6 +32,7 @@ from dadl.guardrails import (
     SINGLE_BASIS,
     WINDOW_UNDECLARED,
     Policy,
+    corrected_threshold_labels,
     threshold_labels,
 )
 from dadl.result import Estimate, LabelledValue
@@ -134,15 +135,20 @@ def _finish(
     min_count: float | None = None,
     not_computed: bool = False,
 ) -> LabelledValue:
-    labels = policy.labels_for(analysis) + threshold_labels(analysis, raw, corrected)
+    labels = policy.labels_for(analysis) + threshold_labels(analysis, raw)
     if min_count is not None and min_count < LOW_COUNT_MIN:
         labels += (LOW_COUNTS,)
     if not_computed:
         labels += (CORRECTION_NOT_COMPUTED,)
+    corrected_labels: tuple[str, ...] = ()
     if corrected is not None:
         # Teaching-lab review, cycle 4: the record said nothing about what the corrected value was.
-        labels += (ACCIDENTALS_SUBTRACTED,)
-    return LabelledValue(analysis=analysis, raw=raw, corrected=corrected, labels=labels, **policy.provenance())
+        # Council round 6 (R2): the corrected value's labels are kept apart from the raw value's.
+        corrected_labels = corrected_threshold_labels(analysis, raw, corrected) + (ACCIDENTALS_SUBTRACTED,)
+    return LabelledValue(
+        analysis=analysis, raw=raw, corrected=corrected, labels=labels, corrected_labels=corrected_labels,
+        **policy.provenance(),
+    )
 
 
 def bell_visibility(

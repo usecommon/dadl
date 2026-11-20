@@ -128,6 +128,15 @@ DEFAULT_RULES: Mapping[str, AnalysisRule] = MappingProxyType(
     }
 )
 
+#: Why a correction is refused by default, per analysis (the refusal text).
+REFUSAL_REASONS: Mapping[str, str] = MappingProxyType(
+    {
+        "chsh": "Bell-type headline numbers use raw counts only",
+        "bell_visibility": "Bell-type headline numbers use raw counts only",
+        "hom_visibility": "corrected values are secondary; the headline V uses raw counts",
+    }
+)
+
 #: SHA-256 of the shipped default policy. Pinned here (not computed at import)
 #: so that editing the rule tables in place cannot redefine "default";
 #: tests/test_guardrails.py checks that it matches.
@@ -221,10 +230,12 @@ class Policy:
 
     def check_correction(self, analysis: str, correction: str) -> None:
         if correction not in self.rule_for(analysis).allowed_corrections:
+            # Council round 6 (R7): HOM refusals read "Bell-type headline numbers".
+            why = REFUSAL_REASONS.get(analysis, "corrections are secondary values, allowed one by one")
             raise GuardrailRefusal(
-                f"Correction '{correction}' is not allowed for '{analysis}'. "
-                "Bell-type headline numbers use raw counts only; see docs/design.md, "
-                "'Scientific guardrails'."
+                f"Correction '{correction}' is not allowed for '{analysis}': {why}. Allow it with a written reason "
+                f"(Policy.allow({analysis!r}, {correction!r}, reason); on the CLI, --allow {correction}=REASON); see "
+                "docs/design.md, 'Scientific guardrails'."
             )
 
     def check_window(self, analysis: str, window_source: str) -> None:
@@ -304,4 +315,33 @@ def threshold_labels(
         elif abs(est.value - threshold) < 1.96 * est.stderr:
             labels.append(NEAR_THRESHOLD)
             break
+    return tuple(labels)
+
+
+def _near(est: Estimate, threshold: float) -> str | None:
+    if est.low is not None and est.high is not None:
+        return NEAR_THRESHOLD_EXACT if est.low <= threshold <= est.high else None
+    return NEAR_THRESHOLD if abs(est.value - threshold) < 1.96 * est.stderr else None
+
+
+def corrected_threshold_labels(
+    analysis: str, raw: Estimate, corrected: Estimate, ends: Sequence[float] = ()
+) -> tuple[str, ...]:
+    """The threshold labels of the corrected value alone (council round 6, R2: they were printed on
+    the raw line): "threshold crossed only after correction" (raw below, the corrected value or one
+    of `ends` at or above), the corrected interval containing the threshold, and a zero stderr."""
+    if analysis == "chsh" and raw.value < 0:
+        raw, corrected = _mirror(raw), _mirror(corrected)
+        ends = [-e for e in ends]
+    labels: list[str] = []
+    if corrected.stderr == 0:
+        labels.append(GAUSSIAN_INVALID)
+    threshold = THRESHOLDS.get(analysis)
+    if threshold is None:
+        return tuple(labels)
+    if raw.value < threshold <= max((corrected.value, *ends)):
+        labels.append(THRESHOLD_AFTER_CORRECTION)
+    near = _near(corrected, threshold)
+    if near:
+        labels.append(near)
     return tuple(labels)

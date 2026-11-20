@@ -101,7 +101,7 @@ def test_subtracted_visibility_reproduces_the_published_82_percent_only_under_a_
     # Subtraction recovers the injected pair visibility (it is the pairs' V, not the data's).
     assert r.corrected.value == pytest.approx(FRINGE_SOURCE.visibility, abs=3 * r.corrected.stderr + 0.01)
     assert POLICY_MODIFIED in r.labels
-    assert THRESHOLD_AFTER_CORRECTION in r.labels
+    assert THRESHOLD_AFTER_CORRECTION in r.corrected_labels
 
 
 # --- 2. The coincidence-time loophole (arXiv:1503.07573, arXiv:1309.0712) ---------------------------

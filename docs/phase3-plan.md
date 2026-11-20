@@ -209,6 +209,32 @@ series model below is phase 3"; README limit; expert review Q2.
 - CI: one job with the `mcmc` extra on Windows, Linux and macOS.
 - Entry item (council round 5, V4): before M5 reads `deadtime-series` artifacts, a minimum-version
   table (kind, method) -> version in `propagate` that refuses or labels older ones, with a test.
+- Entry items (council round 6):
+  - **What NUTS samples (B1; owner item).** Name the model NUTS samples (likelihood, parameters,
+    priors): a new joint likelihood (the dip or fringe histogram with the IRF, or calibration and
+    counts together), or state "calibration fits only". The M2/M3 forward model has no likelihood
+    of its own (closed form with Monte Carlo draws). Re-run `bench/ppl` on the chosen model.
+  - **Starts and modes (B2).** Chains from overdispersed starts (the Laplace covariance scaled by
+    4-9, plus one chain per known branch or mode), so multimodality shows in R-hat; branch
+    enumeration and unions stay outside the sampler; the start rule is recorded in `checks`.
+  - **Boundaries (B3).** Dead time stays conditioned on the shortest gap m with exact draws;
+    tau_p = tau_np sigmoid(z) and smooth transforms for the fit boxes, with proper priors.
+    Divergences are recorded, but the "any divergence makes a misfit" rule applies only after the
+    reparametrization is tested on passive-quench and series-spad.
+  - **Priors (B4).** Stored draws are posteriors under flat priors in the fit's coordinates (log
+    rate, logit p, log tau_a) inside the fit's box; rank checks confirm this (round 6). Near p = 0
+    that prior is improper without the box. Declare proper priors per calibration, record them in
+    the artifact, and bump the method version where draws move.
+  - **Shared row index (B5).** A series tau_p's draws lose their correlation (about 0.3) with the
+    dark afterpulse draws they were propagated from: `CalibrationSet.draws` needs a shared row
+    index across a series artifact and its cited dark artifact, with the reviewer's correlation
+    test.
+  - **Stored draws gated (B7, review item 7.17).** A rank-statistic test per propagated
+    calibration (as the round-6 `sbc_dark.py` probe), run with `--sampler nuts`.
+  - **Scan range at use (T6).** Check the analysed rate against a series artifact's recorded scan
+    rates, renaming `scan_rate_low_cps` / `scan_rate_high_cps` to the `_min_`/`_max_` bracket
+    convention when the check is wired.
+  - The round-5 V4 minimum-version table (above) is still open.
 
 ### M6. Signing primitives and `dadl verify`
 
@@ -333,7 +359,9 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Opt-in per-detector efficiency normalisation for corrected S (new correction name, policy line and a gate regime) | M4 council round 2 (B4) | M10; 0.2.x if not done |
 | D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a chsh-dead-time regime whose dark runs identify the dead time or that gates the range | M4 council round 2 (B2, G) | M10, next to rotating seeds (regimes were declared before the first run; needs the owner's agreement) |
 | Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
-| Stored draws gated, not only intervals | cycle 7.17 | M1 (the draws are now used) |
+| Stored draws gated, not only intervals (a rank-statistic test per propagated calibration) | cycle 7.17; council round 6 (B7) | M5 entry item (moved from M1; 7.17 stays open with that target) |
+| `dadl simulate --heralding --pair A-,B+`: heralding runs for the other three CHSH channel pairs | council round 6 (R6) | M10 |
+| A coverage regime with an unidentified tau_p, to gate the upper limit's level (one-sided about 97.5%) | council round 6 (T7 c) | M10, next to rotating seeds (owner's agreement) |
 | Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M10, next to rotating seeds (owner's agreement) |
 | User declaration of scan runs past the count-rate maximum | M4 council round 4 (DT3) | M10, with the past-maximum regime |
 | Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M10, checked on the past-maximum regime |

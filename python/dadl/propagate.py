@@ -283,6 +283,16 @@ class CalibrationSet:
     dataset_checked: bool = True
     #: The `DatasetContext` the set was checked against, if any.
     dataset: DatasetContext | None = None
+    #: Labels each artifact's checks added, by artifact ID (`labels_for`).
+    member_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def labels_for(self, artifact_ids: Iterable[str]) -> tuple[str, ...]:
+        """The set's labels, without those that only artifacts outside `artifact_ids` added (council
+        round 6, R2: a CHSH result carried "no validity range" for artifacts it did not use)."""
+        ids = set(artifact_ids)
+        other = {lab for aid, labs in self.member_labels.items() if aid not in ids for lab in labs}
+        own = {lab for aid, labs in self.member_labels.items() if aid in ids for lab in labs}
+        return tuple(lab for lab in self.labels if lab not in other or lab in own)
 
     def dataset_record(self) -> dict[str, object] | None:
         """The dataset context the artifacts were checked against, for a result's counts."""
@@ -343,15 +353,18 @@ class CalibrationSet:
             seen[key] = m.artifact_id
         members = list({m.artifact_id: m for m in members}.values())
         labels: list[str] = []
+        per: dict[str, tuple[str, ...]] = {}
         for m in members:
-            labels += _check(m, analysis, policy, dataset, setup)
+            per[m.artifact_id] = tuple(_check(m, analysis, policy, dataset, setup))
+            labels += per[m.artifact_id]
         if skipped_series:
             labels.append(SERIES_UNUSED)
         if dataset is None:
             labels.append(NOT_CHECKED)
         if policy.is_modified:
             labels.insert(0, POLICY_MODIFIED)
-        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None, dataset)
+        return cls(analysis, tuple(members), tuple(dict.fromkeys(labels)), dataset is not None, dataset,
+                   MappingProxyType(per))
 
     @property
     def artifact_ids(self) -> tuple[str, ...]:

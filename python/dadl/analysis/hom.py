@@ -45,7 +45,7 @@ from dadl.analysis._twopoint import (
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
-from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels
 from dadl.propagate import CalibrationSet
 from dadl.stationarity import interrupted
 from dadl.result import LabelledValue
@@ -177,11 +177,12 @@ def hom_from_tags(
         )
         counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
-        labels = tuple(dict.fromkeys(
-            labels + fwd.labels + check_labels + threshold_labels("hom_visibility", result.raw, fwd.estimate, range_ends(extra))
-        ))
+        corrected_labels = fwd.labels + check_labels + corrected_threshold_labels(
+            "hom_visibility", result.raw, fwd.estimate, range_ends(extra)
+        )
         result = dataclasses.replace(
-            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
+            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids,
+            corrected_labels=tuple(dict.fromkeys(lab for lab in corrected_labels if lab not in labels)),
         )
         # The forward model subtracts the accidentals itself (council round 4: 0.0 was recorded).
         counts["subtracted"] = float("accidental_subtraction" in fwd.corrections)

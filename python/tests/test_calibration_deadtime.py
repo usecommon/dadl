@@ -91,7 +91,7 @@ def test_recovery_at_three_points(tau_p, tau_np, rates):
     assert cal.estimates["dead_time_p_ps"].contains(tau_p)
     assert cal.estimates["dead_time_ps"].contains(tau_np)
     assert "dead_time_p_ps" not in cal.unidentified
-    assert cal.conditions["lr_hard_edge"] > 3.84
+    assert cal.conditions["two_ln_lr_hard_edge"] > 3.84
     assert cal.samples.shape == (200, 2) and np.all(cal.samples[:, 0] <= cal.samples[:, 1])
 
 
@@ -125,7 +125,7 @@ def test_the_dark_artifact_is_cited():
                               n_draws=400)
         cal = calibrate_deadtime_series(runs, CH, afterpulse=dark, backend="sim", seed=1, n_draws=10)
         assert set(dark.inputs) <= set(cal.inputs)
-        assert cal.conditions["afterpulse_prob_sd_held"] > 0 and cal.conditions["afterpulse_tau_sd_held"] > 0
+        assert cal.conditions["afterpulse_prob_sd_held"] > 0 and cal.conditions["afterpulse_tau_ps_sd_held"] > 0
         cals.append(cal)
     assert cals[0].inputs != cals[1].inputs
 
@@ -415,7 +415,7 @@ def test_a_run_past_the_count_rate_maximum_is_fitted_on_its_branch(seed):
     runs = [detect(poisson_times(r, 0.02, rng), det, 0.02, rng) for r in (1e6, 3e6, 6e7)]
     cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, seed=1, n_draws=10)
     assert cal.estimates["dead_time_p_ps"].contains(40_000.0)
-    assert any("input rate 5" in n or "input rate 6" in n for n in cal.notes if n.startswith("run 2"))
+    assert any("+ dark) 5" in n or "+ dark) 6" in n for n in cal.notes if n.startswith("run 2"))
     # Council round 4: the branch is decided once, and the note names the run past the maximum.
     assert any(n.startswith("run(s) [2]") and "count-rate maximum" in n for n in cal.notes)
     assert cal.conditions["branch_nll_gain"] > 0
@@ -477,7 +477,7 @@ def test_a_scan_below_the_maximum_stays_on_the_low_branch(i):
     assert 0 < cal.conditions["branch_nll_gain"] <= BRANCH_MARGIN
     assert any("fit about as well past the count-rate maximum" in n for n in cal.notes)
     assert not any("second pending afterpulse" in n for n in cal.notes)
-    assert all("input rate 1e+08" not in n and "input rate 9" not in n for n in cal.notes if n.startswith("run 2"))
+    assert all("+ dark) 1e+08" not in n and "+ dark) 9" not in n for n in cal.notes if n.startswith("run 2"))
 
 
 def test_series_refusals_of_inputs():
@@ -512,3 +512,130 @@ def test_without_afterpulsing_a_rate_past_the_maximum_is_ambiguous():
     cal = calibrate_deadtime_series(runs, CH, seed=1, n_draws=10)
     note = next(n for n in cal.notes if n.startswith("run 2"))
     assert " or " in note and "do not tell which" in note
+
+
+# Review council, round 6.
+
+
+def _ticked(rate_cps: float, duration_s: float, tau_ps: float, tick: int, rng) -> np.ndarray:
+    """A continuous-time hard-edge detector (no paralyzable stage), tags floored to the tick."""
+    t = np.sort(rng.uniform(0, duration_s * 1e12, rng.poisson(rate_cps * duration_s)))
+    out, last = [], -1e30
+    for x in t:
+        if x - last >= tau_ps:
+            out.append(x)
+            last = x
+    return (np.floor(np.array(out) / tick) * tick).astype(np.int64)
+
+
+def test_tau_np_allows_one_tick_either_side():
+    # Council round 6 (T1): with tau_np 40 ps off an 80 ps tick the interval was [21920, 21920],
+    # missing the truth every time (r6-metro tick.py 21960 80).
+    for seed in range(3):
+        rng = np.random.default_rng(seed)
+        runs = [_ticked(r, 0.01, 21_960.0, 80, rng) for r in (2e6, 5e6)]
+        cal = calibrate_deadtime_series(runs, CH, seed=seed, n_draws=50)
+        e = cal.estimates["dead_time_ps"]
+        assert e.contains(21_960.0) and e.high > e.low
+        assert cal.conditions["tag_tick_ps"] == 80.0
+        assert abs(cal.samples[:, 1] - e.value).max() <= e.high - e.low
+
+
+@pytest.mark.slow
+def test_tau_np_covers_an_off_grid_truth():
+    # Council round 6 (T1): off the 25 ps grid the old interval covered 0 of 400; one tick either
+    # side covered 395 of 400 (r6-council tick2.py). The interval is never of zero width.
+    covered = 0
+    for s in range(100):
+        rng = np.random.default_rng(s)
+        tau = 22_000.0 + rng.uniform(0, 25)
+        cal = calibrate_deadtime_series([_ticked(r, 0.01, tau, 25, rng) for r in (2e6, 5e6)], CH, seed=s, n_draws=20)
+        e = cal.estimates["dead_time_ps"]
+        assert e.high - e.low >= 50
+        covered += e.contains(tau)
+    assert covered >= 95
+
+
+def test_a_dark_artifact_under_other_conditions_is_refused():
+    # Council round 6 (T2): a 25 V / 233 K dark artifact was held for a 30 V / 300 K scan, silently.
+    from dadl.errors import StaleCalibration
+
+    det = _det(20_000, 50_000, dark_rate_cps=50_000.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0)
+    rng = np.random.default_rng(5)
+    ap = calibrate_dark(simulate_dark(det, 0.5, rng), CH, backend="sim", seed=1, n_draws=200,
+                        conditions={"bias_V": 25.0, "temperature_K": 233.0})
+    runs = [detect(poisson_times(r, 0.005, rng), det, 0.005, rng) for r in (2e6, 5e6)]
+    scan = {"bias_V": 30.0, "temperature_K": 300.0}
+    with pytest.raises(StaleCalibration, match="bias_V = 25 recorded, 30 for the dataset"):
+        calibrate_deadtime_series(runs, CH, afterpulse=ap, conditions=scan, seed=1, n_draws=10)
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, conditions=scan, seed=1, n_draws=10,
+                                    allow_condition_mismatch="same module, checked by hand")
+    assert any("used anyway: same module, checked by hand" in n for n in cal.notes)
+    assert cal.conditions["dark_bias_V"] == 25.0 and cal.conditions["dark_temperature_K"] == 233.0
+    same = calibrate_deadtime_series(runs, CH, afterpulse=ap, conditions={"bias_V": 25.0, "temperature_K": 233.0},
+                                     seed=1, n_draws=10)
+    assert not any("used anyway" in n for n in same.notes)
+
+
+@pytest.mark.slow
+def test_the_tau_p_budget_is_recorded():
+    # Council round 6 (T3, T6, T8): on the metrologist's pq.py replicate the statistical-only
+    # interval was [28421.5, 41770.3] ps (from a refit with the afterpulse draws collapsed) and the
+    # combined one [28397.5, 41882.2]; neither the split nor the sensitivities were recorded.
+    from dadl.artifact import build_manifest
+    from dadl.calibration.coverage import DEADTIME_REGIMES
+
+    reg = DEADTIME_REGIMES["passive-quench"]
+    rng = np.random.default_rng(7)
+    ap = calibrate_dark(simulate_dark(reg.detector, reg.dark_duration_s, rng), CH, backend="sim", seed=1, n_draws=400)
+    runs = [detect(poisson_times(r, reg.duration_s, rng), reg.detector, reg.duration_s, rng) for r in reg.rates_cps]
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, backend="sim", seed=1)
+    c, e = cal.conditions, cal.estimates["dead_time_p_ps"]
+    assert c["dead_time_p_stat_low_ps"] == pytest.approx(28_421.5, abs=1.0)
+    assert c["dead_time_p_stat_high_ps"] == pytest.approx(41_770.3, abs=1.0)
+    assert (e.low, e.high) == (pytest.approx(28_397.5, abs=1.0), pytest.approx(41_882.2, abs=1.0))
+    assert c["dead_time_p_u_afterpulse_ps"] == pytest.approx(371, abs=1)
+    assert {"dtau_p_dp_ps", "dtau_p_dtau_a", "afterpulse_p_tau_corr_used", "afterpulse_tau_ps_sd_held"} <= set(c)
+    assert c["scan_rate_low_cps"] < c["scan_rate_high_cps"] and c["scan_duration_low_s"] > 0
+    assert "avalanche-candidate rate" in next(n for n in cal.notes if n.startswith("run 0"))
+    manifest, _ = build_manifest(cal)
+    assert manifest["uncertainty"]["kind"].startswith("statistical, with afterpulse parameters propagated")
+
+
+@pytest.mark.slow
+def test_union_draws_stay_off_the_gap_between_branches():
+    # Council round 6 (B6): with the two branch fits disjoint (26.5-31.8 and 35.1-39.6 ns), one
+    # split normal over the union put 18% of draws between them. An equal-weight mixture of the two
+    # split normals leaves only their tails there (about 2.5% by construction; 2.8% here).
+    import re
+    import zlib
+    from dataclasses import replace
+
+    from dadl.calibration.coverage import DEADTIME_REGIMES
+
+    reg = DEADTIME_REGIMES["passive-quench"]
+    g = np.random.default_rng([11, 158, zlib.crc32(b"passive-quench")])
+    det = replace(reg.detector, dead_time_p_ps=int(g.integers(30_000, 44_000)))
+    ap = calibrate_dark(simulate_dark(det, reg.dark_duration_s, g), CH, backend="sim", seed=158, n_draws=2000)
+    runs = [detect(poisson_times(x, reg.duration_s, g), det, reg.duration_s, g) for x in reg.rates_cps]
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, backend="sim", seed=158)
+    note = next(n for n in cal.notes if "spans" in n)
+    (lo1, hi1), (lo2, hi2) = [(float(a), float(b)) for a, b in re.findall(r"([0-9.e+]+) to ([0-9.e+]+) ps", note)]
+    gap = (hi1, lo2) if hi1 < lo2 else (hi2, lo1)
+    assert gap[0] < gap[1]
+    d = cal.samples[:, 0]
+    assert float(np.mean((d > gap[0]) & (d < gap[1]))) < 0.035
+
+
+def test_interval_and_limit_print_their_level():
+    # Council round 6 (T7): "39457.3 [28397.5, 41882.2]" stated no level and too many digits.
+    from dadl.calibration.base import Calibration
+    from dadl.stats import Interval
+
+    assert str(Interval(39457.3, 28397.5, 41882.2)) == "39500 (95% interval [28400, 41900])"
+    assert str(Interval(0.004461, 0.003512, 0.005633)) == "0.00446 (95% interval [0.00351, 0.00563])"
+    limit = Calibration(kind="deadtime-series", method="m", method_version="6", channels=(CH,),
+                        estimates={"dead_time_p_ps": Interval(0.0, 0.0, 772.203)}, units={"dead_time_p_ps": "ps"},
+                        samples=np.zeros((1, 1)), sample_params=("dead_time_p_ps",), converged=True, ppc_pvalue=0.5,
+                        inputs=(), unidentified=("dead_time_p_ps",))
+    assert "<= 772.2 (95% upper limit only)" in str(limit)

@@ -236,7 +236,7 @@ def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, boo
     c, truth = result.corrected, regime.truth
     half = 1.959964 * c.stderr_statistical
     covered = c.low <= truth <= c.high
-    return covered, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.labels
+    return covered, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.all_labels
 
 
 def propagation(

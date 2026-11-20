@@ -265,6 +265,61 @@ release the package still reports version 0.1.1.
   - docs: dev-branch validity rule and version, schema wording on `deadtime-series`, gap-check
     floor at low dark counts, unreleased features marked, counts keys, CLI help and refusals.
 
+- Review council round 6 (method `series-gap-mle` 6; `dark` unchanged at 7):
+  - **Behaviour change (owner to accept in the release notes):** an identified dark dead time
+    whose dead fraction at the analysed rate exceeds 20% is refused, as a bound was (it was only
+    labelled; there is no override). A 22 ns SPAD above about 9 Mcps loses its corrected value
+    until M5's series route. To correct the rest, move the dark artifacts out of the calibrations
+    folder;
+  - the dead-time gap check uses the 95% lower end as its floor when three widths reach below
+    zero (`gap_check_floor_kind` "3 widths" or "lower end"). An SNSPD's 30 ns read as an
+    identified 20 us in 7 of 200 default dark runs, none covering, and gave V = 0.55 +- 6.2 with
+    exit 0; all 7 are now refused, and the 20 covering loose chsh-spad identifications still
+    pass. `calibrate dark` warns when the lower end is more than 3x the declared dead time;
+  - results keep the corrected value's labels apart (`corrected_labels`, a new record column;
+    `all_labels` is both): threshold labels are evaluated per value, and calibration labels come
+    only from the artifacts the value used. The CLI prints them under the corrected line;
+  - forward-model HOM and fringe values carry "secondary; the headline is raw V" and the CLI
+    marks the HOM line "(secondary; not an indistinguishability claim)";
+  - corrected records carry `calibration_excludes` (the used artifacts' `uncertainty.not_included`),
+    printed on one line; stat and calibration parts print with 2 significant figures;
+  - refusal text names the analysis (HOM: "corrected values are secondary; the headline V uses raw
+    counts") and the CLI remedy; HOM analyze prints the declaration caveat; quickstart and
+    `calibrate pairs` say that CHSH window capture needs four heralding runs;
+  - series tau_np: the interval allows one tick either side and the draws add the rounding of two
+    floored times (an off-grid truth was missed every time: 0 of 400 at 25 ps; now 98.75%);
+    `tag_tick_ps` recorded. On the simulator's grid the widening is conservative by
+    construction, so the coverage gate's tau_np figure says little; the off-grid test checks the
+    tick term;
+  - series: a dark artifact recorded under other conditions (bias, temperature, tagger settings)
+    is refused unless `allow_condition_mismatch` (CLI `--allow-condition-mismatch REASON`) gives
+    a reason, which is noted; `dark_bias_V` and `dark_temperature_K` are recorded;
+  - series record: the tau_p budget (`dead_time_p_stat_low_ps`, `dead_time_p_stat_high_ps`,
+    `dead_time_p_u_afterpulse_ps`, `dtau_p_dp_ps`, `dtau_p_dtau_a`, `afterpulse_p_tau_corr_used`),
+    the scan range (`scan_rate_low_cps`, `scan_rate_high_cps`, `scan_duration_low_s`,
+    `scan_duration_high_s`), `uncertainty.kind` per kind; `lr_hard_edge` renamed
+    `two_ln_lr_hard_edge` and `afterpulse_tau_sd_held` `afterpulse_tau_ps_sd_held`; notes say
+    "2 ln(likelihood ratio)" and "avalanche-candidate rate ... s^-1"; tau_np's definition
+    separates the quantity from its estimator;
+  - union intervals are drawn as an equal-weight mixture of the two branch fits' split normals
+    (one split normal put 18% of draws in the gap between disjoint branches; now 2.8%, the
+    components' tails);
+  - printed intervals state their level ("95% interval", "95% upper limit") and round to two
+    significant figures of the smaller half-width (display only);
+  - docs: README methods section for corrected values and the limits found (identified dark dead
+    time, model-conditional calibration part, tick, four heralding runs, flat priors of stored
+    draws); phase 3 plan: M5 entry items (what NUTS samples, starts, boundaries, priors, shared
+    row index, stored draws gated, scan range at use) and M10 items; benchmark record: steady-
+    state speed;
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p covered 95.5% (series-spad) and 94.6%
+    (passive-quench), as in round 5; tau_np 99.9% and 99.0% (was 99.2% and 97.3%; conservative by
+    construction on the grid, gate "at least 95%" unchanged); misfits 0.3% and 0.0%;
+  - propagation gate at 200 replicates: hom-snspd, hom-bright, hom-crosstalk and chsh-spad
+    unchanged (94.5/94.5, 95.0/95.5, 30.5/32.5 with 100% flagged, 93.5/93.5). chsh-dead-time does not
+    complete: the lower-end floor refuses 42 of 200 replicates whose dark dead time is identified
+    at 125-210 ns for a 50 ns truth (lower ends 52-136 ns, real misses). Reported to the council,
+    rule not loosened; on the other 158 corrected 96.2%, control 89.2%.
+
 ### Published results as executable tests
 
 - `python/tests/test_published_results.py` rebuilds three published results

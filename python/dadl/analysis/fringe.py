@@ -36,7 +36,7 @@ from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates
 from dadl.analysis.visibility import bell_visibility
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
-from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels
 from dadl.propagate import CalibrationSet
 from dadl.result import LabelledValue
 from dadl.stationarity import interrupted
@@ -152,11 +152,12 @@ def fringe_from_tags(
             window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
-        labels = tuple(dict.fromkeys(
-            labels + fwd.labels + check_labels + threshold_labels("bell_visibility", result.raw, fwd.estimate, range_ends(extra))
-        ))
+        corrected_labels = fwd.labels + check_labels + corrected_threshold_labels(
+            "bell_visibility", result.raw, fwd.estimate, range_ends(extra)
+        )
         result = dataclasses.replace(
-            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
+            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids,
+            corrected_labels=tuple(dict.fromkeys(lab for lab in corrected_labels if lab not in labels)),
         )
     if interrupted(*([np.sort(runs[k][ch]) for ch in FRINGE_CHANNELS] for k in FRINGE_SETTINGS)):
         labels += (INTERRUPTED,)

@@ -440,7 +440,8 @@ def deadtime_coverage(
     the shortest gap equals tau_np in about 79% and 45% of replicates; the simulator's integer
     dead time makes the tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2%
     and 97.3%), so it is gated at least 95%; this gate has little power against edge-density
-    errors (M10 item).
+    errors (M10 item). Since council round 6 the interval allows one tick either side (99.9% and
+    99.0%): on the grid that is conservative by construction; an off-grid test checks the tick term.
     """
     reg = DEADTIME_REGIMES[regime]
     det = reg.detector

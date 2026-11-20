@@ -63,7 +63,8 @@ maximum the gaps do not tell which rate it is. With afterpulsing the branches di
 Each run is taken below the count-rate maximum (n tau_p < 1, the designed scan) unless the fit
 with each run on its better branch is better by more than `BRANCH_MARGIN` = 5 in NLL (a likelihood
 ratio of about 150); then those runs are fitted past it. Within the margin the interval spans both
-fits and a note names the runs. Below the maximum the high branch fits worse in expectation
+fits and a note names the runs; the draws are an equal-weight mixture of the two fits' split
+normals (council round 6, B6: one split normal over the union put 18% of draws in the gap between). Below the maximum the high branch fits worse in expectation
 (Asimov: 2.5-5.6 NLL for the CI and CHANGELOG scans) and wins by more than 3 in about 0.5% of scans
 (9 of 2,000, round 5); with margin 5 the false-switch rate is at most about 8e-4 for any separation
 (Cox's normal approximation for non-nested fits: Phi(-sqrt(2M))). Past it (1/3/60 Mcps) the margin
@@ -71,14 +72,38 @@ is passed in 28 of 48 and the union covers the rest. Refits for the afterpulse s
 each run's branch. Past the maximum, coverage is checked by probes only (no CI regime; M10).
 
 **Fit.** tau_np is the shortest gap over all runs, with the dark fit's exact tick-quantile
-interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge. The gaps
+interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge, widened by one
+tick either side (council round 6, T1). Dead times are read on the tagger's tick: a recorded gap is
+within one tick of the true gap, and a true tau_np off the tick grid (real dead times are analogue)
+lies up to one tick above the shortest gap and, with the edge excess, below the quantile interval's
+lower end. The interval therefore allows one tick either side, and the draws add the triangular
+rounding of a difference of two floored times (tick x (u1 - u2)). The dark dead-time interval does
+not; it spans many ticks in any dark run, so the difference is below its resolution. On the
+simulator's grid (integer tau_np, 1 ps tags) the widening is pure conservatism. The gaps
 past it are binned (fine uniform bins, then geometric ones) and fitted by multinomial maximum
 likelihood in (tau_p, n_1 ... n_K); given tau_p the runs are independent, so the profile
 likelihood of tau_p is a sum of one-dimensional fits. The 95% interval for tau_p is the profile
 likelihood's (chi-square(1)) on the decided branches (above); when it reaches tau_p = 0 the
 hard-edge model is not rejected and tau_p is an upper limit (unidentified; draws uniform below
-it, a stand-in). tau_p's point, upper end and draws are capped at tau_np's. The likelihood ratio against the hard-edge model is
-recorded (`lr_hard_edge`).
+it, a stand-in). tau_p's point, upper end and draws are capped at tau_np's. 2 ln(likelihood
+ratio) against the hard-edge model is recorded (`two_ln_lr_hard_edge`).
+
+**Intervals.** The 95% interval of an identified tau_p combines the profile half-widths
+(statistical, recorded as `dead_time_p_stat_low_ps` and `dead_time_p_stat_high_ps`) with 1.96
+times the afterpulse shift sd (`dead_time_p_u_afterpulse_ps`, from the sensitivities
+`dtau_p_dp_ps` and `dtau_p_dtau_a` and the dark draws' covariance, correlation
+`afterpulse_p_tau_corr_used`), side by side in quadrature. An upper limit on tau_p uses the
+two-sided 95% threshold (2 ln LR = 3.84); on the tau_p >= 0 boundary that is a one-sided limit of
+about 97.5%. No coverage regime is unidentified, so this level is not gated. The scanned range is
+recorded (`scan_rate_low_cps`, `scan_rate_high_cps`: recorded count rates; `scan_duration_low_s`,
+`scan_duration_high_s`); an effective tau_p describes those rates, not rates above them (checked at
+use from M5).
+
+**Conditions.** The dark artifact's recorded conditions are compared with the scan's
+(`dadl.propagate.condition_mismatches`): afterpulsing depends on bias and temperature, so a
+mismatch is refused (`StaleCalibration`) unless `allow_condition_mismatch` gives a reason (then
+noted). The dark artifact's bias and temperature are copied as `dark_bias_V` and
+`dark_temperature_K`.
 
 **Predictive check.** A Pearson chi-square over all runs' bins, merged until each expects at
 least 5 gaps, on (groups - 1) degrees of freedom (conservative for a fit on the fine bins; see
@@ -111,7 +136,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "5"
+METHOD_VERSION = "6"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -139,8 +164,9 @@ UNITS = {"dead_time_p_ps": "ps", "dead_time_ps": "ps"}
 DEFINITIONS = {
     "dead_time_p_ps": "paralyzable stage: an avalanche candidate passes only if the previous candidate (passed or not) "
     "is at least this much earlier",
-    "dead_time_ps": "non-paralyzable stage after the paralyzable one: blocks this long after each recorded avalanche; "
-    "the shortest recorded gap, so it includes the tagger's timing jitter",
+    "dead_time_ps": "non-paralyzable dead time as recorded: the lower edge of the gap distribution, at the tagger's "
+    "tick, so it includes the tagger's timing jitter; estimated as the shortest gap minus ln 2 / (edge density), to "
+    "within one tick (the interval allows one tick either side of the tick-quantile interval)",
 }
 
 
@@ -543,6 +569,7 @@ def calibrate_deadtime_series(
     seed: int | None = None,
     n_draws: int = N_DRAWS,
     conditions: dict[str, float] | None = None,
+    allow_condition_mismatch: str | None = None,
 ) -> Calibration:
     """Fit tau_p and tau_np from illuminated acquisitions of one channel at two or more rates.
 
@@ -551,7 +578,9 @@ def calibrate_deadtime_series(
     afterpulse probability and time constant are held fixed with their uncertainty propagated.
 
     Refuses fewer than two runs, a run under 1,000 gaps, duplicate timestamps, the same run twice,
-    and an afterpulse artifact of another kind or channel. Each run is fitted below the count-rate
+    an afterpulse artifact of another kind or channel, and one whose recorded conditions (bias,
+    temperature, tagger settings) do not cover `conditions` (`StaleCalibration`), unless
+    `allow_condition_mismatch` gives a reason, which is noted. Each run is fitted below the count-rate
     maximum unless the fit past it wins by `BRANCH_MARGIN` (module docstring, "Two rates per gap
     law").
     """
@@ -581,6 +610,29 @@ def calibrate_deadtime_series(
             have = ", ".join(str(c) for c in afterpulse.channels)
             raise ValueError(f"the afterpulse artifact is for channel(s) {have}, not {channel}")
     notes: list[str] = []
+    dark_conditions: dict[str, float] = {}
+    if afterpulse is not None:
+        # Council round 6 (T2): a 25 V / 233 K dark artifact was held for a 30 V / 300 K scan, silently.
+        from dadl.errors import StaleCalibration
+        from dadl.propagate import condition_mismatches
+
+        dark_recorded = dict(getattr(afterpulse, "conditions", None) or {})
+        mism = condition_mismatches(dark_recorded, dict(conditions or {}))
+        if mism and not (allow_condition_mismatch and allow_condition_mismatch.strip()):
+            raise StaleCalibration(
+                f"the dark artifact's conditions do not match this scan's: {'; '.join(mism)}. Afterpulsing depends "
+                "on bias and temperature; calibrate dark under the scan's conditions, or pass "
+                "allow_condition_mismatch=REASON (CLI: --allow-condition-mismatch REASON)."
+            )
+        if mism:
+            notes.append(f"the dark artifact's conditions differ from this scan's ({'; '.join(mism)}); used anyway: "
+                         f"{allow_condition_mismatch.strip()}")
+        # Names outside the use-time prefixes (bias*, temperature_K), so analyses do not demand them.
+        for key, value in dark_recorded.items():
+            if key.startswith("bias"):
+                dark_conditions[f"dark_{key}"] = float(value)
+            elif key == "temperature_K":
+                dark_conditions["dark_temperature_K"] = float(value)
     if afterpulse is not None and afterpulse.status == "misfit":
         notes.append(f"the afterpulse artifact for {channel} is a misfit (predictive p = {afterpulse.ppc_pvalue:.2g}): "
                      "its p and tau_a are used as given")
@@ -611,6 +663,8 @@ def calibrate_deadtime_series(
     low, high = _profile_interval(fit, tau, nll_min, nll0, tau_hi, points)
     rates = fit.rates(tau)
     branch_gain = 0.0
+    #: Within the branch margin: the two fits (MLE, low, high), for the mixture draws.
+    union: list[tuple[float, float, float]] = []
     if p > 0:
         glob = _Fit(binned, p, tau_a)
         t_g, nll_g, nll0_g, pts_g = _fit_tau(glob, tau_hi, held_min=(tau if tau > 0 else 1.0, nll_min), nll0=nll0)
@@ -628,6 +682,7 @@ def calibrate_deadtime_series(
                 notes.append(f"run(s) {past} fit about as well past the count-rate maximum ({branch_gain:.1f} in "
                              f"NLL, margin {BRANCH_MARGIN:g}): the interval spans that fit ({low_g:.4g} to "
                              f"{high_g:.4g} ps) and the one below it ({low:.4g} to {high:.4g} ps)")
+                union = [(tau, low, high), (t_g, low_g, high_g)]
                 low, high = min(low, low_g), max(high, high_g)
     identified = low > 0.0
 
@@ -635,6 +690,7 @@ def calibrate_deadtime_series(
     # limit, the sensitivity of the limit itself (whatever the MLE).
     shift_sd = 0.0
     sens = np.zeros(2)
+    ap_corr = 0.0
     if ap_draws is not None:
         sd = ap_draws.std(axis=0)
         for k in range(2):
@@ -652,6 +708,8 @@ def calibrate_deadtime_series(
                 sens[k] = (_profile_interval(other, t_k, nll_k, nll0_k, tau_hi, pts_k)[1] - high) / step
         cov = np.cov(ap_draws.T)
         shift_sd = float(math.sqrt(max(sens @ cov @ sens, 0.0)))
+        sd_p, sd_t = math.sqrt(max(cov[0, 0], 0.0)), math.sqrt(max(cov[1, 1], 0.0))
+        ap_corr = float(cov[0, 1] / (sd_p * sd_t)) if sd_p > 0 and sd_t > 0 else 0.0
         if shift_sd > 0:
             what = "tau_p" if identified else "tau_p's upper limit"
             notes.append(f"afterpulse uncertainty adds {shift_sd:.3g} ps (1 sd) to {what}")
@@ -667,7 +725,15 @@ def calibrate_deadtime_series(
         # Draws: a split normal matching the interval's two halves (in ps).
         z = rng.standard_normal(n_draws)
         tau_draws = np.maximum(0.0, tau + np.where(z < 0, z * lo_hw, z * hi_hw) / 1.96)
-        notes.append(f"the hard-edge (non-paralyzable) model is rejected: likelihood ratio {lr:.1f}")
+        if union:
+            # Two fits within the branch margin: an equal-weight mixture of their split normals
+            # (conservative), not one split normal over the union (council round 6, B6).
+            second = rng.random(n_draws) < 0.5
+            for k, (t_c, lo_c, hi_c) in enumerate(union):
+                lo_w, hi_w = math.hypot(t_c - lo_c, 1.96 * shift_sd), math.hypot(hi_c - t_c, 1.96 * shift_sd)
+                pick = second == bool(k)
+                tau_draws[pick] = np.maximum(0.0, t_c + np.where(z[pick] < 0, z[pick] * lo_w, z[pick] * hi_w) / 1.96)
+        notes.append(f"the hard-edge (non-paralyzable) model is rejected: 2 ln(likelihood ratio) = {lr:.1f}")
     else:
         upper = math.hypot(high, 1.96 * shift_sd) if shift_sd else high
         est_p = Interval(tau, 0.0, upper)
@@ -692,15 +758,25 @@ def calibrate_deadtime_series(
     t_s = np.resize(tau_draws, F0_SAMPLES)[:, None]
     f0_samples = np.sum(sizes[None, :] * edge_density(n_s, t_s), axis=1)
     est_np, np_draws = _dead_time(m, 1, f0, f0_samples, rng, n_draws, tick, afterpulsing_ruled_out=True)
+    # One tick either side (council round 6, T1): a recorded gap is within one tick of the true gap,
+    # and an off-grid true tau_np was missed every time by the zero-width interval [m, m].
+    np_low, np_high = max(0.0, est_np.low - tick), est_np.high + tick
+    est_np = Interval(min(max(est_np.value, np_low), np_high), np_low, np_high)
+    np_draws = np.maximum(0.0, np_draws + tick * (rng.random(n_draws) - rng.random(n_draws)))
+    stat_low, stat_high = (low, high) if identified else (0.0, high)
     # tau_p <= tau_np: the point, the upper end and every draw (reviews S6, D8: the profile runs up
     # to the shortest gap, which can lie above tau_np's point and upper end).
     cap_high = min(est_p.high, est_np.high)
     est_p = Interval(min(est_p.value, est_np.value), min(est_p.low, cap_high), cap_high)
+    stat_high = min(stat_high, est_np.high)
+    stat_low = min(stat_low, stat_high)
     tau_draws = np.minimum(tau_draws, np_draws)
     if not identified:
         notes.append(
-            f"the hard-edge (non-paralyzable) model is not rejected (likelihood ratio {lr:.2f}): dead_time_p_ps is "
-            f"an upper limit ({est_p.high:.4g} ps); draws are uniform below it, a stand-in"
+            f"the hard-edge (non-paralyzable) model is not rejected (2 ln(likelihood ratio) = {lr:.2f}): "
+            f"dead_time_p_ps is an upper limit ({est_p.high:.4g} ps) at the two-sided 95% threshold (2 ln LR = "
+            "3.84), on the tau_p >= 0 boundary a one-sided limit of about 97.5%; draws are uniform below it, a "
+            "stand-in"
         )
     if high >= tau_hi:
         notes.append("tau_p reaches tau_np: the data do not separate the stages (consistent with a fully "
@@ -715,17 +791,32 @@ def calibrate_deadtime_series(
         other = fit.other[i]
         if p == 0.0 and other is not None and other[1] < 0.5:
             lo_n, hi_n = sorted((n, other[0]))
-            notes.append(f"run {i}: input rate {lo_n * PS_PER_S:.4g} or {hi_n * PS_PER_S:.4g} cps (fitted; past the "
-                         f"count-rate maximum the gaps do not tell which), {binned[i].n_gaps} gaps")
+            notes.append(f"run {i}: avalanche-candidate rate (efficiency x photon rate + dark) {lo_n * PS_PER_S:.4g} "
+                         f"or {hi_n * PS_PER_S:.4g} s^-1 (fitted; past the count-rate maximum the gaps do not tell "
+                         f"which), {binned[i].n_gaps} gaps")
         else:
-            notes.append(f"run {i}: input rate {n * PS_PER_S:.4g} cps (fitted), {binned[i].n_gaps} gaps")
-    cond = {"runs": float(len(runs)), "lr_hard_edge": lr, "gaps": float(sizes.sum())}
+            notes.append(f"run {i}: avalanche-candidate rate (efficiency x photon rate + dark) {n * PS_PER_S:.4g} s^-1 "
+                         f"(fitted), {binned[i].n_gaps} gaps")
+    spans = np.array([float(t[-1] - t[0]) / PS_PER_S for t in tags])
+    recorded = np.array([g.size for g in gaps]) / spans
+    cond = {"runs": float(len(runs)), "two_ln_lr_hard_edge": lr, "gaps": float(sizes.sum()),
+            "tag_tick_ps": float(tick),
+            "dead_time_p_stat_low_ps": float(stat_low), "dead_time_p_stat_high_ps": float(stat_high),
+            "dead_time_p_u_afterpulse_ps": shift_sd,
+            # Recorded count rates and run durations of the scan (council round 6, T6); named outside
+            # the _min_/_max_ bracket convention until M5 checks them at use.
+            "scan_rate_low_cps": float(recorded.min()), "scan_rate_high_cps": float(recorded.max()),
+            "scan_duration_low_s": float(spans.min()), "scan_duration_high_s": float(spans.max()),
+            **dark_conditions}
     if p > 0:
         cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a),
                      "branch_nll_gain": branch_gain})
         if ap_draws is not None:
             cond["afterpulse_prob_sd_held"] = float(ap_draws[:, 0].std())
-            cond["afterpulse_tau_sd_held"] = float(ap_draws[:, 1].std())
+            cond["afterpulse_tau_ps_sd_held"] = float(ap_draws[:, 1].std())
+            cond["dtau_p_dp_ps"] = float(sens[0])
+            cond["dtau_p_dtau_a"] = float(sens[1])
+            cond["afterpulse_p_tau_corr_used"] = ap_corr
         pis = [pending_fraction(n, tau, m, p, tau_a) for n in rates]
         r = max(pi * (p + pi) for pi in pis)
         cond["afterpulse_pending_max"] = max(pis)

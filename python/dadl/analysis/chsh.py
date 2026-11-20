@@ -33,7 +33,14 @@ import numpy as np
 from dadl import _checks
 from dadl.coincidences import grid_coincidences
 from dadl.errors import InsufficientCounts
-from dadl.guardrails import DEAD_TIME_SELECTION, EFFICIENCY_IMBALANCE, INTERRUPTED, Policy, threshold_labels
+from dadl.guardrails import (
+    DEAD_TIME_SELECTION,
+    EFFICIENCY_IMBALANCE,
+    INTERRUPTED,
+    Policy,
+    corrected_threshold_labels,
+    threshold_labels,
+)
 from dadl.stationarity import interrupted
 from dadl.result import Estimate, LabelledValue
 
@@ -393,6 +400,7 @@ def chsh(
         counts["settings_deg"] = {k: float(settings_deg[k]) for k in ("a", "a'", "b", "b'")}
     corrected = None
     extra: dict[str, object] = {}
+    corrected_labels: tuple[str, ...] = ()
     if calibrations is not None:
         corrected, extra, more, more_counts = _corrected(
             runs, window, policy, calibrations, channels, seed, raw, (outcome_counts, s_balanced, balance, sd_data)
@@ -400,12 +408,14 @@ def chsh(
         counts.update(more_counts)
         if DEAD_TIME_SELECTION in labels and "dead_time" not in extra["corrections"]:
             more += (DEAD_TIME_UNCORRECTED,)
-        labels += tuple(lab for lab in more if lab not in labels)
+        # Council round 6 (R2): the corrected value's labels are kept apart from the raw value's.
+        corrected_labels = tuple(lab for lab in more if lab not in labels)
     return LabelledValue(
         analysis="chsh",
         raw=raw,
         corrected=corrected,
         labels=labels,
+        corrected_labels=corrected_labels,
         window=window.as_record(),
         counts=counts,
         **extra,
@@ -458,7 +468,7 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         ends = (rng["at_zero"], rng["at_bound"])
         if abs(rng["at_bound"] - rng["at_zero"]) > fwd.estimate.stderr:
             labels += (DEAD_TIME_RANGE_WIDE,)
-    labels += threshold_labels("chsh", raw, fwd.estimate, ends)
+    labels += corrected_threshold_labels("chsh", raw, fwd.estimate, ends)
     labels = tuple(dict.fromkeys(labels))
     return fwd.estimate, {"corrections": fwd.corrections, "artifact_ids": fwd.artifact_ids}, labels, counts
 

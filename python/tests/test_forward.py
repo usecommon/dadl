@@ -76,7 +76,7 @@ def test_corrected_hom_recovers_the_injected_visibility(setup):
     assert c.stderr == pytest.approx(np.hypot(c.stderr_statistical, c.stderr_calibration), rel=0.3)
     assert r.corrections == ("dead_time", "accidental_subtraction")
     assert r.artifact_ids == cset.artifact_ids and len(r.artifact_ids) == 2
-    assert FORWARD_MODEL in r.labels and POLICY_MODIFIED in r.labels
+    assert FORWARD_MODEL in r.all_labels and POLICY_MODIFIED in r.all_labels
     rec = r.as_record()
     assert rec["corrected_stderr_calibration"] == c.stderr_calibration
     assert "calibration" in rec["corrected_uncertainty"]
@@ -159,7 +159,7 @@ def test_unidentified_dead_time_is_corrected_at_the_bound_and_reported_as_a_rang
     src = PairSource(pair_rate_per_s=2.0e5, visibility=TRUE_V, coherence_time_ps=2.0)
     runs = {k: simulate_hom(src, DET, DET, d, 0.5, rng) for k, d in (("dip", 0.0), ("reference", 20.0))}
     r, counts = hom_from_tags(runs, WINDOW, policy=policy, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
-    assert DEAD_TIME_BOUND in r.labels
+    assert DEAD_TIME_BOUND in r.all_labels
     assert counts["corrected_at_zero_dead_time"] != counts["corrected_at_bound_dead_time"]
 
 
@@ -216,7 +216,7 @@ def test_corrected_fringe_recovers_the_injected_visibility(fringe_setup):
     assert r.corrected.low <= FRINGE_SRC.visibility <= r.corrected.high
     assert r.corrections == ("dead_time", "accidental_subtraction")
     assert r.artifact_ids == cset.artifact_ids
-    assert FORWARD_MODEL in r.labels and POLICY_MODIFIED in r.labels
+    assert FORWARD_MODEL in r.all_labels and POLICY_MODIFIED in r.all_labels
     assert counts["accidentals"] > 0
 
 
@@ -270,7 +270,7 @@ def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_pa
     kw = {"calibrations": cset, "channels": (CA, CB), "seed": 3}
     r, _ = hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=20.0, **kw)
     assert r.corrections == ("accidental_subtraction", "window_capture")
-    assert CAPTURE_UNMODELLED not in r.labels
+    assert CAPTURE_UNMODELLED not in r.all_labels
     # The reference run's split pairs at +-20 ps lose more to the grid than the dip's: modelling it
     # raises V by C_dip/C_ref * (1 - capture ratio), here about 0.08 * 0.01.
     # No reference delay with calibrations is refused: the forward model needs the split (council
@@ -284,7 +284,7 @@ def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_pa
         hom_from_tags(runs, WINDOW, policy=policy, reference_delay_ps=1.0, **kw)
     loose = policy.allow("hom_visibility", "misfit_forward_model", "comparing a misdeclared delay")
     r0, _ = hom_from_tags(runs, WINDOW, policy=loose, reference_delay_ps=1.0, **kw)
-    assert FORWARD_MISFIT_ACCEPTED in r0.labels and FORWARD_MISFIT_ACCEPTED not in r.labels
+    assert FORWARD_MISFIT_ACCEPTED in r0.all_labels and FORWARD_MISFIT_ACCEPTED not in r.all_labels
     assert r.corrected.value - r0.corrected.value == pytest.approx(0.0008, abs=0.0003)
     # Not in the default HOM rule, like dead time (D10).
     with pytest.raises(GuardrailRefusal, match="window_capture"):
@@ -294,7 +294,7 @@ def test_reference_delay_capture_is_modelled_with_a_delay_artifact(setup, tmp_pa
 def test_reference_delay_without_a_delay_artifact_is_labelled(setup):
     runs, cset = setup
     r, _ = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), reference_delay_ps=20.0)
-    assert CAPTURE_UNMODELLED in r.labels and "window_capture" not in r.corrections
+    assert CAPTURE_UNMODELLED in r.all_labels and "window_capture" not in r.corrections
 
 
 # --- Council round 2 ----------------------------------------------------------------------------
@@ -470,14 +470,16 @@ def test_hom_checks_the_dark_dead_times_against_the_analysed_gaps(setup):
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
         hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=long, **kw)
     loose = POLICY.allow("hom_visibility", "calibration_outside_validity", "checking")
-    r, counts = hom_from_tags(runs, WINDOW, policy=loose, calibrations=long, **kw)
-    assert OUTSIDE_VALIDITY in r.labels and 55_000 < counts["min_gap_ps"]["A"] < 61_000
+    # Under the override the gap check labels it, and the dead fraction (0.85) is then refused
+    # (council round 6, R1 b).
+    with pytest.raises(GuardrailRefusal, match="first-order live fraction does not hold"):
+        hom_from_tags(runs, WINDOW, policy=loose, calibrations=long, **kw)
     short = _member_set("hom_visibility", [_dark(CA, 22_000, 500), _dark(CB, 22_000, 500, seed=1)])
     with pytest.raises(StaleCalibration, match="longer than its upper end"):
         hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=short, **kw)
     matched = _member_set("hom_visibility", [_dark(CA, 60_000, 300), _dark(CB, 60_000, 300, seed=1)])
     r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=matched, **kw)
-    assert OUTSIDE_VALIDITY not in r.labels and counts["gap_check_floor_ps"]["A"] == pytest.approx(58_200)
+    assert OUTSIDE_VALIDITY not in r.all_labels and counts["gap_check_floor_ps"]["A"] == pytest.approx(58_200)
     # The forward model subtracts the accidentals (council round 4, S8: 0.0 was recorded).
     assert "accidental_subtraction" in r.corrections and counts["subtracted"] == 1.0
 
@@ -495,4 +497,206 @@ def test_hom_refuses_another_detector_s_artifacts(setup):
         hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=new, reference_delay_ps=20.0)
     loose = POLICY.allow("hom_visibility", "calibration_outside_validity", "same detectors, renamed")
     r, _ = hom_from_tags(runs, WINDOW, policy=loose, calibrations=cset, channels=new, reference_delay_ps=20.0)
-    assert OUTSIDE_VALIDITY in r.labels
+    assert OUTSIDE_VALIDITY in r.all_labels
+
+
+# Review council, round 6.
+
+#: hom-snspd dark runs (20 s at 100 cps, rng 10,000 + r, seed r) whose 30 ns dead time is reported
+#: identified at microseconds (r6-council ident_hom20: 7 of 200, none covering).
+SNSPD_FALSE_IDENT = (58, 64, 73, 99, 113, 157, 185)
+#: chsh-spad dark runs (2 s at 500 cps) identified with three widths below zero, covering 22 ns.
+CHSH_LOOSE_COVERING = (6, 8, 9, 10, 22, 38, 61, 74, 79, 116, 139, 144, 151, 160, 164, 166, 180, 192, 196, 197)
+
+
+@pytest.fixture(scope="module")
+def hom_snspd():
+    from dadl.cli import example_path
+    from dadl.config import load_setup
+    from dadl.simsetup import simulate_setup
+
+    setup = load_setup(example_path("hom-snspd"))
+    return setup, simulate_setup(setup)
+
+
+def _example_dark(setup, name: str, duration_s: float, r: int):
+    return calibrate_dark(simulate_dark(setup.detectors[name], duration_s, np.random.default_rng(10_000 + r)),
+                          setup.channel_id(name), backend="sim", seed=r)
+
+
+def _snspd_refused(hom_snspd, r: int) -> None:
+    from dadl.errors import StaleCalibration
+
+    setup, runs = hom_snspd
+    cal = _example_dark(setup, "A", 20.0, r)
+    assert "dead_time_ps" not in cal.unidentified and cal.estimates["dead_time_ps"].low > 1e5
+    other = dataclasses_replace_channel(cal, setup.channel_id("B"))
+    cset = _member_set("hom_visibility", [cal, other])
+    policy = Policy.default().allow("hom_visibility", "dead_time", "test")
+    with pytest.raises(StaleCalibration, match="shorter than its 95% lower end"):
+        hom_from_tags(runs, setup.window, policy=policy, calibrations=cset,
+                      channels=(setup.channel_id("A"), setup.channel_id("B")), reference_delay_ps=setup.reference_delay_ps)
+
+
+def dataclasses_replace_channel(cal, channel):
+    import dataclasses
+
+    return dataclasses.replace(cal, channels=(channel,))
+
+
+def test_a_falsely_identified_snspd_dead_time_is_refused(hom_snspd):
+    # Council round 6 (R1): an SNSPD's 30 ns read 20 us, "identified", and gave V = 0.55 +- 6.2 with
+    # exit 0. The floor (three widths) was below zero, so the downward gap test was off; the lower
+    # end is the floor now.
+    _snspd_refused(hom_snspd, SNSPD_FALSE_IDENT[0])
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("r", SNSPD_FALSE_IDENT[1:])
+def test_every_falsely_identified_snspd_dead_time_is_refused(hom_snspd, r):
+    _snspd_refused(hom_snspd, r)
+
+
+def _chsh_spad_gap_check(r: int):
+    from dadl.cli import example_path
+    from dadl.config import load_setup
+    from dadl.forward import check_dead_time_gaps
+    from dadl.simsetup import simulate_setup
+
+    setup = load_setup(example_path("chsh-spad"))
+    cal = _example_dark(setup, "A+", 2.0, r)
+    t = cal.estimates["dead_time_ps"]
+    assert t.contains(setup.detectors["A+"].dead_time_ps) and t.value - 3 * (t.value - t.low) <= 0
+    runs = simulate_setup(setup)
+    labels, counts = check_dead_time_gaps(_member_set("chsh", [cal]), {"A+": setup.channel_id("A+")},
+                                          list(runs.values()), analysis="chsh")
+    assert labels == ()
+    assert counts["gap_check_floor_kind"]["A+"] == ("lower end" if t.low > 0 else None)
+
+
+def test_a_loose_covering_dark_dead_time_still_passes():
+    # The lower-end floor does not refuse loose identifications that cover the truth (council: 20
+    # of 22 chsh-spad 2 s ones).
+    _chsh_spad_gap_check(CHSH_LOOSE_COVERING[0])
+
+
+@pytest.mark.slow
+def test_every_loose_covering_dark_dead_time_passes():
+    for r in CHSH_LOOSE_COVERING[1:]:
+        _chsh_spad_gap_check(r)
+
+
+def test_an_identified_dead_time_above_the_dead_fraction_limit_is_refused():
+    # Council round 6 (R1 b): a 22 ns dead time at 1e7 cps is a dead fraction of 0.22; it was
+    # labelled only.
+    run = RunCounts(coincidences=50_000, offpeak_sum=1_000, offpeak_shifts=10, duration_s=0.1,
+                    singles_a=1_000_000, singles_b=1_000_000)
+    cset = _member_set("hom_visibility", [_dark(CA, 22_000, 300), _dark(CB, 22_000, 300, seed=1)])
+    with pytest.raises(GuardrailRefusal, match="dead fraction of 0.22.*first-order live fraction does not hold"):
+        corrected_visibility("hom_visibility", run, run, (CA, CB), calibrations=cset, policy=POLICY)
+    slow = dataclasses_replace_run(run, 500_000)
+    corrected_visibility("hom_visibility", slow, slow, (CA, CB), calibrations=cset, policy=POLICY)
+
+
+def dataclasses_replace_run(run, singles):
+    import dataclasses
+
+    return dataclasses.replace(run, singles_a=singles, singles_b=singles)
+
+
+def test_calibrate_dark_warns_when_the_dead_time_is_far_above_the_declared(tmp_path, capsys):
+    # Council round 6 (R1 c): the referee's channel A artifact (20 us for 30 ns) printed no warning.
+    from dadl.cli import main
+
+    dark = tmp_path / "dark.npz"
+    assert main(["simulate", "hom-snspd", "--dark", "--out", str(dark)]) == 0
+    assert main(["calibrate", "dark", "hom-snspd", "--tags", str(dark), "--channel", "A", "--out",
+                 str(tmp_path / "arts")]) == 0
+    text = capsys.readouterr().out
+    assert "far above the setup's declared 30000 ps" in text and "usually a chance miss" in text
+
+
+def test_corrected_labels_are_kept_apart_from_the_raw_ones(setup):
+    # Council round 6 (R2, R3): labels of the corrected value were printed on the raw line, in one
+    # flat list; forward-model V was not marked secondary.
+    from dadl.forward import SECONDARY_V
+
+    runs, cset = setup
+    r, counts = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=3,
+                              reference_delay_ps=20.0)
+    assert FORWARD_MODEL in r.corrected_labels and FORWARD_MODEL not in r.labels
+    assert SECONDARY_V in r.corrected_labels and POLICY_MODIFIED in r.labels
+    rec = r.as_record()
+    assert FORWARD_MODEL in json.loads(rec["corrected_labels"]) and FORWARD_MODEL not in json.loads(rec["labels"])
+    # R4: what the calibration part leaves out, from the artifacts.
+    assert "tagger timebase and non-linearity" in counts["calibration_excludes"]
+
+
+def test_threshold_labels_are_evaluated_per_value():
+    # Council round 6 (R2): the referee's HOM run printed "the exact 95% interval contains the
+    # threshold" beside raw V = 0.9186 [0.9162, 0.9209]; it was the corrected interval.
+    from dadl.guardrails import NEAR_THRESHOLD_EXACT, corrected_threshold_labels, threshold_labels
+    from dadl.result import Estimate
+
+    raw = Estimate(0.9186, 0.0012, 0.9162, 0.9209)
+    corrected = Estimate(0.5457, 6.1808, -1.1011, 2.7874, stderr_statistical=0.0066, stderr_calibration=6.1631)
+    assert NEAR_THRESHOLD_EXACT not in threshold_labels("hom_visibility", raw)
+    assert NEAR_THRESHOLD_EXACT in corrected_threshold_labels("hom_visibility", raw, corrected)
+
+
+def test_fringe_forward_value_is_secondary():
+    from dadl.forward import SECONDARY_V
+
+    run = RunCounts(coincidences=10_000, offpeak_sum=100, offpeak_shifts=10, duration_s=1.0, singles_a=10**5,
+                    singles_b=10**5)
+    low = RunCounts(coincidences=500, offpeak_sum=100, offpeak_shifts=10, duration_s=1.0, singles_a=10**5,
+                    singles_b=10**5)
+    policy = Policy.default().allow("bell_visibility", "accidental_subtraction", "test")
+    c = corrected_visibility("bell_visibility", run, low, (CA, CB), calibrations=None, policy=policy)
+    assert SECONDARY_V in c.labels
+
+
+def test_calibration_part_prints_two_significant_figures():
+    # Council round 6 (R4): "calibration 0.0000" read as exactly known.
+    from dadl.result import Estimate
+
+    text = str(Estimate(0.9198, 0.0012, 0.9175, 0.9222, stderr_statistical=0.0012, stderr_calibration=1.3e-6))
+    assert "stat 0.0012, calibration 1.3e-06" in text
+
+
+def test_hom_refusals_say_hom_and_how_to_drop_the_dark_artifacts():
+    # Council round 6 (R7): HOM refusals reused the Bell wording, with a Python-only remedy.
+    from dadl.forward import WITHOUT_DARK
+
+    with pytest.raises(GuardrailRefusal) as exc:
+        Policy.default().check_correction("hom_visibility", "window_capture")
+    assert "the headline V uses raw counts" in str(exc.value) and "Bell" not in str(exc.value)
+    assert "--allow window_capture=REASON" in str(exc.value)
+    assert "move the dark artifacts out of the calibrations folder" in WITHOUT_DARK
+    run = RunCounts(coincidences=50_000, offpeak_sum=1_000, offpeak_shifts=10, duration_s=0.1,
+                    singles_a=100_000, singles_b=100_000)
+    loose = _member_set("hom_visibility", [_dark(CA, bound=1e7), _dark(CB, bound=1e7, seed=1)])
+    with pytest.raises(GuardrailRefusal, match="move the dark artifacts out"):
+        corrected_visibility("hom_visibility", run, run, (CA, CB), calibrations=loose, policy=POLICY)
+
+
+def test_cli_hom_prints_the_corrected_labels_and_caveats(tmp_path, capsys):
+    # Council round 6 (R2, R3, R4, R8) through the CLI: the corrected line is marked secondary, its
+    # labels and exclusions are printed under it, and the declaration caveat is printed.
+    from dadl.cli import main
+
+    tags, her, arts = tmp_path / "tags.npz", tmp_path / "her.npz", tmp_path / "arts"
+    assert main(["simulate", "hom-snspd", "--out", str(tags)]) == 0
+    assert main(["simulate", "hom-snspd", "--heralding", "--duration-s", "0.2", "--out", str(her)]) == 0
+    assert main(["calibrate", "pairs", "hom-snspd", "--tags", str(her), "--no-analysers", "--herald", "A",
+                 "--signal", "B", "--out", str(arts)]) == 0
+    capsys.readouterr()
+    assert main(["analyze", "hom-snspd", "--tags", str(tags), "--calibrations", str(arts),
+                 "--allow", "window_capture=delay and jitter from a pair run"]) == 0
+    out = capsys.readouterr().out
+    corrected = next(line for line in out.splitlines() if line.strip().startswith("Corrected (forward model"))
+    assert "(secondary; not an indistinguishability claim)" in corrected
+    raw = next(line for line in out.splitlines() if line.strip().startswith("Labels:"))
+    assert "forward model" not in raw and "no validity range" not in raw
+    assert "Labels of the corrected value:" in out and "Calibration part excludes: tagger timebase" in out
+    assert "choosing them from the data biases V upward" in out

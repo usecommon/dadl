@@ -295,7 +295,7 @@ def test_a_set_loaded_without_a_dataset_labels_the_corrected_value(tmp_path):
     r, _ = hom_from_tags(
         runs, Window(width_ps=1000, source="plan"), policy=policy, calibrations=s, channels=(A, B), reference_delay_ps=20.0
     )
-    assert "window_capture" in r.corrections and NOT_CHECKED in r.labels
+    assert "window_capture" in r.corrections and NOT_CHECKED in r.corrected_labels
 
 
 # -- council round 3 ------------------------------------------------------------------------------

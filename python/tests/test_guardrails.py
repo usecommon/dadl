@@ -59,7 +59,7 @@ def test_loosened_policy_is_never_silent():
     assert result.raw.value == pytest.approx(0.45)
     assert result.corrected.value == pytest.approx(0.82, abs=1e-3)
     assert POLICY_MODIFIED in result.labels
-    assert THRESHOLD_AFTER_CORRECTION in result.labels
+    assert THRESHOLD_AFTER_CORRECTION in result.corrected_labels
     assert result.overrides == ("bell_visibility: accidental_subtraction (reproducing Thompson's example)",)
 
 

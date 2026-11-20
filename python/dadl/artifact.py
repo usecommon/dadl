@@ -127,6 +127,12 @@ def _utc(ts: _dt.datetime) -> str:
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
+#: What a kind's intervals include, where it is more than counting statistics (council round 6, T3).
+UNCERTAINTY_KINDS = {
+    "deadtime-series": "statistical, with afterpulse parameters propagated from the cited dark artifact by linear "
+    "sensitivity",
+}
+
 
 def _summary_entry(cal: Calibration, name: str, iv: Any) -> dict[str, Any]:
     """Value, interval, unit and definition; a limit-only parameter has value null and a bound.
@@ -228,7 +234,7 @@ def build_manifest(
             "status": cal.status,
         },
         "uncertainty": {
-            "kind": "statistical (counting) only",
+            "kind": UNCERTAINTY_KINDS.get(cal.kind, "statistical (counting) only"),
             "level": 0.95,
             "validation": "frequentist coverage checked on DADL's own simulator at the gated regimes",
             "not_included": [

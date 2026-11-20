@@ -27,6 +27,13 @@ within an artifact, independent across artifacts). The interval is the 2.5% and 
 of the joint draws; the statistical and calibration parts are reported separately as standard
 deviations with the other part held at its point value.
 
+The calibration part is conditional on the models: it includes the calibration artifacts'
+statistical uncertainty only. It excludes each artifact's `uncertainty.not_included` (copied into
+the record as `calibration_excludes`), the IRF shape beyond the Gaussian the delay check accepted
+(HOM and fringe capture), efficiencies, afterpulsing, multi-pair emission, the splitter ratio,
+drift between calibration and run below the drift threshold, and the choice among several valid
+artifacts.
+
 Corrections applied, in order: dead time (if dark artifacts are given), then accidentals. Each is
 checked against the policy for the analysis; dead time is not in the default HOM rule, so it
 needs `Policy.allow(analysis, "dead_time", reason)`.
@@ -55,7 +62,10 @@ N_MC = 4000
 MAX_DEAD_FRACTION = 0.2
 
 FORWARD_MODEL = "corrected by the forward model (corrections listed in order), calibration uncertainty included"
+#: Kept for old records only: an identified dead time above this dead fraction is now refused (council round 6).
 DEAD_FRACTION_HIGH = "dead fraction above 20%: the live-fraction model is first order"
+#: HOM and fringe forward-model values (council round 6, R3), as CHSH's model label says for S.
+SECONDARY_V = "secondary; the headline is raw V"
 CAPTURE_UNMODELLED = (
     "window capture not modelled (no delay-jitter calibration for the channel pair): the fixed grid splits more "
     "pairs at the reference delay than at the dip, and V reads low"
@@ -151,13 +161,29 @@ class Corrected:
     corrections: tuple[str, ...]
     labels: tuple[str, ...]
     artifact_ids: tuple[str, ...]
-    #: Added to the result's counts: {"monte_carlo": {"seed", "n_draws"}} (council round 5, V3).
+    #: Added to the result's counts: {"monte_carlo": {"seed", "n_draws"}} (council round 5, V3) and
+    #: `calibration_excludes`, the used artifacts' `uncertainty.not_included` (council round 6, R4).
     counts: Mapping[str, object] = field(default_factory=dict)
 
 
-def _mc_counts(seed: int, n_draws: int) -> dict[str, object]:
-    """The Monte Carlo seed and draw count: the corrected interval depends on both."""
-    return {"monte_carlo": {"seed": int(seed), "n_draws": int(n_draws)}}
+def _mc_counts(seed: int, n_draws: int, calibrations: CalibrationSet | None = None, ids=()) -> dict[str, object]:
+    """The Monte Carlo seed and draw count (the corrected interval depends on both), and what the
+    used artifacts say their uncertainty leaves out (`calibration_excludes`)."""
+    out: dict[str, object] = {"monte_carlo": {"seed": int(seed), "n_draws": int(n_draws)}}
+    if calibrations is not None:
+        excluded: list[str] = []
+        for m in calibrations.members:
+            if m.artifact_id in ids:
+                excluded += list(((m.manifest or {}).get("uncertainty") or {}).get("not_included") or ())
+        out["calibration_excludes"] = list(dict.fromkeys(excluded))
+    return out
+
+
+def _calibration_labels(calibrations: CalibrationSet | None, ids) -> list[str]:
+    """The set's labels that concern the artifacts the value used (council round 6, R2)."""
+    if calibrations is None:
+        return []
+    return list(calibrations.labels_for(ids))
 
 
 def _signal(run: RunCounts, c, offsum, tau_a, tau_b, capture=1.0) -> np.ndarray:
@@ -272,8 +298,13 @@ def check_dead_time_gaps(
     point minus `GAP_FLOOR_WIDTHS` times its distance to the 95% lower end, not the lower end
     itself: the dead time's lower tail is about exponential, so the lower end misses a short dark
     run's truth in 2.5% of channels, and three widths out it misses about 1 in 10^4. A dead time
-    known only as an upper limit has no floor; a floor at or below zero is not checked (the
-    counts record it as None).
+    known only as an upper limit has no floor. When three widths out is at or below zero, the
+    floor is the 95% lower end itself (council round 6, R1): the hard edge admits no analysed gap
+    below the true dead time, so more gaps than the count rule below the lower end mean the
+    interval missed. An identified dark dead time can be wrong when the detector's dead time is
+    far below the spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark runs reports a
+    microsecond-scale dead time as identified, and a longer dark run does not help); this test
+    refuses it against the analysed gaps. A lower end at zero is not checked (floor None).
 
     Upward: with g the sorted analysed gaps (at least `GAP_EDGE_GAPS` + 1), the edge density is
     100 / (g[100] - g[0]); the dead time is refused when (g[0] - upper end) times it exceeds
@@ -282,7 +313,9 @@ def check_dead_time_gaps(
 
     A refused dead time raises `StaleCalibration`, unless the policy allows
     `calibration_outside_validity` (then `OUTSIDE_VALIDITY`). The counts carry the shortest
-    analysed gap (`min_gap_ps`) and the floor (`gap_check_floor_ps`) per channel."""
+    analysed gap (`min_gap_ps`), the floor (`gap_check_floor_ps`) and which floor it is
+    (`gap_check_floor_kind`: "3 widths", "lower end", or None when not checked downward) per
+    channel."""
     from dadl.errors import StaleCalibration
     from dadl.propagate import OUTSIDE_VALIDITY
 
@@ -291,6 +324,7 @@ def check_dead_time_gaps(
     policy = policy or Policy.default()
     min_gap: dict[str, float] = {}
     floors: dict[str, float | None] = {}
+    kinds: dict[str, str | None] = {}
     problems: list[str] = []
     for name, cid in channels.items():
         try:
@@ -304,14 +338,21 @@ def check_dead_time_gaps(
         min_gap[name] = float(gaps[0])
         tau = cal.estimates["dead_time_ps"]
         bound = "dead_time_ps" in cal.stand_in or "dead_time_ps" in cal.unidentified
-        floor = None if bound else float(tau.value) - GAP_FLOOR_WIDTHS * (float(tau.value) - float(tau.low))
-        floors[name] = floor if floor is not None and floor > 0 else None
-        if floors[name] is not None:
+        floor, kind = None, None
+        if not bound:
+            floor, kind = float(tau.value) - GAP_FLOOR_WIDTHS * (float(tau.value) - float(tau.low)), "3 widths"
+            if floor <= 0:
+                floor, kind = float(tau.low), "lower end"
+            if floor <= 0:
+                floor, kind = None, None
+        floors[name], kinds[name] = floor, kind
+        if floor is not None:
             k = int(np.searchsorted(gaps, floor))
             if k > max(GAP_COUNT, GAP_SHARE * gaps.size):
+                where = "" if kind == "3 widths" else f" than its 95% lower end {floor / 1000:.4g} ns"
                 problems.append(
-                    f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter, down to "
-                    f"{gaps[0] / 1000:.4g} ns"
+                    f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter{where}, "
+                    f"down to {gaps[0] / 1000:.4g} ns"
                 )
         upper = float(tau.high)
         if gaps.size > GAP_EDGE_GAPS and gaps[0] > upper:
@@ -335,6 +376,7 @@ def check_dead_time_gaps(
     if min_gap:
         counts["min_gap_ps"] = min_gap
         counts["gap_check_floor_ps"] = floors
+        counts["gap_check_floor_kind"] = kinds
     return labels, counts
 
 
@@ -385,7 +427,7 @@ def corrected_visibility(
         raise ValueError(f"no forward model for {analysis!r}")
     policy = policy or Policy.default()
     corrections: list[str] = []
-    labels: list[str] = [FORWARD_MODEL]
+    labels: list[str] = [FORWARD_MODEL, SECONDARY_V]
     dead = _dead_times(calibrations, channels, n_draws, seed)
     if dead is not None:
         policy.check_correction(analysis, "dead_time")
@@ -400,8 +442,6 @@ def corrected_visibility(
             labels.append(JITTER_BOUND)
     elif any(any(o != 0 for o in run.pair_offsets_ps) for run in (high, low)):
         labels.append(CAPTURE_UNMODELLED)
-    if calibrations is not None:
-        labels += [lab for lab in calibrations.labels if lab not in labels]
 
     rng = np.random.default_rng(np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x46574D]))
     if dead is None:
@@ -410,30 +450,17 @@ def corrected_visibility(
     else:
         ta, tb, pa, pb = dead
     if dead is not None:
-        bounded = [
-            (ch, float(c.estimates["dead_time_ps"].high))
-            for ch, c in ((ch, calibrations.get(DARK_KIND, ch)) for ch in channels)
-            if "dead_time_ps" in c.stand_in or "dead_time_ps" in c.unidentified
-        ]
-        if bounded:
+        any_bound = False
+        for ch, side in ((channels[0], "singles_a"), (channels[1], "singles_b")):
+            c = calibrations.get(DARK_KIND, ch)
+            rate = max(getattr(run, side) / run.duration_s for run in (high, low))
+            if "dead_time_ps" in c.stand_in or "dead_time_ps" in c.unidentified:
+                any_bound = True
+                _refuse_loose_bound(str(ch), None, float(c.estimates["dead_time_ps"].high), rate)
+            else:
+                _refuse_dead_fraction(str(ch), None, float(c.estimates["dead_time_ps"].value), rate)
+        if any_bound:
             labels.append(DEAD_TIME_BOUND)
-        for ch, hi_ps in bounded:
-            side = "singles_a" if ch == channels[0] else "singles_b"
-            worst = max(getattr(run, side) / run.duration_s for run in (high, low)) * hi_ps * 1e-12
-            if worst > MAX_DEAD_FRACTION:
-                # A bound this loose spans "no correction" to a dead fraction the first-order live
-                # fraction cannot describe (above 1 it is negative): the range carries no information.
-                raise GuardrailRefusal(
-                    f"the dead time of {ch} is known only below {_duration(hi_ps)} (the dark data did not identify "
-                    f"it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above "
-                    f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. Calibrate the "
-                    "dead time from data that identify it, or load the calibrations without the dark artifacts "
-                    f"(CalibrationSet.load(..., kinds=...)) to correct the accidentals only."
-                )
-    for run in (high, low):
-        for n_s, tau in ((run.singles_a, pa), (run.singles_b, pb)):
-            if n_s / run.duration_s * float(tau) > MAX_DEAD_FRACTION and DEAD_FRACTION_HIGH not in labels:
-                labels.append(DEAD_FRACTION_HIGH)
 
     def value(sh, sl):
         if analysis == "hom_visibility":
@@ -462,7 +489,7 @@ def corrected_visibility(
     if joint.size < n_draws // 2:
         raise ValueError("accidentals leave no signal in most draws")
     ids, used_labels = _used(calibrations, channels if dead is not None else (), [channels] if capture is not None else [])
-    labels += [lab for lab in used_labels if lab not in labels]
+    labels += [lab for lab in _calibration_labels(calibrations, ids) + list(used_labels) if lab not in labels]
     lo, hi = (float(q) for q in np.quantile(joint, [0.025, 0.975]))
     if point > 1.0:
         # Kept unclipped: clipping would hide how far the accidentals fluctuated.
@@ -475,7 +502,7 @@ def corrected_visibility(
         stderr_statistical=float(np.std(stat[np.isfinite(stat)])),
         stderr_calibration=float(np.std(calib)) if dead is not None or capture is not None else 0.0,
     )
-    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws))
+    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws, calibrations, ids))
 
 
 def bound_range(
@@ -578,14 +605,40 @@ def _channel_dead_times(
     return out
 
 
-def _refuse_loose_bound(name: str, cid: ChannelId, hi_ps: float, rate_cps: float) -> None:
+#: How to correct the rest when the dark dead time cannot be used (council round 6, R7).
+WITHOUT_DARK = (
+    "load the calibrations without the dark artifacts (CalibrationSet.load(..., kinds=...); on the CLI, move the "
+    "dark artifacts out of the calibrations folder) to correct the rest"
+)
+
+
+def _who(name: str, cid: ChannelId | None) -> str:
+    return name if cid is None else f"{name} ({cid})"
+
+
+def _refuse_loose_bound(name: str, cid: ChannelId | None, hi_ps: float, rate_cps: float) -> None:
+    """A bound this loose spans "no correction" to a dead fraction the first-order live fraction
+    cannot describe (above 1 it is negative): the range carries no information."""
     worst = rate_cps * hi_ps * 1e-12
     if worst > MAX_DEAD_FRACTION:
         raise GuardrailRefusal(
-            f"the dead time of {name} ({cid}) is known only below {_duration(hi_ps)} (the dark data did not identify "
-            f"it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above {MAX_DEAD_FRACTION:.0%}, "
-            "so a correction between zero and the bound says nothing. Calibrate the dead time from data that "
-            "identify it, or load the calibrations without the dark artifacts."
+            f"the dead time of {_who(name, cid)} is known only below {_duration(hi_ps)} (the dark data did not "
+            f"identify it); at the recorded rate that bound is a dead fraction of {worst:.3g}, above "
+            f"{MAX_DEAD_FRACTION:.0%}, so a correction between zero and the bound says nothing. Calibrate the dead "
+            f"time from data that identify it, or {WITHOUT_DARK}."
+        )
+
+
+def _refuse_dead_fraction(name: str, cid: ChannelId | None, point_ps: float, rate_cps: float) -> None:
+    """An identified dead time is refused as a bound is, above `MAX_DEAD_FRACTION` at the recorded
+    rate (council round 6, R1: a falsely identified 20 us dark dead time gave V = 0.55 +- 6.2 with
+    exit 0, labelled only)."""
+    worst = rate_cps * point_ps * 1e-12
+    if worst > MAX_DEAD_FRACTION:
+        raise GuardrailRefusal(
+            f"the dead time of {_who(name, cid)} is {_duration(point_ps)}; at the recorded rate that is a dead "
+            f"fraction of {worst:.3g}, above {MAX_DEAD_FRACTION:.0%}: the first-order live fraction does not hold "
+            f"there. A series dead-time calibration is the route (M5); until then, {WITHOUT_DARK}."
         )
 
 
@@ -699,10 +752,13 @@ def corrected_chsh(
         bounded = {name: hi for name, (_, _, hi) in dead.items() if hi is not None}
         if bounded:
             labels.append(DEAD_TIME_BOUND)
-        for name, hi in bounded.items():
+        for name, (_, point_s, hi) in dead.items():
             side = "singles_a" if name.startswith("A") else "singles_b"
             rate = max(getattr(run, side) / run.duration_s for setting in counts.values() for (x, y), run in setting.items() if (("A" + x) if side == "singles_a" else ("B" + y)) == name)
-            _refuse_loose_bound(name, channels[name], hi, rate)
+            if hi is not None:
+                _refuse_loose_bound(name, channels[name], hi, rate)
+            else:
+                _refuse_dead_fraction(name, channels[name], point_s * 1e12, rate)
     policy.check_correction("chsh", "accidental_subtraction")
     corrections.append("accidental_subtraction")
     captures = {
@@ -721,13 +777,6 @@ def corrected_chsh(
         corrections.append("window_capture")
         if any(v[2] for v in captures.values()):
             labels.append(JITTER_BOUND)
-    if calibrations is not None:
-        labels += [lab for lab in calibrations.labels if lab not in labels]
-    for setting in counts.values():
-        for (x, y), run in setting.items():
-            for name, n_s in (("A" + x, run.singles_a), ("B" + y, run.singles_b)):
-                if dead is not None and n_s / run.duration_s * dead[name][1] > MAX_DEAD_FRACTION and DEAD_FRACTION_HIGH not in labels:
-                    labels.append(DEAD_FRACTION_HIGH)
 
     rng = np.random.default_rng(np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x434853]))
     zeros = (np.zeros(n_draws), 0.0, None)
@@ -779,9 +828,9 @@ def corrected_chsh(
     )
     pairs = [(channels["A" + x], channels["B" + y]) for (x, y) in OUTCOME_SIGNS] if have else []
     ids, used_labels = _used(calibrations, list(channels.values()) if dead is not None else (), pairs)
-    labels += [lab for lab in used_labels if lab not in labels]
+    labels += [lab for lab in _calibration_labels(calibrations, ids) + list(used_labels) if lab not in labels]
     labels.insert(1, chsh_model_label(corrections))
-    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws))
+    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws, calibrations, ids))
 
 
 __all__ = [
@@ -799,6 +848,8 @@ __all__ = [
     "DEAD_FRACTION_HIGH",
     "DEAD_TIME_BOUND",
     "FORWARD_MODEL",
+    "SECONDARY_V",
+    "WITHOUT_DARK",
     "N_MC",
     "Corrected",
     "RunCounts",

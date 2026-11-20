@@ -452,7 +452,7 @@ def test_corrected_values_carry_a_label_and_tampered_records_are_refused(tmp_pat
 def hom_visibility_labels():
     from dadl.analysis.visibility import hom_visibility
 
-    return hom_visibility(1000.0, 120.0, accidentals=40.0).labels
+    return hom_visibility(1000.0, 120.0, accidentals=40.0).corrected_labels
 
 
 def test_long_delays_fit_like_short_ones():

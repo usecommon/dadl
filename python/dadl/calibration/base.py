@@ -135,7 +135,8 @@ class Calibration:
     def __str__(self) -> str:
         lines = [f"{self.kind} ({self.method} {self.method_version}) for {', '.join(map(str, self.channels))}"]
         for name, iv in self.estimates.items():
-            shown = f"<= {iv.high:.6g} (upper limit only)" if name in self.unidentified and iv.low == 0 else str(iv)
+            limit = name in self.unidentified and iv.low == 0
+            shown = f"<= {iv.high:.4g} ({iv.level:.0%} upper limit only)" if limit else str(iv)
             lines.append(f"  {name:<20} {shown}  {self.units.get(name, '')}".rstrip())
         lines.append(f"  converged: {self.converged}; predictive check p = {self.ppc_pvalue:.3g}")
         if self.status == "misfit":

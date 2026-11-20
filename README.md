@@ -63,7 +63,14 @@ visibilities also always carry an exact 95% interval. Corrected values from
 the forward model (unreleased; HOM and CHSH with `--calibrations`; fringe through
 `fringe_from_tags(calibrations=)`) include the
 calibration uncertainty, by joint Monte Carlo over counts and calibration
-draws.
+draws ([Methods](#methods-corrected-values)). They are secondary values: the headline is
+always raw. The calibration part is conditional on the models: it includes the calibration
+artifacts' statistical uncertainty only. It excludes each artifact's `uncertainty.not_included`
+(copied into the record as `calibration_excludes`), the IRF shape beyond the Gaussian the delay
+check accepted (HOM and fringe capture), efficiencies, afterpulsing, multi-pair emission, the
+splitter ratio, drift between calibration and run below the drift threshold, and the choice
+among several valid artifacts. A result keeps the labels of the raw value (`labels`) apart from
+those of the corrected value (`corrected_labels`).
 Calibrations report 95% intervals that need not be symmetric, validated by
 simulation; each artifact's `uncertainty` block lists the components not
 included (tagger timebase, temperature sensor, connectors, declared delays).
@@ -127,6 +134,10 @@ plainly:
   its own jitter after the dead time, so the shortest gap sits about
   4 sqrt(2) sigma_tagger below the detector's dead time (about 0.1 ns for
   20 ps rms); the interval does not cover that offset.
+  Dead times are read on the tagger's tick. The series tau_np interval allows
+  one tick either side (a recorded gap is within one tick of the true gap).
+  The dark dead-time interval does not; it spans many ticks in any dark run,
+  so the difference is below its resolution.
   An afterpulse still pending when the next gap starts (from the previous
   avalanche, Exp(tau_a) after the record by memorylessness, a fraction pi of
   gaps recorded as `afterpulse_pending_max`) is modelled to first order: one
@@ -390,7 +401,9 @@ delay) is refused as `Misspecified` rather than corrected with an interval that 
 For a CHSH setup, `--calibrations` adds a corrected S as a secondary value; the headline stays
 raw. The default CHSH rule allows no correction, so each is an explicit policy change:
 `--allow dead_time=... --allow accidental_subtraction=... --allow window_capture=...`. Dark artifacts must cover
-every channel and delay-jitter artifacts all four channel pairs.
+every channel and delay-jitter artifacts all four channel pairs. Window capture for CHSH needs a
+delay-jitter artifact for each of the four channel pairs, so four heralding runs (re-route the
+fibres between them). `dadl simulate --heralding` writes the A+/B+ pair only.
 
 One artifact per kind and channel set (in any order): with calibrations before and after the run,
 pass the one to use; the drift between them is not propagated. An artifact recorded for another
@@ -404,7 +417,18 @@ chsh-spad dark run (20 s at 500 cps) puts it 40-50% below the point, and the dow
 catches only gross errors), or a shortest analysed gap more than
 9 / (edge density) above its upper end (chance about 1e-4 per channel). A dead time between the
 floor and the truth passes (live-fraction error up to about 1.5% at 5 Mcps for a 1 s dark run);
-at low analysed rates (about 1,000 gaps) the upward test has no power.
+at low analysed rates (about 1,000 gaps) the upward test has no power. When three half-widths
+reach below zero, the floor is the 95% lower end itself (`gap_check_floor_kind` "lower end"):
+the hard edge admits no analysed gap below the true dead time.
+
+An identified dark dead time can be wrong when the detector's dead time is far below the
+spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark runs reports a microsecond-scale dead
+time as identified, and a longer dark run does not help). The analysis tests it against the
+analysed gaps and refuses it when they contradict it; calibrate an SNSPD's recovery from an
+illuminated inter-arrival histogram. A dead time, identified or a bound, whose dead fraction at
+the analysed rate exceeds 20% is refused: the first-order live fraction does not hold there (a
+series dead-time calibration is the route, M5). To correct the rest, move the dark artifacts out
+of the calibrations folder.
 
 CHSH results, raw and corrected, add these keys to `counts`:
 
@@ -424,6 +448,39 @@ Corrected results add these:
 | `monte_carlo` | the Monte Carlo `seed` and `n_draws` the corrected interval depends on |
 | `min_gap_ps` | with dark artifacts: the shortest analysed gap per channel |
 | `gap_check_floor_ps` | with dark artifacts: the dead-time floor per channel; None when not checked downward |
+| `gap_check_floor_kind` | "3 widths" or "lower end" per channel; None for an upper limit |
+| `calibration_excludes` | the used artifacts' `uncertainty.not_included`: what the calibration part leaves out |
+
+### Methods (corrected values)
+
+What a methods section needs for a corrected HOM, fringe or CHSH value (details in
+`dadl/forward.py`):
+
+- **Model.** Per acquisition and outcome pair, the signal rate is s = (C - A) / (T L capture):
+  C the coincidences in the declared fixed-grid window, A the accidentals from the same
+  acquisition's off-peak bins, T the duration, L = (1 - n_a tau_a)(1 - n_b tau_b)(1 + r_c
+  min(tau_a, tau_b)) the live fraction of the pair (n the recorded singles rates, tau the dark
+  artifacts' dead times, r_c the recorded coincidence rate), and capture the fixed grid's
+  capture E[max(0, 1 - |D| / W)] for a Gaussian arrival difference D at the fitted delay and
+  jitter of the delay-jitter artifact. HOM V = 1 - s_dip / s_ref; fringe V = (s_max - s_min) /
+  (s_max + s_min); CHSH E is the normalised signed sum of the four outcome signals and S the
+  signed sum of the E.
+- **Draws.** 4,000 joint Monte Carlo draws: counts and off-peak sums from Jeffreys posteriors
+  Gamma(c + 1/2); calibration parameters from the artifacts' stored draws (joint within an
+  artifact, independent across artifacts). A parameter known only as an upper limit is used at
+  the bound, and the value at zero is reported too.
+- **Point and interval.** The point is the plug-in value at the counts and the artifacts' point
+  values, not the Monte Carlo centre; the interval is the 2.5% and 97.5% quantiles of the joint
+  draws, so it need not be centred on the point (for dead time the point sits about 0.4 sd low).
+- **Parts.** The statistical and calibration parts are standard deviations with the other held
+  at its point value; they need not add in quadrature to the total.
+- **Citing.** Quote the Monte Carlo `seed` and `n_draws` from `counts["monte_carlo"]` and the
+  artifact IDs. The Monte Carlo noise of the interval ends is about 0.1 statistical sd.
+- **Calibration draws.** Stored draws are posteriors under flat priors in the fit's coordinates
+  (log rate, logit p, log tau_a) inside the fit's box; rank checks confirm this (round 6). Near
+  p = 0 that prior is improper without the box; M5 declares proper priors.
+- **What it leaves out.** The calibration part is conditional on the models, as above
+  (`calibration_excludes` lists the artifacts' own exclusions).
 
 From Python:
 

@@ -68,7 +68,7 @@ def test_corrected_s_removes_the_dead_time_selection(data):
     assert r.corrections == ("dead_time", "accidental_subtraction", "window_capture")
     assert len(r.artifact_ids) == 8
     for label in (FORWARD_MODEL, chsh_model_label(r.corrections), POLICY_MODIFIED):
-        assert label in r.labels
+        assert label in r.all_labels
     assert r.corrected.stderr_calibration > 0
 
 
@@ -128,7 +128,7 @@ def test_a_bounded_dead_time_gives_the_range_in_counts(tmp_path):
     c = r.corrected
     assert c.low <= c.value <= c.high
     assert c.value == pytest.approx(r.counts["corrected_at_bound_dead_time"])
-    assert DEAD_TIME_BOUND in r.labels and DEAD_TIME_RANGE_WIDE in r.labels
+    assert DEAD_TIME_BOUND in r.all_labels and DEAD_TIME_RANGE_WIDE in r.all_labels
     delays_only = CalibrationSet(cset.analysis, tuple(m for m in cset.members if m.kind == DELAY_KIND), cset.labels)
     r0 = chsh(runs, window, POLICY, settings_deg=SETTINGS, calibrations=delays_only, channels=IDS, seed=1)
     assert r.counts["corrected_at_zero_dead_time"] == pytest.approx(r0.corrected.value, abs=1e-12)
@@ -185,11 +185,11 @@ def test_delays_that_miss_the_pair_peaks_are_labelled():
     prefix = CAPTURE_IMBALANCE.split("{")[0]
     r = chsh(runs, Window(width_ps=1000, source="plan"), settings_deg=SETTINGS)
     assert r.raw.value - truth > 20 * r.raw.stderr
-    assert any(lab.startswith(prefix) for lab in r.labels)
+    assert any(lab.startswith(prefix) for lab in r.all_labels)
     assert abs(r.counts["capture_reweighted_s"] - truth) < 3 * r.raw.stderr
     assert r.counts["capture_offsets_ps"]["A+/B-"] == pytest.approx(-400, abs=15)
     right = chsh(runs, Window(width_ps=1000, source="plan", delays_ps={"A+": 400, "B+": 400}), settings_deg=SETTINGS)
-    assert not any(lab.startswith(prefix) for lab in right.labels)
+    assert not any(lab.startswith(prefix) for lab in right.all_labels)
 
 
 def test_matched_delays_are_not_labelled():
@@ -209,7 +209,7 @@ def test_matched_delays_are_not_labelled():
         rng = np.random.default_rng(100 + seed)
         runs = simulate_chsh(PairSource(pair_rate_per_s=1e5, visibility=0.95), dict.fromkeys(IDS, det), 1.0, rng, SETTINGS)
         r = chsh(runs, Window(width_ps=2000, source="plan"), settings_deg=SETTINGS)
-        assert not any(lab.startswith(prefix) for lab in r.labels)
+        assert not any(lab.startswith(prefix) for lab in r.all_labels)
         assert abs(r.raw.value - r.counts["capture_reweighted_s"]) < 0.25 * r.raw.stderr
     # Council round 3 (N1, G2): narrow peaks binned at W/30, and peaks as wide as the window fitted
     # only within it, gave offsets of +4 to +51 ps and false labels on matched delays.
@@ -219,14 +219,14 @@ def test_matched_delays_are_not_labelled():
             runs = simulate_chsh(PairSource(pair_rate_per_s=rate, visibility=0.95), dict.fromkeys(IDS, det), 1.0,
                                  np.random.default_rng(200 + seed), SETTINGS)
             r = chsh(runs, Window(width_ps=width, source="plan"), settings_deg=SETTINGS)
-            assert not any(lab.startswith((prefix, low)) for lab in r.labels), (pair_jitter, width, seed)
+            assert not any(lab.startswith((prefix, low)) for lab in r.all_labels), (pair_jitter, width, seed)
             assert max(abs(o) for o in r.counts["capture_offsets_ps"].values()) < 5.0 + 0.01 * pair_jitter
     # A window narrow against the jitter, delays matched: low capture, not a delay error (G5).
     runs = simulate_chsh(PairSource(pair_rate_per_s=1e5, visibility=0.95), dict.fromkeys(IDS, det), 1.0,
                          np.random.default_rng(200), SETTINGS)
     r = chsh(runs, Window(width_ps=600, source="plan"), settings_deg=SETTINGS)
-    assert any(lab.startswith(low) for lab in r.labels)
-    assert not any(lab.startswith(prefix) for lab in r.labels)
+    assert any(lab.startswith(low) for lab in r.all_labels)
+    assert not any(lab.startswith(prefix) for lab in r.all_labels)
 
 
 def test_a_delay_drift_since_calibration_is_refused(tmp_path):
@@ -243,14 +243,14 @@ def test_a_delay_drift_since_calibration_is_refused(tmp_path):
     window = Window(width_ps=1000, source="plan")
     current = simulate_chsh(MISDECLARED_SRC, _late(0), 1.0, rng, SETTINGS)
     r = chsh(current, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
-    assert FORWARD_MISFIT_ACCEPTED not in r.labels
+    assert FORWARD_MISFIT_ACCEPTED not in r.all_labels
     drifted = simulate_chsh(MISDECLARED_SRC, _late(200), 1.0, rng, SETTINGS)
     with pytest.raises(Misspecified, match="calibrated delays"):
         chsh(drifted, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
     loose = strict.allow("chsh", "misfit_forward_model", "comparing a stale calibration")
     cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=loose, dataset=CTX)
     r = chsh(drifted, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
-    assert FORWARD_MISFIT_ACCEPTED in r.labels
+    assert FORWARD_MISFIT_ACCEPTED in r.all_labels
     assert abs(r.counts["delay_drift_z"]) > 3.29
     # Council round 3: 100 ps at 150 ps jitter and a 1 ns window is refused too.
     cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=strict, dataset=CTX)
@@ -296,8 +296,8 @@ def test_a_corrected_s_without_dark_artifacts_says_so(tmp_path):
     r = chsh(runs, Window(width_ps=2000, source="plan"), policy, settings_deg=SETTINGS, calibrations=cset, channels=IDS)
     assert r.corrections == ("accidental_subtraction",)
     label = chsh_model_label(r.corrections)
-    assert label.startswith("accidentals modelled; dead time (no dark artifacts) and window capture") and label in r.labels
-    assert DEAD_TIME_SELECTION in r.labels and DEAD_TIME_UNCORRECTED in r.labels
+    assert label.startswith("accidentals modelled; dead time (no dark artifacts) and window capture") and label in r.all_labels
+    assert DEAD_TIME_SELECTION in r.all_labels and DEAD_TIME_UNCORRECTED in r.all_labels
     assert r.counts["dataset"] == {"acquired": CTX.acquired.isoformat(), "conditions": {}}
 
 
@@ -319,7 +319,7 @@ def test_a_crosstalk_peak_fails_the_forward_check(tmp_path):
         chsh(runs, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
     loose = strict.allow("chsh", "misfit_forward_model", "checking")
     r = chsh(runs, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
-    assert FORWARD_MISFIT_ACCEPTED in r.labels and r.counts["forward_check_p"] < 1e-3
+    assert FORWARD_MISFIT_ACCEPTED in r.all_labels and r.counts["forward_check_p"] < 1e-3
 
 
 def test_an_accidentals_only_corrected_s_runs_no_shape_check(tmp_path):
@@ -356,6 +356,7 @@ def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
     from test_forward import _dark
 
     from dadl.errors import StaleCalibration
+    from dadl.forward import check_dead_time_gaps
     from dadl.propagate import OUTSIDE_VALIDITY
 
     runs, d = data
@@ -364,8 +365,12 @@ def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
     with pytest.raises(StaleCalibration, match="analysed gaps are shorter"):
         chsh(runs, WINDOW, POLICY, calibrations=long, channels=IDS, seed=1)
     loose = POLICY.allow("chsh", "calibration_outside_validity", "checking")
-    r = chsh(runs, WINDOW, loose, calibrations=long, channels=IDS, seed=1)
-    assert OUTSIDE_VALIDITY in r.labels and 45_000 < r.counts["min_gap_ps"]["A+"] < 51_000
+    # Under the override the gap check passes it, labelled; its dead fraction (0.74) is then
+    # refused (council round 6, R1 b).
+    labels, counts = check_dead_time_gaps(long, IDS, [runs[k] for k in runs], analysis="chsh", policy=loose)
+    assert labels == (OUTSIDE_VALIDITY,) and 45_000 < counts["min_gap_ps"]["A+"] < 51_000
+    with pytest.raises(GuardrailRefusal, match="first-order live fraction does not hold"):
+        chsh(runs, WINDOW, loose, calibrations=long, channels=IDS, seed=1)
     short = _with_darks(cset, [_dark(cid, 22_000, 500, seed=i) for i, cid in enumerate(IDS.values())])
     with pytest.raises(StaleCalibration, match="longer than its upper end"):
         chsh(runs, WINDOW, POLICY, calibrations=short, channels=IDS, seed=1)
@@ -391,8 +396,8 @@ def test_chsh_refuses_another_detector_s_artifacts(data):
     with pytest.raises(StaleCalibration, match="calibrated on detector OLD-"):
         chsh(runs, WINDOW, POLICY, calibrations=old, channels=other, seed=1)
     loose = POLICY.allow("chsh", "calibration_outside_validity", "same detectors, renamed")
-    assert OUTSIDE_VALIDITY in chsh(runs, WINDOW, loose, calibrations=old, channels=other, seed=1).labels
-    assert OUTSIDE_VALIDITY not in chsh(runs, WINDOW, POLICY, calibrations=old, channels=recorded, seed=1).labels
+    assert OUTSIDE_VALIDITY in chsh(runs, WINDOW, loose, calibrations=old, channels=other, seed=1).all_labels
+    assert OUTSIDE_VALIDITY not in chsh(runs, WINDOW, POLICY, calibrations=old, channels=recorded, seed=1).all_labels
 
 
 def test_the_capture_balance_carries_the_peak_fits_noise():
@@ -418,3 +423,31 @@ def test_the_peak_fits_noise_can_decide_the_capture_label():
     balance = {(x, y): (0.0, 300.0, 0.9, 5.0, 5.0) for x in "+-" for y in "+-"}
     assert capture_labels(raw, 2.012, balance, 0.005) == ()
     assert capture_labels(raw, 2.012, balance, 0.0)[0] == CAPTURE_IMBALANCE.format(dS=-0.012)
+
+
+def test_labels_of_unused_artifacts_are_left_out(data, tmp_path):
+    # Council round 6 (R2): the CHSH raw line carried "no validity range" for accidentals and
+    # heralding artifacts the corrected value did not use.
+    import shutil
+
+    from dadl.calibration import calibrate_accidentals
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.propagate import NO_VALIDITY
+
+    runs, d = data
+    full = CalibrationSet.load(d, analysis="chsh", policy=POLICY, dataset=CTX)
+    for m in full.members:
+        if m.kind == DELAY_KIND:
+            for f in d.glob(f"{m.artifact_id}*"):
+                shutil.copy(f, tmp_path)
+    a, b = simulate_pairs(SRC.pair_rate_per_s, DET, DET, 0.02, np.random.default_rng(9))
+    unused = write_artifact(calibrate_accidentals(a, b, (IDS["A+"], IDS["B+"]), width_ps=WINDOW.width_ps, backend="sim",
+                                                  seed=1), tmp_path, created=dt.datetime(2026, 11, 1, tzinfo=UTC))
+    policy = _policy("accidental_subtraction", "window_capture")
+    cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=policy, dataset=CTX)
+    r = chsh(runs, WINDOW, policy, calibrations=cset, channels=IDS, seed=1)
+    gone = NO_VALIDITY.format(aid=unused.stem[:12])
+    assert gone in cset.labels and gone not in r.all_labels
+    used = [NO_VALIDITY.format(aid=aid[:12]) for aid in r.artifact_ids]
+    assert len(used) == 4 and all(lab in r.corrected_labels and lab not in r.labels for lab in used)
+    assert FORWARD_MODEL in r.corrected_labels and FORWARD_MODEL not in r.labels
