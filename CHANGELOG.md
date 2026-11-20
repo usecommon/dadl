@@ -271,11 +271,14 @@ release the package still reports version 0.1.1.
     labelled; there is no override). A 22 ns SPAD above about 9 Mcps loses its corrected value
     until M5's series route. To correct the rest, move the dark artifacts out of the calibrations
     folder;
-  - the dead-time gap check uses the 95% lower end as its floor when three widths reach below
-    zero (`gap_check_floor_kind` "3 widths" or "lower end"). An SNSPD's 30 ns read as an
-    identified 20 us in 7 of 200 default dark runs, none covering, and gave V = 0.55 +- 6.2 with
-    exit 0; all 7 are now refused, and the 20 covering loose chsh-spad identifications still
-    pass. `calibrate dark` warns when the lower end is more than 3x the declared dead time;
+  - an SNSPD's 30 ns read as an identified 20 us in 7 of 200 default dark runs, none covering,
+    and gave V = 0.55 +- 6.2 with exit 0; the dead-fraction refusal above refuses all 7 at the
+    referee's 85 kcps. When three widths reach below zero the gap check tests the 95% lower end for
+    a label only (`DEAD_TIME_BELOW_DARK`, in `corrected_labels`; `gap_check_floor_kind` "3 widths"
+    (refusing) or "lower end (label only)"): the lower end misses in 5% of channels by design, and
+    refusing it (as first implemented) refused 42 of 200 chsh-dead-time replicates (council round 6
+    addendum). The 20 covering loose chsh-spad identifications are neither refused nor labelled.
+    `calibrate dark` warns when the lower end is more than 3x the declared dead time;
   - results keep the corrected value's labels apart (`corrected_labels`, a new record column;
     `all_labels` is both): threshold labels are evaluated per value, and calibration labels come
     only from the artifacts the value used. The CLI prints them under the corrected line;
@@ -315,10 +318,9 @@ release the package still reports version 0.1.1.
     (passive-quench), as in round 5; tau_np 99.9% and 99.0% (was 99.2% and 97.3%; conservative by
     construction on the grid, gate "at least 95%" unchanged); misfits 0.3% and 0.0%;
   - propagation gate at 200 replicates: hom-snspd, hom-bright, hom-crosstalk and chsh-spad
-    unchanged (94.5/94.5, 95.0/95.5, 30.5/32.5 with 100% flagged, 93.5/93.5). chsh-dead-time does not
-    complete: the lower-end floor refuses 42 of 200 replicates whose dark dead time is identified
-    at 125-210 ns for a 50 ns truth (lower ends 52-136 ns, real misses). Reported to the council,
-    rule not loosened; on the other 158 corrected 96.2%, control 89.2%.
+    unchanged (94.5/94.5, 95.0/95.5, 30.5/32.5 with 100% flagged, 93.5/93.5); chsh-dead-time at 400
+    replicates: corrected 95.5%, control 87.5% (band 91.0-98.2%), misfit artifacts 0.8%, no flags,
+    no refusals (the 1,000-replicate run is CI's).
 
 ### Published results as executable tests
 

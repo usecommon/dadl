@@ -418,16 +418,18 @@ catches only gross errors), or a shortest analysed gap more than
 9 / (edge density) above its upper end (chance about 1e-4 per channel). A dead time between the
 floor and the truth passes (live-fraction error up to about 1.5% at 5 Mcps for a 1 s dark run);
 at low analysed rates (about 1,000 gaps) the upward test has no power. When three half-widths
-reach below zero, the floor is the 95% lower end itself (`gap_check_floor_kind` "lower end"):
-the hard edge admits no analysed gap below the true dead time.
+reach below zero, nothing is refused downward; the 95% lower end is then tested for a label only
+(`gap_check_floor_kind` "lower end (label only)"): it misses in 5% of channels by design.
 
 An identified dark dead time can be wrong when the detector's dead time is far below the
 spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark runs reports a microsecond-scale dead
-time as identified, and a longer dark run does not help). The analysis tests it against the
-analysed gaps and refuses it when they contradict it; calibrate an SNSPD's recovery from an
-illuminated inter-arrival histogram. A dead time, identified or a bound, whose dead fraction at
-the analysed rate exceeds 20% is refused: the first-order live fraction does not hold there (a
-series dead-time calibration is the route, M5). To correct the rest, move the dark artifacts out
+time as identified, and a longer dark run does not help). The analysis refuses it when it
+implies a dead fraction above 20% at the analysed rate, and labels it when the analysed gaps
+fall below its 95% lower end ("the analysed gaps put the dead time ... below the dark artifact's
+95% lower end"); calibrate an SNSPD's recovery from an illuminated inter-arrival histogram. A
+dead time, identified or a bound, whose dead fraction at the analysed rate exceeds 20% is
+refused: the first-order live fraction does not hold there (a series dead-time calibration is
+the route, M5). To correct the rest, move the dark artifacts out
 of the calibrations folder.
 
 CHSH results, raw and corrected, add these keys to `counts`:
@@ -448,7 +450,7 @@ Corrected results add these:
 | `monte_carlo` | the Monte Carlo `seed` and `n_draws` the corrected interval depends on |
 | `min_gap_ps` | with dark artifacts: the shortest analysed gap per channel |
 | `gap_check_floor_ps` | with dark artifacts: the dead-time floor per channel; None when not checked downward |
-| `gap_check_floor_kind` | "3 widths" or "lower end" per channel; None for an upper limit |
+| `gap_check_floor_kind` | "3 widths" (refusing) or "lower end (label only)" per channel; None when not checked downward |
 | `calibration_excludes` | the used artifacts' `uncertainty.not_included`: what the calibration part leaves out |
 
 ### Methods (corrected values)

@@ -64,6 +64,13 @@ MAX_DEAD_FRACTION = 0.2
 FORWARD_MODEL = "corrected by the forward model (corrections listed in order), calibration uncertainty included"
 #: Kept for old records only: an identified dead time above this dead fraction is now refused (council round 6).
 DEAD_FRACTION_HIGH = "dead fraction above 20%: the live-fraction model is first order"
+#: The analysed gaps fall below a loose dark dead time's 95% lower end (council round 6 addendum):
+#: labelled, not refused, since that lower end misses in 5% of channels by design.
+DEAD_TIME_BELOW_DARK = (
+    "the analysed gaps put the dead time of {name} below the dark artifact's 95% lower end (a 1-in-20 chance per "
+    "channel for a dark run this short): its dead-time correction is likely too large; a longer dark run, or an "
+    "illuminated calibration for an SNSPD, resolves it"
+)
 #: HOM and fringe forward-model values (council round 6, R3), as CHSH's model label says for S.
 SECONDARY_V = "secondary; the headline is raw V"
 CAPTURE_UNMODELLED = (
@@ -298,13 +305,15 @@ def check_dead_time_gaps(
     point minus `GAP_FLOOR_WIDTHS` times its distance to the 95% lower end, not the lower end
     itself: the dead time's lower tail is about exponential, so the lower end misses a short dark
     run's truth in 2.5% of channels, and three widths out it misses about 1 in 10^4. A dead time
-    known only as an upper limit has no floor. When three widths out is at or below zero, the
-    floor is the 95% lower end itself (council round 6, R1): the hard edge admits no analysed gap
-    below the true dead time, so more gaps than the count rule below the lower end mean the
-    interval missed. An identified dark dead time can be wrong when the detector's dead time is
-    far below the spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark runs reports a
-    microsecond-scale dead time as identified, and a longer dark run does not help); this test
-    refuses it against the analysed gaps. A lower end at zero is not checked (floor None).
+    known only as an upper limit has no floor; a floor at or below zero is not refused. The 95%
+    lower end is then tested for a label only (`DEAD_TIME_BELOW_DARK`, same count rule): it misses
+    in 5% of channels by design, so refusing it refused 15-21% of four-channel analyses with short
+    dark runs (council round 6 addendum). An identified dark dead time can be wrong when the
+    detector's dead time is far below the spacing of dark counts (an SNSPD at 100 cps: 3-7% of dark
+    runs reports a microsecond-scale dead time as identified, and a longer dark run does not help).
+    The analysis refuses it when it implies a dead fraction above 20% at the analysed rate
+    (`corrected_visibility`, `corrected_chsh`), and labels it when the analysed gaps fall below its
+    95% lower end. A lower end at zero is not checked (floor None).
 
     Upward: with g the sorted analysed gaps (at least `GAP_EDGE_GAPS` + 1), the edge density is
     100 / (g[100] - g[0]); the dead time is refused when (g[0] - upper end) times it exceeds
@@ -314,8 +323,8 @@ def check_dead_time_gaps(
     A refused dead time raises `StaleCalibration`, unless the policy allows
     `calibration_outside_validity` (then `OUTSIDE_VALIDITY`). The counts carry the shortest
     analysed gap (`min_gap_ps`), the floor (`gap_check_floor_ps`) and which floor it is
-    (`gap_check_floor_kind`: "3 widths", "lower end", or None when not checked downward) per
-    channel."""
+    (`gap_check_floor_kind`: "3 widths" (refusing), "lower end (label only)", or None when not
+    checked downward) per channel."""
     from dadl.errors import StaleCalibration
     from dadl.propagate import OUTSIDE_VALIDITY
 
@@ -326,6 +335,7 @@ def check_dead_time_gaps(
     floors: dict[str, float | None] = {}
     kinds: dict[str, str | None] = {}
     problems: list[str] = []
+    below: list[str] = []
     for name, cid in channels.items():
         try:
             cal = calibrations.get(DARK_KIND, cid)
@@ -342,18 +352,20 @@ def check_dead_time_gaps(
         if not bound:
             floor, kind = float(tau.value) - GAP_FLOOR_WIDTHS * (float(tau.value) - float(tau.low)), "3 widths"
             if floor <= 0:
-                floor, kind = float(tau.low), "lower end"
+                floor, kind = float(tau.low), "lower end (label only)"
             if floor <= 0:
                 floor, kind = None, None
         floors[name], kinds[name] = floor, kind
         if floor is not None:
             k = int(np.searchsorted(gaps, floor))
             if k > max(GAP_COUNT, GAP_SHARE * gaps.size):
-                where = "" if kind == "3 widths" else f" than its 95% lower end {floor / 1000:.4g} ns"
-                problems.append(
-                    f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter{where}, "
-                    f"down to {gaps[0] / 1000:.4g} ns"
-                )
+                if kind == "3 widths":
+                    problems.append(
+                        f"dead time {tau.value / 1000:.4g} ns of {name} ({cid}): {k} analysed gaps are shorter, "
+                        f"down to {gaps[0] / 1000:.4g} ns"
+                    )
+                else:
+                    below.append(DEAD_TIME_BELOW_DARK.format(name=f"{name} ({cid})"))
         upper = float(tau.high)
         if gaps.size > GAP_EDGE_GAPS and gaps[0] > upper:
             spread = float(gaps[GAP_EDGE_GAPS] - gaps[0])
@@ -372,6 +384,7 @@ def check_dead_time_gaps(
                 f"Policy.allow({analysis!r}, 'calibration_outside_validity', reason)."
             )
         labels = (OUTSIDE_VALIDITY,)
+    labels += tuple(below)
     counts: dict[str, object] = {}
     if min_gap:
         counts["min_gap_ps"] = min_gap
@@ -846,6 +859,7 @@ __all__ = [
     "corrected_chsh",
     "CAPTURE_UNMODELLED",
     "DEAD_FRACTION_HIGH",
+    "DEAD_TIME_BELOW_DARK",
     "DEAD_TIME_BOUND",
     "FORWARD_MODEL",
     "SECONDARY_V",

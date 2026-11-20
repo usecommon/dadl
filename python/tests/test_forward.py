@@ -524,18 +524,23 @@ def _example_dark(setup, name: str, duration_s: float, r: int):
                           setup.channel_id(name), backend="sim", seed=r)
 
 
-def _snspd_refused(hom_snspd, r: int) -> None:
-    from dadl.errors import StaleCalibration
-
-    setup, runs = hom_snspd
+def _snspd_hom(hom_snspd, r: int, runs=None):
+    setup, tags = hom_snspd
     cal = _example_dark(setup, "A", 20.0, r)
     assert "dead_time_ps" not in cal.unidentified and cal.estimates["dead_time_ps"].low > 1e5
     other = dataclasses_replace_channel(cal, setup.channel_id("B"))
     cset = _member_set("hom_visibility", [cal, other])
     policy = Policy.default().allow("hom_visibility", "dead_time", "test")
-    with pytest.raises(StaleCalibration, match="shorter than its 95% lower end"):
-        hom_from_tags(runs, setup.window, policy=policy, calibrations=cset,
-                      channels=(setup.channel_id("A"), setup.channel_id("B")), reference_delay_ps=setup.reference_delay_ps)
+    return hom_from_tags(runs or tags, setup.window, policy=policy, calibrations=cset,
+                         channels=(setup.channel_id("A"), setup.channel_id("B")),
+                         reference_delay_ps=setup.reference_delay_ps)
+
+
+def _snspd_refused(hom_snspd, r: int) -> None:
+    # Refused by the dead fraction (R1 b) at the referee's 85 kcps; the lower-end gap test only
+    # labels (council round 6 addendum).
+    with pytest.raises(GuardrailRefusal, match="first-order live fraction does not hold"):
+        _snspd_hom(hom_snspd, r)
 
 
 def dataclasses_replace_channel(cal, channel):
@@ -546,8 +551,7 @@ def dataclasses_replace_channel(cal, channel):
 
 def test_a_falsely_identified_snspd_dead_time_is_refused(hom_snspd):
     # Council round 6 (R1): an SNSPD's 30 ns read 20 us, "identified", and gave V = 0.55 +- 6.2 with
-    # exit 0. The floor (three widths) was below zero, so the downward gap test was off; the lower
-    # end is the floor now.
+    # exit 0. Its dead fraction at the analysed rate (1.7) is refused now.
     _snspd_refused(hom_snspd, SNSPD_FALSE_IDENT[0])
 
 
@@ -555,6 +559,24 @@ def test_a_falsely_identified_snspd_dead_time_is_refused(hom_snspd):
 @pytest.mark.parametrize("r", SNSPD_FALSE_IDENT[1:])
 def test_every_falsely_identified_snspd_dead_time_is_refused(hom_snspd, r):
     _snspd_refused(hom_snspd, r)
+
+
+def test_a_false_snspd_dead_time_at_a_low_rate_is_labelled(hom_snspd):
+    # Council round 6 addendum: at 5 kcps the 26 us dead time is a dead fraction of 0.13, under the
+    # refusal; the analysed gaps below its lower end label the corrected value instead.
+    from dadl.forward import DEAD_TIME_BELOW_DARK
+
+    _, tags = hom_snspd
+    rng = np.random.default_rng(113)
+    thin = {}
+    for key, run in tags.items():
+        span = max(int(a.max()) for a in run.values()) - min(int(a.min()) for a in run.values())
+        thin[key] = {ch: np.sort(rng.choice(a, int(5_000 * span / 1e12), replace=False)) for ch, a in run.items()}
+    r, counts = _snspd_hom(hom_snspd, 113, thin)
+    head = DEAD_TIME_BELOW_DARK.split("{name}")[0]
+    assert any(lab.startswith(head) for lab in r.corrected_labels)
+    assert not any(lab.startswith(head) for lab in r.labels)
+    assert counts["gap_check_floor_kind"]["A"] == "lower end (label only)"
 
 
 def _chsh_spad_gap_check(r: int):
@@ -571,12 +593,12 @@ def _chsh_spad_gap_check(r: int):
     labels, counts = check_dead_time_gaps(_member_set("chsh", [cal]), {"A+": setup.channel_id("A+")},
                                           list(runs.values()), analysis="chsh")
     assert labels == ()
-    assert counts["gap_check_floor_kind"]["A+"] == ("lower end" if t.low > 0 else None)
+    assert counts["gap_check_floor_kind"]["A+"] == ("lower end (label only)" if t.low > 0 else None)
 
 
 def test_a_loose_covering_dark_dead_time_still_passes():
-    # The lower-end floor does not refuse loose identifications that cover the truth (council: 20
-    # of 22 chsh-spad 2 s ones).
+    # The lower-end test neither refuses nor labels loose identifications that cover the truth
+    # (council: 20 of 22 chsh-spad 2 s ones).
     _chsh_spad_gap_check(CHSH_LOOSE_COVERING[0])
 
 

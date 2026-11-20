@@ -72,3 +72,16 @@ def test_misspecified_regime_is_flagged_and_gated_on_flags():
     r = propagation(2, seed=7, regime="hom-crosstalk")
     assert r.covered[FLAGGED] == 2
     assert passed(r) == (r.fraction(FLAGGED) >= MIN_FLAG_SHARE)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("i", [19, 87, 131])
+def test_chsh_dead_time_replicates_with_a_dark_miss_complete(i):
+    # Council round 6 addendum: the lower-end gap test refused 42 of 200 chsh-dead-time replicates
+    # (CI seed), each a dark dead time whose 95% lower end missed the 50 ns truth (by design in 5%
+    # of channels). It labels them now; the replicate runs to completion.
+    from dadl.analysis.propagation import REGIMES, _replicate
+    from dadl.calibration.coverage import _children
+
+    child = next(iter(_children(20261118, 200, range(i, i + 1), "chsh-dead-time")))
+    assert len(_replicate(REGIMES["chsh-dead-time"], child)) == 4
