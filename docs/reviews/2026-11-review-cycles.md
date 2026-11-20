@@ -178,7 +178,7 @@ since analyses refuse duplicate timestamps.
 | 7.11 | Minor | Stale dead-time label text; `import dadl` docstring said SciPy is not loaded | Fixed |
 | 7.12 | Minor | Error types inconsistent; `hom_visibility(c_max, c_min)` order trap; analyses do not take a `TagSet`; naming vocabulary | Open (0.1.x); `Estimate` gains `__format__` |
 | 7.13 | Wrong | At dark rate × τa ≈ 0.04 (hot InGaAs) the afterpulse probability covered 72–75%, +2% biased: the fit treats gaps as independent, but a pending afterpulse outlives the next dark count | Note on the artifact above 0.01 and README limit; a likelihood with surviving afterpulses is open |
-| 7.14 | Questionable | The heralding gate's truth is a closed form: right in the gated regimes (±0.3%) but +1.2% with slow afterpulsing and +0.4% at 4 Mpairs/s | Stated in the gate docstring; a pair-labelled simulation truth is open |
+| 7.14 | Questionable | The heralding gate's truth is a closed form: right in the gated regimes (±0.3%) but +1.2% with slow afterpulsing and +0.4% at 4 Mpairs/s | Stated in the gate docstring; a pair-labelled simulation truth is open (phase 3 plan, M3b) |
 | 7.15 | Minor | The gate docstring said the accidentals truth was a closed form | Corrected |
 | 7.16 | Questionable | The gate did not pass dead time and τa as the CLI does (accidentals +2.2% in InGaAs pairs without them) | Fixed: the gate passes the declared values |
 | 7.17 | Minor | Stored draws not gated; the at-least rule cannot fail on wide intervals | Open (target M5, council round 6) |

@@ -71,8 +71,9 @@ def tag_tick(*streams: np.ndarray) -> int:
 
 class RunTags(dict):
     """One acquisition's tags by channel name, as `dadl.tagfile.read_tags` returns them, with the
-    file's metadata (`metadata`: for PTU T3 input `mode`, `sync_period_ps`, `tick_ps` and, when
-    divided, `sync_divider`). A plain dict works wherever this does; it has no metadata."""
+    file's metadata (`metadata`: for PTU input `mode`, `tick_ps` and `lattice_ps`; for T3 also
+    `sync_period_ps` and, when divided, `sync_divider`). A plain dict works wherever this does; it
+    has no metadata."""
 
     def __init__(self, *args: Any, metadata: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -82,6 +83,26 @@ class RunTags(dict):
 def runs_metadata(runs: Mapping[Any, Any]) -> list[Mapping[str, Any]]:
     """The metadata of each acquisition in `runs` that carries any (`RunTags`)."""
     return [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m]
+
+
+def runs_lattice(runs: Mapping[Any, Any]) -> int | None:
+    """The lattice of pair delays (ps) of `runs` from their metadata (council round 8): the common
+    divisor of the acquisitions' `lattice_ps`; None when no acquisition records one (simulated or
+    plain tags: the histograms then take the tags' own step); 0 when a T3 acquisition has no
+    integer lattice (a dtime resolution that is not a whole number of ps)."""
+    import math
+
+    found = None
+    for meta in runs_metadata(runs):
+        if "lattice_ps" not in meta:
+            continue
+        step = meta["lattice_ps"]
+        if not step:
+            if meta.get("mode") == "T3":
+                return 0
+            continue
+        found = int(step) if found is None else math.gcd(found, int(step))
+    return found
 
 
 @dataclass(frozen=True)

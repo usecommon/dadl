@@ -10,6 +10,59 @@ from dadl.guardrails import Policy
 from dadl.propagate import CalibrationSet
 
 
+#: Off-peak flatness check (council round 8, Ph3): its share of the 1e-3 per-analysis refusal
+#: budget, Bonferroni over the acquisitions (or acquisitions x outcome pairs) checked.
+OFFPEAK_ALPHA = 2e-4
+#: Simulations of the exact dispersion test: at 2,000 its smallest p (about 1e-3 after doubling)
+#: could never reach the threshold.
+OFFPEAK_N_SIM = 20_000
+OFFPEAK_REFUSAL = (
+    "the off-peak windows are not flat (pulsed light or a periodic background): the accidentals cannot be read "
+    "off-peak"
+)
+OFFPEAK_ACCEPTED = (
+    "off-peak windows not flat, accepted: the accidentals read off-peak may be wrong (pulsed light or a periodic "
+    "background; policy modified)"
+)
+
+
+def offpeak_p(side: np.ndarray, offsets: np.ndarray) -> float:
+    """The off-peak flatness p-value of one acquisition's shifted counts: min(dispersion, trend),
+    doubled, with the exact dispersion test at `OFFPEAK_N_SIM` simulations."""
+    from dadl.calibration.accidentals import dispersion_pvalue, trend_pvalue
+
+    return min(1.0, 2.0 * min(dispersion_pvalue(side, n_sim=OFFPEAK_N_SIM), trend_pvalue(side, offsets)))
+
+
+def offpeak_check(
+    analysis: str, sides: dict[str, np.ndarray], offsets: np.ndarray, policy: Policy | None
+) -> tuple[float, tuple[str, ...]]:
+    """Check that each acquisition's off-peak windows are flat, as the accidentals assume (council
+    round 8, Ph3: pulsed light on T2 or plain tags read V 10-40 sd off, unlabelled). Returns the
+    smallest p, Bonferroni-adjusted over `sides`, and the labels. Flagged when the smallest p is
+    below `OFFPEAK_ALPHA` / len(sides): refused (`Misspecified`) unless the policy allows
+    `misfit_forward_model`, then labelled `OFFPEAK_ACCEPTED`. Call it only where an
+    accidental-subtracted value is computed."""
+    from dadl.errors import Misspecified
+    from dadl.forward_check import OVERRIDE
+    from dadl.guardrails import Policy as _Policy
+
+    ps = {name: offpeak_p(side, offsets) for name, side in sides.items()}
+    if not ps:
+        return 1.0, ()
+    worst = min(ps, key=ps.get)
+    adjusted = min(1.0, ps[worst] * len(ps))
+    if ps[worst] >= OFFPEAK_ALPHA / len(ps):
+        return adjusted, ()
+    policy = policy or _Policy.default()
+    if OVERRIDE not in policy.rule_for(analysis).allowed_corrections:
+        raise Misspecified(
+            f"{OFFPEAK_REFUSAL} ({worst}: p = {adjusted:.3g} after Bonferroni over {len(ps)}). Override with "
+            f"Policy.allow({analysis!r}, {OVERRIDE!r}, reason)."
+        )
+    return adjusted, (OFFPEAK_ACCEPTED,)
+
+
 def span_ps(run: dict[str, np.ndarray], channels: tuple[str, str]) -> float:
     """An acquisition's span: first to last tag over both channels."""
     arrays = [np.asarray(run[ch]) for ch in channels if np.asarray(run[ch]).size]
@@ -118,22 +171,25 @@ def forward_check(
     delays_ps: dict[str, int],
     calibrations: CalibrationSet,
     policy: Policy | None,
+    lattice_ps: int | None = None,
 ) -> tuple[float | None, tuple[str, ...]]:
     """The forward model's predictive check on each acquisition's histogram of the channel pair
     (`dadl.forward_check`): the adjusted p-value and labels; refuses a misfit the policy does not allow.
 
     Runs only when a delay-jitter calibration gives the peak shape the model uses (window capture);
-    without one the model makes no claim about the shape (p is None)."""
+    without one the model makes no claim about the shape (p is None). `lattice_ps` is the runs'
+    lattice (`dadl.data.runs_lattice`); at 0 (no integer lattice) the check is skipped (p None)."""
     from dadl.forward_check import PairData, delay_start, enforce, run_check
     from dadl.guardrails import Policy as _Policy
 
     a, b = names
     declared = float(delays_ps.get(b, 0) - delays_ps.get(a, 0))
     d_cal, jitter = delay_start(calibrations, *channels)
-    if jitter is None:
+    if jitter is None or lattice_ps == 0:
         return None, ()
     pairs = [
-        PairData(name, np.sort(run[a]), np.sort(run[b]), declared, window_ps, d_cal - declared, jitter, offsets)
+        PairData(name, np.sort(run[a]), np.sort(run[b]), declared, window_ps, d_cal - declared, jitter, offsets,
+                 lattice_ps)
         for name, (run, offsets) in runs.items()
     ]
     result = run_check(pairs)

@@ -164,26 +164,100 @@ def test_a_p_value_of_1e_4_is_flagged_and_bonferroni_applies():
     assert CheckResult({"dip": p}, MISFIT_ALPHA).flagged
     assert CheckResult({"a": 0.01, "b": 0.5}, MISFIT_ALPHA).pvalue == pytest.approx(0.02)
     assert not CheckResult({"a": 0.0006, "b": 0.5}, MISFIT_ALPHA).flagged
+    # Council round 8 (Fix 4): the check's share of the 1e-3 per-analysis budget is 4e-4.
+    assert MISFIT_ALPHA == 4e-4
+    assert CheckResult({"dip": 3.9e-4}, MISFIT_ALPHA).flagged and not CheckResult({"dip": 5e-4}, MISFIT_ALPHA).flagged
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "council round 7 (G1, Fix 1): on T3 tags at 25 ps dtime and a 12500.3 ps sync the check reads p ~ 1e-100 "
-    "(it bins on the 1 ps tick the tags show); reported to the council, not loosened"))
-def test_t3_tags_with_a_measured_sync_period_are_not_flagged():
+def _t3(t, period, res):
+    """Times as a T3 file records them: sync count x period + floor(phase / res) x res, rounded to ps."""
     from dadl.adapters.ptu import _t3_to_ps
+
+    nsync = np.floor(t / period).astype(np.int64)
+    dtime = np.floor((t - nsync * period) / res).astype(np.int64)
+    return _t3_to_ps(nsync, dtime, period * 1e-12, res * 1e-12)[0]
+
+
+def _t3_pvalue(seed, res, period, cable, lattice):
     from dadl.forward_check import pair_pvalue
     from dadl.sim import simulate_pairs
 
     det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=22_000, jitter_sigma_ps=100.0)
+    a, b = simulate_pairs(1e5, det, det, 0.5, np.random.default_rng(7000 + seed))
+    b = b + int(cable)
+    a, b = a[a >= 0], b[b >= 0]
+    pair = PairData("A/B", _t3(a, period, res), _t3(b, period, res), float(int(cable)), 1_000, 0.0, 140.0,
+                    lattice_ps=lattice)
+    return pair_pvalue(pair)
 
-    def t3(t, period=12_500.3, res=25):
-        nsync = np.floor(t / period).astype(np.int64)
-        dtime = np.floor((t - nsync * period) / res).astype(np.int64)
-        return _t3_to_ps(nsync, dtime, period * 1e-12, res * 1e-12)[0]
 
+def test_t3_tags_with_a_measured_sync_period_are_not_flagged():
+    # Council round 7 (G1) left this an xfail: on T3 tags at 25 ps dtime and a 12500.3 ps sync the
+    # check read p ~ 1e-100, binning 46 ps bins on the 1 ps step the tags show. Council round 8
+    # (Fix 1): it bins on the dtime lattice the file's metadata gives.
+    from dadl.forward_check import pair_pvalue
+    from dadl.sim import simulate_pairs
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=22_000, jitter_sigma_ps=100.0)
     a, b = simulate_pairs(1e5, det, det, 0.5, np.random.default_rng(0))
     a, b = a[a >= 0], b[b >= 0]
-    assert pair_pvalue(PairData("A/B", t3(a), t3(b), 0.0, 1_000, 0.0, 140.0)) > 1e-3
+    a, b = _t3(a, 12_500.3, 25), _t3(b, 12_500.3, 25)
+    assert pair_pvalue(PairData("A/B", a, b, 0.0, 1_000, 0.0, 140.0, lattice_ps=25)) > 1e-3
+    # Without the lattice (the tags show a 1 ps step) it misfires, as before.
+    assert pair_pvalue(PairData("A/B", a, b, 0.0, 1_000, 0.0, 140.0)) < 1e-10
+
+
+T3_CASES = [(25, 12_500.3, 30_000.0), (16, 12_345.6, 12_345.6), (16, 12_345.6, 0.0)]
+
+
+@pytest.mark.parametrize("res, period, cable", T3_CASES)
+def test_t3_lattice_check_one_seed(res, period, cable):
+    # Council round 8 (Fix 1): 16 ps at 12345.6 ps, and cable delays that span one or two syncs.
+    assert _t3_pvalue(0, res, period, cable, res) > 1e-3
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("res, period, cable", T3_CASES)
+def test_t3_lattice_check_is_calibrated_over_seeds(res, period, cable):
+    # r8-stat t3check2.py: p < 0.05 in 3% of 40 seeds per case; at most 4 of 40 allowed.
+    ps = np.array([_t3_pvalue(seed, res, period, cable, res) for seed in range(40)])
+    assert np.sum(ps < 0.05) <= 4
+
+
+def test_t3_input_without_an_integer_lattice_skips_the_check():
+    # Council round 8 (Fix 1 d): a dtime resolution that is not whole ps has no lattice to bin on.
+    from dadl.analysis._twopoint import forward_check
+    from dadl.data import ChannelId, RunTags, runs_lattice
+
+    t3 = {"mode": "T3", "sync_period_ps": 12_500.3, "tick_ps": 26, "lattice_ps": None}
+    runs = {"dip": RunTags({"A": np.arange(5), "B": np.arange(5)}, metadata=t3)}
+    assert runs_lattice(runs) == 0
+    assert runs_lattice({"dip": RunTags({}, metadata={**t3, "lattice_ps": 25})}) == 25
+    assert runs_lattice({"dip": {"A": np.arange(3)}}) is None
+
+    class _Set:
+        members = ()
+
+    p, labels = forward_check("hom_visibility", {"dip": (runs["dip"], (0.0,))}, ("A", "B"),
+                              (ChannelId("sim", 0), ChannelId("sim", 1)), window_ps=1000, delays_ps={},
+                              calibrations=_Set(), policy=None, lattice_ps=0)
+    assert p is None and labels == ()
+
+
+def test_the_alignment_puts_the_lattice_mid_bin_and_keeps_the_delay():
+    # Council round 8 (Fix 1 c): the bin edges sit half a lattice step off the modal residue, and
+    # the fitted offset is read back at the right place (a 40 ps T2-like lattice, delay 400 ps).
+    from dadl.forward_check import _align, pooled_peak
+    from dadl.sim import simulate_pairs
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=22_000, jitter_sigma_ps=60.0)
+    a, b = simulate_pairs(2e5, det, det, 0.2, np.random.default_rng(5))
+    a, b = np.sort(a[a >= 0] // 40 * 40), np.sort((b[b >= 0] + 400) // 40 * 40)
+    pair = PairData("A/B", a, b, 400.0, 2_000, lattice_ps=40)
+    shift, tooth = _align([pair], 400, 2_000, 40)
+    assert tooth == 20 and (shift - 400) % 40 == 20
+    fit = pooled_peak([pair])
+    assert abs(fit.offset_ps) < 3 * fit.offset_se_ps + 1.0
 
 
 def test_the_check_starts_from_the_artifact_in_either_order(tmp_path):

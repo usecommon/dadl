@@ -9,6 +9,15 @@ Users may loosen a rule, but never silently: loosening goes through
 policy fingerprint and the overrides with their reasons, and any policy
 that differs from the shipped default is labelled "policy modified".
 
+Refusals and their rates (council round 8): on clean data within the tested regimes, DADL refuses
+an analysis at analysis time with probability at most 1 in 1,000, all checks together: the
+forward-model check 4e-4, the CHSH delay-drift check 2e-4, the off-peak flatness check 2e-4, and
+the dead-time gap tests 2e-4. Each check corrects for its own number of channels or acquisitions.
+Separately, a calibration whose model check fails (p < 0.001 per artifact) is not written; a CHSH
+calibration set of eight artifacts meets this in under 1% of sets, and the remedy is to re-take
+that calibration run. Labels are not refusals: some fire on a few percent of clean analyses, and
+their text says how often.
+
 What this does not do in phase 1: it cannot verify that a window declared as
 coming from the plan really was fixed before acquisition, and it trusts the
 counts and tags it is given. Signed analysis plans (phase 3) close the first

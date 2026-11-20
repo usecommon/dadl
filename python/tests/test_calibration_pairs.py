@@ -351,3 +351,19 @@ def test_sparse_dispersion_check_is_exact():
     p = np.array([dispersion_pvalue(rng.poisson(0.05, 200)) for _ in range(400)])
     assert np.mean(p < 0.01) <= 0.02
     assert dispersion_pvalue(np.r_[np.zeros(199), 6]) < 0.01  # all counts in one window is structure
+
+
+@pytest.mark.slow
+def test_delay_check_is_not_hot_on_clean_snspd_pair_runs():
+    # Council round 8 (St5, Fix 2): the delay fit's check on (groups - 5) degrees of freedom gave
+    # p < 0.05 in 9.5% of clean hom-snspd pair runs; on (groups - 1), as the forward check, 2.5%.
+    from dadl.calibration.delay import calibrate_delay
+
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    ids = (ChannelId("sim", 0), ChannelId("sim", 1))
+    rng = np.random.default_rng(88)
+    ps = []
+    for i in range(400):
+        a, b = simulate_pairs(2e5, det, det, 0.1, rng)
+        ps.append(calibrate_delay(a, b, ids, backend="sim", seed=i, n_draws=50).ppc_pvalue)
+    assert np.mean(np.array(ps) < 0.05) <= 0.06

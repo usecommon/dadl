@@ -37,7 +37,8 @@ from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
 from dadl.tagfile import (
-    ptu_file, read_tags, t3_folder, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags,
+    ptu_file, read_tags, t3_folder, tag_lattice_ps, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir,
+    write_tags,
 )
 
 SITE = "https://usecommon.github.io/dadl/"
@@ -809,7 +810,8 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     detector_args = {"dead_time_ps": dead, "afterpulse_tau_ps": tau_a}
     cals = [
         calibrate_delay(
-            a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_tick_ps(args.tags), **common
+            a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_lattice_ps(args.tags),
+            t3_period_ps=(t3_folder(args.tags) or {}).get("sync_period_ps"), **common
         ),
         calibrate_accidentals(
             a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **detector_args, **common
@@ -1144,7 +1146,8 @@ def build_parser() -> argparse.ArgumentParser:
         "attenuated CW laser with its intensity stable to about 1-2% over each run, not pulsed light or a "
         "mains-powered lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz modulation biased "
         "tau_p 10% low with the predictive check passing; +-40% is flagged.",
-        epilog="HOM, fringe and CHSH do not use this artifact yet (they take the dark dead time; M5).",
+        epilog="HOM, fringe and CHSH do not use this artifact: not yet supported; see Known limits (they take the "
+               "dark dead time).",
     )
     dt.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
     dt.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, one rate per setting")

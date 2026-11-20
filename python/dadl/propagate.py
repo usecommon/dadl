@@ -85,7 +85,8 @@ NOT_CHECKED = (
     "calibrations not checked against the dataset (no DatasetContext: disjointness, validity and conditions not tested)"
 )
 SERIES_UNUSED = (
-    "deadtime-series artifacts present but not used: the forward model takes the dark dead time until M5"
+    "deadtime-series artifacts present but not used: the forward model takes the dark dead time (not yet supported; "
+    "see Known limits)"
 )
 #: Analyses whose forward model does not read deadtime-series artifacts (skipped when `kinds` is None).
 _NO_SERIES = ("hom_visibility", "bell_visibility", "chsh")

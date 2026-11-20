@@ -47,12 +47,19 @@ keeps its number in either mode.
 
 T3 files come from a sync (usually pulsed) source. DADL models CW light: in a T3 file the sync is
 used as a clock only. Corrected values are refused on T3 input unless the setup declares
-`source.type: cw`; pulsed accidentals sit in side peaks at multiples of the repetition period,
-which DADL does not yet model.
+`source.type: cw`. Pulsed sources are not supported on any input (T2, T3 or plain tags): pulsed
+accidentals sit in side peaks at multiples of the repetition period. On T2 and plain tags DADL
+detects them through the off-peak windows (not flat) and refuses the accidental-subtracted values;
+a period that is a whole multiple of the window grid is not detected, but then the off-peak
+estimate is also right.
 
-T3 tick: a recorded gap between two T3 tags is within one dtime resolution of the true gap,
-whatever the sync period, so the tick of T3 data is the dtime resolution (`tick_ps`; plus 1 ps
-when the tags were rounded to whole ps), not the common divisor of the tags. A T3 file whose dtime
+T3 tick and lattice: a recorded gap between two T3 tags is within one dtime resolution of the
+true gap, whatever the sync period, so the error bound of a T3 gap is the dtime resolution
+(`tick_ps`; plus 1 ps when the tags were rounded to whole ps), not the common divisor of the tags.
+It is used only for dead-time intervals. Histograms of pair delays use `lattice_ps`, the dtime
+resolution itself (council round 8): within one sync the difference of two tags is an exact
+multiple of it, and binning a 25 ps lattice in 26 ps bins biased the delay by -12 ps. A
+resolution that is not a whole number of ps has no integer lattice (`lattice_ps` None). A T3 file whose dtime
 range (2^bits x resolution) is shorter than the sync period records no photon late in each
 period: a `t3-range` event and a note say so, and `dadl.tagfile.read_tags` refuses it. The sync
 divider convention in T3 (`HWSync_Divider` > 1) is unverified; the metadata record it
@@ -426,6 +433,14 @@ class PtuFile:
         return int(tick) + (0 if exact else 1)
 
     @property
+    def lattice_ps(self) -> int | None:
+        """The lattice of pair delays in whole ps, for histograms (council round 8). T2:
+        `MeasDesc_GlobalResolution`; T3: the dtime resolution. None when it is not a whole number
+        of ps. Unlike `tick_ps` it has no +1 for rounding: within one sync two T3 tags share the
+        rounded sync part, so their difference is an exact multiple of the resolution."""
+        return _whole_ps(self.resolution_s)
+
+    @property
     def sync_divider(self) -> int | None:
         """T3 only: `HWSync_Divider` when above 1, else None."""
         divider = self.header.get("HWSync_Divider")
@@ -614,6 +629,7 @@ class PtuFile:
             if self.sync_divider is not None:
                 metadata["sync_divider"] = self.sync_divider
         metadata["tick_ps"] = self.tick_ps
+        metadata["lattice_ps"] = self.lattice_ps
         if incomplete:
             metadata["data_loss"] = STOP_REASON_NAMES.get(stop, f"stop reason {stop}")
         if not exact:

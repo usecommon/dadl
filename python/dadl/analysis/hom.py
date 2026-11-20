@@ -23,7 +23,9 @@ sources); a 50:50 beamsplitter (R:T imbalance caps V at 2RT / (R^2 + T^2));
 the reference delay must be small against the window minus the jitter, since
 the fixed grid loses part of the split peak at +-delay (V reads low: 0.86 at
 a 100 ps reference delay in a 200 ps window); CW sources (on PTU T3 input the corrected value
-needs the source declared CW: `source_type="cw"`).
+needs the source declared CW: `source_type="cw"`). Where an accidental-subtracted value is
+computed, each acquisition's off-peak windows are checked for flatness first
+(`_twopoint.offpeak_check`): pulsed light on any input is refused there.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from dadl.analysis._twopoint import (
     check_calibration_args,
     forward_check,
     forward_from_counts,
+    offpeak_check,
     range_ends,
     run_counts,
     span_ps,
@@ -45,7 +48,8 @@ from dadl.analysis._twopoint import (
 )
 from dadl.analysis.visibility import hom_visibility
 from dadl.coincidences import grid_coincidences
-from dadl.data import ChannelId
+from dadl.data import ChannelId, runs_lattice
+from dadl.forward_check import NO_LATTICE
 from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels, t3_input
 from dadl.propagate import CalibrationSet
 from dadl.stationarity import interrupted
@@ -104,6 +108,7 @@ def hom_from_tags(
     Returns the labelled result and the counts it used.
     """
     t3_labels, cw = t3_input(runs, source_type, calibrations is not None or subtract_accidentals is True)
+    lattice = runs_lattice(runs)
     if not cw and subtract_accidentals is None:
         subtract_accidentals = False
     if calibrations is not None:
@@ -151,6 +156,15 @@ def hom_from_tags(
     ratio = t_dip / t_ref if t_dip > 0 and t_ref > 0 else 1.0
     counts["duration_dip_s"] = t_dip / 1e12
     counts["duration_reference_s"] = t_ref / 1e12
+    side_ref = None
+    offpeak_labels: tuple[str, ...] = ()
+    if subtract_accidentals or calibrations is not None:
+        side_ref = shifted_coincidences(
+            np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
+        )
+        counts["offpeak_p"], offpeak_labels = offpeak_check(
+            "hom_visibility", {"dip": side, "reference": side_ref}, offsets, policy
+        )
     if subtract_accidentals:
         # hom_visibility decides whether the subtraction can be done, and labels it if not.
         result = hom_visibility(
@@ -160,19 +174,21 @@ def hom_from_tags(
         result = hom_visibility(c_max, c_min, policy=policy, exposure_ratio=ratio)
     counts["subtracted"] = float(result.corrected is not None)
     labels = result.labels + (TWO_POINT,) + t3_labels
+    if result.corrected is not None and offpeak_labels:
+        result = dataclasses.replace(result, corrected_labels=result.corrected_labels + offpeak_labels)
     if calibrations is not None:
-        side_ref = shifted_coincidences(
-            np.sort(runs["reference"]["A"]), np.sort(runs["reference"]["B"]), window.width_ps, da, db, offsets
-        )
+        assert side_ref is not None
         d_ref = float(reference_delay_ps or 0.0)
         ref_offsets = (d_ref, -d_ref) if d_ref else (0.0,)
         check_p, check_labels = forward_check(
             "hom_visibility", {"reference": (runs["reference"], ref_offsets), "dip": (runs["dip"], (0.0,))},
             HOM_CHANNELS, tuple(channels), window_ps=window.width_ps, delays_ps=dict(d),
-            calibrations=calibrations, policy=policy,
+            calibrations=calibrations, policy=policy, lattice_ps=lattice,
         )
         if check_p is not None:
             counts["forward_check_p"] = check_p
+        elif lattice == 0:
+            counts["forward_check_note"] = NO_LATTICE
         use_labels, use_counts = use_checks(
             "hom_visibility", [runs["reference"], runs["dip"]], HOM_CHANNELS, tuple(channels),
             calibrations=calibrations, policy=policy,
@@ -187,7 +203,7 @@ def hom_from_tags(
         )
         counts.update(extra)
         counts["accidentals_reference"] = high.accidentals
-        corrected_labels = fwd.labels + check_labels + corrected_threshold_labels(
+        corrected_labels = fwd.labels + check_labels + offpeak_labels + corrected_threshold_labels(
             "hom_visibility", result.raw, fwd.estimate, range_ends(extra)
         )
         result = dataclasses.replace(

@@ -211,14 +211,25 @@ def test_pulsed_t3_input_needs_a_declared_cw_source():
         hom_from_tags(runs, w, subtract_accidentals=True)
     result, counts = hom_from_tags(runs, w)
     assert result.corrected is None and T3_INPUT in result.labels
-    # Declared CW (the sync a clock only), the subtraction runs; here it is wrong, as the label says.
-    declared, _ = hom_from_tags(runs, w, source_type="cw")
+    # Declared CW (the sync a clock only), the off-peak windows still show the pulse train: refused
+    # (council round 8, Ph3), and under the override computed and labelled. Here it is wrong.
+    from dadl.analysis._twopoint import OFFPEAK_ACCEPTED
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w, source_type="cw")
+    loose = Policy.default().allow("hom_visibility", "misfit_forward_model", "test")
+    declared, _ = hom_from_tags(runs, w, source_type="cw", policy=loose)
     assert declared.corrected is not None and T3_INPUT in declared.labels
+    assert OFFPEAK_ACCEPTED in declared.corrected_labels
     assert counts["accidentals"] < 0.5 * counts["c_min"]
-    # T2 input (no sync period) is unaffected.
+    # T2 input (no sync period) is not labelled T3, and the off-peak check refuses it the same way.
     t2 = {k: RunTags(v, metadata={"mode": "T2", "tick_ps": 1}) for k, v in plain.items()}
     for r in (t2, plain):
-        res, _ = hom_from_tags(r, w)
+        with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+            hom_from_tags(r, w)
+        res, _ = hom_from_tags(r, w, policy=loose)
         assert res.corrected is not None and T3_INPUT not in res.labels
 
 
@@ -262,3 +273,63 @@ def test_the_predictive_check_looks_at_the_declared_delay(tmp_path):
     window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
     with pytest.raises(Misspecified):
         hom_from_tags(runs, window, policy=policy, calibrations=ab, channels=(CA, CB), seed=2, reference_delay_ps=15.0)
+
+
+# --- Council round 8: pulsed light on T2 and plain tags (Ph3, Fix 5) ----------------------------
+
+
+def _pulsed_plain(period, n_pulses, rng, jitter=50.0):
+    """A HOM pair of acquisitions from a pulsed source as plain tags (no T3 metadata): 1% singles
+    per pulse on each detector, and same-pulse pairs at 0.2% per pulse in the reference only."""
+    def run(p_pair):
+        k = np.arange(n_pulses)
+        a, b, pr = (rng.random(n_pulses) < p for p in (0.01, 0.01, p_pair))
+        out = {}
+        for name, hit in (("A", a | pr), ("B", b | pr)):
+            t = k[hit] * period + rng.normal(0, jitter, int(hit.sum())) + 1000
+            out[name] = np.unique(t.astype(np.int64))
+        return out
+
+    return {"dip": run(0.0), "reference": run(0.002)}
+
+
+def test_pulsed_light_on_plain_tags_is_refused_off_peak():
+    # r8-council pulsed_t2.py: at a 13157.9 ps period the side windows sample random phases of the
+    # pulse train, the accidentals read low and V came out 0.96 for a true 1, unlabelled.
+    from dadl.analysis._twopoint import OFFPEAK_ACCEPTED
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+
+    w = Window(1000, "plan")
+    runs = _pulsed_plain(13_157.9, 2_000_000, np.random.default_rng(2))
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w)
+    raw, counts = hom_from_tags(runs, w, subtract_accidentals=False)
+    assert raw.corrected is None and "offpeak_p" not in counts
+    loose = Policy.default().allow("hom_visibility", "misfit_forward_model", "test")
+    res, counts = hom_from_tags(runs, w, policy=loose)
+    assert OFFPEAK_ACCEPTED in res.corrected_labels and counts["offpeak_p"] < 2e-4
+
+
+def test_pulsed_light_at_a_period_on_the_window_grid_is_not_refused():
+    # Every shift lands on a pulse: the off-peak estimate is right and the windows are flat.
+    runs = _pulsed_plain(12_500.0, 2_000_000, np.random.default_rng(2))
+    _, counts = hom_from_tags(runs, Window(1000, "plan"))
+    assert counts["offpeak_p"] > 0.01
+
+
+@pytest.mark.slow
+def test_the_off_peak_check_is_calibrated_on_clean_hom_snspd():
+    # Council round 8 (Fix 5): off-peak p below 0.01 in at most 2% of 200 clean hom-snspd analyses
+    # (council: 0.25% at the Bonferroni over the two acquisitions).
+    from dadl.analysis.propagation import REGIMES
+
+    reg = REGIMES["hom-snspd"]
+    rng = np.random.default_rng(31)
+    w = Window(reg.window_ps, "plan")
+    ps = []
+    for _ in range(200):
+        runs = {k: simulate_hom(reg.source, reg.detector, reg.detector, d, reg.duration_s, rng)
+                for k, d in (("dip", 0.0), ("reference", reg.reference_delay_ps))}
+        ps.append(hom_from_tags(runs, w)[1]["offpeak_p"])
+    assert np.mean(np.array(ps) < 0.01) <= 0.02

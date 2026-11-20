@@ -36,7 +36,17 @@ tick wide: with an 80 ps tick and 21 ps jitter the delay read up to 1.3 ps off
 and covered 0-12%, with the check passing; tagger engineer review, cycle 2.)
 
 The predictive check is a Pearson chi-square on the fit window, with
-adjacent bins merged until each expects at least 5 counts.
+adjacent bins merged until each expects at least 5 counts, on (groups - 1)
+degrees of freedom (method v9, as `dadl.forward_check`): the parameters are
+fitted on the fine bins, so the statistic lies between chi2(groups - 5) and
+chi2(groups - 1), and groups - 5 ran hot (p < 0.05 in 9.5% of clean SNSPD
+pair runs; council round 8).
+
+T3 tags (`t3_period_ps`): within one sync the difference of two tags is a
+whole number of dtime resolutions, but across k syncs it is off that lattice
+by k x (period mod resolution), plus 1 ps of rounding. The off-grid note
+then fires only when the delays' modal residue is further than 1 ps plus
+(period mod resolution) from the lattice (method v9).
 
 Phase 2 limits: a Gaussian IRF only (an exponential tail biases the delay by
 tens of ps and shows as a failing predictive check, which marks the
@@ -64,7 +74,7 @@ from dadl.stats import Interval, Laplace, numerical_hessian
 
 KIND = "delay-jitter"
 METHOD = "xcorr-gaussian-mle"
-METHOD_VERSION = "8"
+METHOD_VERSION = "9"
 #: Coincidences above background the peak must hold before a fit is attempted.
 MIN_PEAK = 100
 #: Half-width of the fit window around the peak, in units of the starting sigma.
@@ -172,6 +182,20 @@ def _grouped_pearson(n: np.ndarray, mu: np.ndarray, n_params: int) -> float:
     return float(_st.chi2.sf(float(np.sum((o - e) ** 2 / e)), dof))
 
 
+def _on_t3_lattice(a: np.ndarray, b: np.ndarray, tick: int, range_ps: int, t3_period_ps: float | None) -> bool:
+    """Whether T3 tags sit on the `tick` lattice as T3 data do: the modal residue of the delays
+    within `range_ps`, modulo the tick, is at most 1 ps plus (period mod tick) from it."""
+    if t3_period_ps is None or tick <= 1:
+        return False
+    fine = cross_correlation(a, b, 1, -(-range_ps // tick) * tick).astype(float)
+    x = np.arange(fine.size) - fine.size // 2
+    residue = np.bincount(np.mod(x, tick), weights=fine, minlength=tick)
+    if residue.sum() <= 0:
+        return True
+    r0 = int(np.argmax(residue))
+    return min(r0, tick - r0) <= 1.0 + math.fmod(float(t3_period_ps), tick)
+
+
 def _bootstrap_deviance(n: np.ndarray, mu: np.ndarray, n_sim: int = 1000) -> float:
     """Parametric-bootstrap p-value of the Poisson deviance, for peaks too sparse for a chi-square.
 
@@ -201,6 +225,7 @@ def calibrate_delay(
     n_draws: int = N_DRAWS,
     conditions: dict[str, float] | None = None,
     tick_ps: int | None = None,
+    t3_period_ps: float | None = None,
     _refined: bool = False,
 ) -> Calibration:
     """Fit the delay of channel b relative to a (b - a, ps) and the combined jitter sigma.
@@ -210,6 +235,9 @@ def calibrate_delay(
     is under two bin widths the fit is repeated once with bins of about a
     third of the jitter (whole tagger ticks): a peak one or two bins wide has a
     non-Gaussian likelihood and its intervals undercovered (92%).
+
+    `tick_ps` is the lattice of the pair delays when the adapter knows it (PTU: `lattice_ps`);
+    `t3_period_ps` the sync period of T3 input, for the off-grid note.
     """
     if len(channels) != 2:
         raise ValueError("channels must be (channel a, channel b)")
@@ -223,7 +251,7 @@ def calibrate_delay(
         tick = found
     else:
         tick = _checks.integer(tick_ps, "tick_ps", minimum=1)
-        if found % tick:
+        if found % tick and not _on_t3_lattice(a, b, tick, range_ps, t3_period_ps):
             notes.append(
                 f"the tags are not all on the {tick} ps tick grid (their common step is {found} ps): an offset "
                 "between channels? The declared tick is used"
@@ -342,7 +370,7 @@ def calibrate_delay(
     if not _refined and sigma < 2 * bin_width_ps and finer < bin_width_ps:
         refined = calibrate_delay(
             a, b, channels, range_ps=range_ps, bin_width_ps=finer, backend=backend, seed=seed,
-            n_draws=n_draws, conditions=conditions, tick_ps=tick_ps, _refined=True,
+            n_draws=n_draws, conditions=conditions, tick_ps=tick_ps, t3_period_ps=t3_period_ps, _refined=True,
         )
         note = f"bins refined from {bin_width_ps} to {finer} ps because the jitter ({sigma:.3g} ps) is under two bin widths"
         return dataclasses.replace(refined, notes=(note, *refined.notes))
@@ -400,7 +428,7 @@ def calibrate_delay(
         samples=np.column_stack([draws[:, 2], np.exp(draws[:, 3])]),
         sample_params=("delay_ps", "jitter_sigma_ps"),
         converged=converged,
-        ppc_pvalue=with_interruption_check(_grouped_pearson(model.n, model.mu(theta), 5), notes, a, b),
+        ppc_pvalue=with_interruption_check(_grouped_pearson(model.n, model.mu(theta), 1), notes, a, b),
         inputs=((tags_sha256(a), "raw-tags", str(channels[0])), (tags_sha256(b), "raw-tags", str(channels[1]))),
         backend=backend,
         conditions={"tick_ps": float(tick), **(conditions or {})},

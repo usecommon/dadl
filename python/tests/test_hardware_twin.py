@@ -383,3 +383,80 @@ def test_a_divided_t3_sync_is_refused_for_dark_and_labelled_in_analyses(tmp_path
     assert "T3 sync divider convention is unverified" in capsys.readouterr().err
     assert main(["analyze", str(setup), "--tags", str(tmp_path)]) == 0
     assert "T3 sync divider 2: the divider convention is unverified" in capsys.readouterr().out
+
+
+# --- Council round 8: the T3 lattice for histograms (Fix 1) ------------------------------------
+
+
+def _t3_pairs_folder(tmp_path, period=13_157.9, written=13_158):
+    """A HOM setup on inputs 1 and 2 and a pair run written as TimeHarp 260 P T3 files (25 ps
+    dtime) at a whole-ps sync, then given the measured period `period` as an instrument writes it.
+    Returns (setup path, folder)."""
+    from dadl.sim import DetectorParams, simulate_pairs
+    from dadl.tagfile import ptu_file
+
+    setup = tmp_path / "setup.yaml"
+    text = example_path("hom-snspd").read_text(encoding="utf-8")
+    setup.write_text(text.replace("channels: {0: A, 1: B}", "channels: {1: A, 2: B}")
+                     .replace("jitter_sigma_ps: 25", "jitter_sigma_ps: 60"), encoding="utf-8")
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=60.0)
+    a, b = simulate_pairs(2e5, det, det, 0.1, np.random.default_rng(8))
+    a, b = a[a >= 0], b[b >= 0]
+    folder = tmp_path / "pairs"
+    folder.mkdir()
+    for i in (0, 1):
+        p = write_ptu(ptu_file(folder, i), {1: a, 2: b}, device="timeharp260p", sync_period_ps=written)
+        _patch_float(p, "MeasDesc_GlobalResolution", period * 1e-12)
+    return setup, folder
+
+
+def test_t3_lattice_and_tick_are_kept_apart(tmp_path):
+    from dadl.tagfile import tag_lattice_ps, tag_tick_ps
+
+    _, folder = _t3_pairs_folder(tmp_path)
+    assert tag_lattice_ps(folder) == 25 and tag_tick_ps(folder) == 26
+    tags = read_tags(folder, {1: "A", 2: "B"}, ("dip", "reference"))
+    assert tags["dip"].metadata["lattice_ps"] == 25 and tags["dip"].metadata["tick_ps"] == 26
+
+
+def test_calibrate_pairs_on_t3_with_a_measured_period_covers_the_delay(tmp_path, capsys):
+    # Council round 8 (Ph1, St3): calibrate pairs passed the 26 ps gap bound as the tick and the
+    # delay read -12 ps with its interval excluding 0, every artifact a misfit.
+    from dadl.artifact import load_calibration
+
+    setup, folder = _t3_pairs_folder(tmp_path)
+    art = tmp_path / "art"
+    assert main(["calibrate", "pairs", str(setup), "--tags", str(folder), "--no-analysers", "--herald", "A",
+                 "--signal", "B", "--out", str(art)]) == 0
+    out = capsys.readouterr().out
+    assert "tick grid" not in out
+    (delay,) = [c for c in map(load_calibration, art.glob("*.json")) if c.kind == "delay-jitter"]
+    assert delay.estimates["delay_ps"].contains(0.0) and delay.status == "ok"
+    assert delay.conditions["tick_ps"] == 25.0
+
+
+def test_t3_delay_at_the_lattice_is_calibrated():
+    # Council round 8 (t3delay.py): 25 ps T3 at a 12500.3 ps sync, the delay fit at the lattice.
+    from dadl.adapters.ptu import _t3_to_ps
+    from dadl.calibration.delay import calibrate_delay
+    from dadl.data import ChannelId
+    from dadl.sim import DetectorParams, simulate_pairs
+
+    det = DetectorParams(efficiency=0.5, dark_rate_cps=2000.0, dead_time_ps=22_000, jitter_sigma_ps=100.0)
+
+    def t3(t, period=12_500.3, res=25):
+        nsync = np.floor(t / period).astype(np.int64)
+        dtime = np.floor((t - nsync * period) / res).astype(np.int64)
+        return _t3_to_ps(nsync, dtime, period * 1e-12, res * 1e-12)[0]
+
+    ids = (ChannelId("x", 0), ChannelId("x", 1))
+    misfit = covered = 0
+    for seed in range(20):
+        a, b = simulate_pairs(1e5, det, det, 0.2, np.random.default_rng(500 + seed))
+        a, b = a[a >= 0], b[b >= 0]
+        cal = calibrate_delay(t3(a), t3(b), ids, backend="sim", seed=1, n_draws=200, tick_ps=25,
+                              t3_period_ps=12_500.3)
+        misfit += cal.ppc_pvalue < 1e-3
+        covered += cal.estimates["jitter_sigma_ps"].contains(100 * 2**0.5)
+        assert not any("tick grid" in n for n in cal.notes)
+    assert misfit == 0 and covered >= 19

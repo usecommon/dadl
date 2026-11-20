@@ -12,7 +12,16 @@ delay| < W (every delay the window grid can count), by Poisson maximum likelihoo
 jitter, peak area and the two background levels free, and takes a grouped Pearson p-value on
 (groups - 1) degrees of freedom (`_grouped_pearson`, which says why). The analysis is flagged when
 the smallest p falls below `MISFIT_ALPHA` / (number of histograms) (Bonferroni, so the false-alarm
-rate per analysis is at most about `MISFIT_ALPHA` however many pairs it holds).
+rate per analysis is at most about `MISFIT_ALPHA` however many pairs it holds). `MISFIT_ALPHA` is
+4e-4, this check's share of the 1e-3 per-analysis refusal budget (council round 8; README,
+"Refusals and their rates").
+
+Binning: the histogram bins are whole multiples of the lattice the pair delays sit on
+(`PairData.lattice_ps` from the file's metadata, else the tags' common step), with their edges
+half a lattice step off the modal residue of the delays, so a +-1 ps rounding never crosses an
+edge (council round 8: on T3 tags with a measured sync period the tags' step is 1 ps and 46 ps
+bins on a 25 ps lattice gave p about 1e-100). T3 input whose dtime resolution is not a whole
+number of ps has no integer lattice: the check is skipped and the counts say so.
 
 The check runs only where the model uses the peak shape: when a delay-jitter calibration of the
 pair gives the window capture. A flagged analysis is refused (`Misspecified`) unless the policy allows `misfit_forward_model`;
@@ -40,9 +49,11 @@ from dadl.guardrails import Policy
 from dadl.histogram import cross_correlation
 
 #: Family-wise false-alarm rate of the check per analysis.
-MISFIT_ALPHA = 0.001
+MISFIT_ALPHA = 4e-4
 OVERRIDE = "misfit_forward_model"
 FORWARD_MISFIT_ACCEPTED = "forward-model misfit accepted: the predictive check failed (policy modified)"
+#: Recorded in the counts (`forward_check_note`) when the check is skipped for want of a lattice.
+NO_LATTICE = "forward check skipped: no integer lattice (T3 dtime resolution not a whole number of ps)"
 #: Fewest coincidences in the fit region for a histogram to be checked.
 MIN_COUNTS = 50
 #: Adjacent bins are merged until each expects at least this many counts.
@@ -94,6 +105,8 @@ class PairData:
     delay_ps: float = 0.0
     jitter_ps: float | None = None
     offsets_ps: tuple[float, ...] = (0.0,)
+    #: The lattice of the pair delays (ps), from the file's metadata; None takes the tags' step.
+    lattice_ps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +157,32 @@ class _ShapeModel:
     def nll(self, theta: np.ndarray) -> float:
         mu = self.mu(theta)
         return float(np.sum(mu - self.n * np.log(mu)))
+
+
+def _tick(pairs: Sequence[PairData]) -> int:
+    """The lattice the pairs' delays sit on: their declared `lattice_ps`, else the tags' step."""
+    given = [int(p.lattice_ps) for p in pairs if p.lattice_ps]
+    if given:
+        return math.gcd(*given)
+    return math.gcd(*(tag_tick(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64)) for p in pairs))
+
+
+def _align(pairs: Sequence[PairData], shift: int, half: int, tick: int) -> tuple[int, int]:
+    """(shift, tooth): the histogram shift moved so that the modal residue of the delays modulo
+    the lattice sits `tooth` = tick // 2 ps above a bin edge (council round 8). A tooth at offset c
+    in its bin reads as a delay c ps low in the model, so fitted delays get `tooth` added back.
+    With a 1 ps lattice nothing moves."""
+    if tick <= 1:
+        return shift, 0
+    fine = sum(
+        cross_correlation(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64) - shift, 1, half).astype(float)
+        for p in pairs
+    )
+    x = -half + np.arange(fine.size)
+    residue = np.bincount(np.mod(x, tick), weights=fine, minlength=tick)
+    r0 = int(np.argmax(residue)) if residue.sum() > 0 else 0
+    tooth = tick // 2
+    return shift + (r0 - tooth) % tick, tooth
 
 
 def _layout(pair: PairData, tick: int) -> tuple[int, int, int, float]:
@@ -234,13 +273,14 @@ def pair_pvalue(pair: PairData) -> float | None:
     b = np.asarray(pair.b, dtype=np.int64)
     if a.size == 0 or b.size == 0:
         return None
-    tick = tag_tick(a, b)
+    tick = _tick([pair])
     shift, half, width, sigma0 = _layout(pair, tick)
+    shift, tooth = _align([pair], shift, half, tick)
     hist = cross_correlation(a, b - shift, width, half).astype(float)
     if hist.sum() < MIN_COUNTS:
         return None
     edges = _edges(hist, half, width)
-    d0 = float(pair.delay_ps) + (pair.declared_delay_ps - shift)
+    d0 = float(pair.delay_ps) + (pair.declared_delay_ps - shift) - tooth
     theta, mu = fit_peak(hist, edges, tick, d0, sigma0, pair.offsets_ps)
     p = _grouped_pearson(hist, mu)
     if p >= POLISH_BELOW:
@@ -301,14 +341,15 @@ def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
     first = pairs[0]
     if any(p.declared_delay_ps != first.declared_delay_ps or p.window_ps != first.window_ps for p in pairs):
         raise ValueError("pooled pairs must share the declared delay and window")
-    tick = math.gcd(*(tag_tick(np.asarray(p.a, dtype=np.int64), np.asarray(p.b, dtype=np.int64)) for p in pairs))
+    tick = _tick(pairs)
     shift, half, width, sigma0 = _layout(first, tick)
+    shift, tooth = _align(pairs, shift, half, tick)
     hist = _summed(pairs, shift, width, half)
     if hist.sum() < MIN_COUNTS:
         return None
     edges = _edges(hist, half, width)
     if first.jitter_ps:
-        d0 = float(first.delay_ps) + (first.declared_delay_ps - shift)
+        d0 = float(first.delay_ps) + (first.declared_delay_ps - shift) - tooth
     else:
         k = int(np.argmax(hist))
         d0 = 0.5 * float(edges[k] + edges[k + 1])
@@ -328,7 +369,8 @@ def pooled_peak(pairs: Sequence[PairData]) -> PeakFit | None:
     sigma = math.exp(float(theta[3]))
     area = math.exp(float(theta[1]))
     return PeakFit(
-        float(theta[2]) - (first.declared_delay_ps - shift), sigma, sigma / math.sqrt(area), sigma / math.sqrt(2.0 * area)
+        float(theta[2]) + tooth - (first.declared_delay_ps - shift), sigma, sigma / math.sqrt(area),
+        sigma / math.sqrt(2.0 * area),
     )
 
 

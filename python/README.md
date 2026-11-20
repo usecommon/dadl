@@ -22,8 +22,12 @@ Read the known limits in the repository README before relying on a number.
 
 T3 files come from a sync (usually pulsed) source. DADL models CW light: in a
 T3 file the sync is used as a clock only. Corrected values are refused on T3
-input unless the setup declares `source.type: cw`; pulsed accidentals sit in
-side peaks at multiples of the repetition period, which DADL does not yet model.
+input unless the setup declares `source.type: cw`. Pulsed sources are not
+supported on any input (T2, T3 or plain tags): pulsed accidentals sit in side
+peaks at multiples of the repetition period. On T2 and plain tags DADL detects
+them through the off-peak windows (not flat) and refuses the
+accidental-subtracted values; a period that is a whole multiple of the window
+grid is not detected, but then the off-peak estimate is also right.
 
 - Overview: https://usecommon.github.io/dadl/
 - Source, design doc and "using your own data": https://github.com/usecommon/dadl

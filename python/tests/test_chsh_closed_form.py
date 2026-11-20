@@ -92,7 +92,7 @@ def test_stderr_is_calibrated_by_pull_study(monkeypatch):
 
     chsh_module = sys.modules["dadl.analysis.chsh"]
 
-    monkeypatch.setattr(chsh_module, "capture_balance", lambda runs, window, counts=None: (None, {}, None))
+    monkeypatch.setattr(chsh_module, "capture_balance", lambda runs, window, counts=None, lattice_ps=None: (None, {}, None))
     pulls = []
     for seed in range(200):
         result, expected = run(dark_rate_cps=2e4, seed=1000 + seed, duration_s=0.02, pair_rate_per_s=5e4)

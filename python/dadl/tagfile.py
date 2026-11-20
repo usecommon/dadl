@@ -251,7 +251,7 @@ def _read_ptu_dir(directory: Path, channels: dict[int, str], settings: tuple) ->
                 "TimeHarp 260 files input 0 is the sync input and detector inputs are numbered from 1 (as in "
                 "PicoQuant's software); map them under `channels:` in setup.yaml"
             )
-        meta: dict[str, Any] = {"mode": reader.mode, "tick_ps": reader.tick_ps}
+        meta: dict[str, Any] = {"mode": reader.mode, "tick_ps": reader.tick_ps, "lattice_ps": reader.lattice_ps}
         if reader.mode == "T3":
             # Council round 7 (G3): analyses label T3 input and refuse a corrected value unless the
             # source is declared CW.
@@ -316,6 +316,21 @@ def tag_tick_ps(path: str | Path) -> int | None:
     if not files:
         return None
     return PtuFile(files[0]).tick_ps
+
+
+def tag_lattice_ps(path: str | Path) -> int | None:
+    """The lattice of pair delays in whole ps for a folder of PTU files (`PtuFile.lattice_ps`),
+    else None. Histograms of pair delays bin on it; `tag_tick_ps` is the error bound of a gap and
+    serves dead-time intervals only (council round 8)."""
+    path = Path(path)
+    if not path.is_dir():
+        return None
+    from dadl.adapters.ptu import PtuFile
+
+    files = sorted(path.glob("setting*.ptu"))
+    if not files:
+        return None
+    return PtuFile(files[0]).lattice_ps
 
 
 def t3_folder(path: str | Path) -> dict[str, Any] | None:

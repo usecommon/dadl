@@ -27,6 +27,7 @@ from dadl.analysis._twopoint import (
     check_calibration_args,
     forward_check,
     forward_from_counts,
+    offpeak_check,
     range_ends,
     run_counts,
     span_ps,
@@ -35,7 +36,8 @@ from dadl.analysis._twopoint import (
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
 from dadl.coincidences import grid_coincidences
-from dadl.data import ChannelId
+from dadl.data import ChannelId, runs_lattice
+from dadl.forward_check import NO_LATTICE
 from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels, t3_input
 from dadl.propagate import CalibrationSet
 from dadl.result import LabelledValue
@@ -80,6 +82,7 @@ def fringe_from_tags(
     On PTU T3 input a corrected value is refused unless `source_type` declares CW light ("cw"),
     and the result is labelled (`dadl.guardrails.t3_input`)."""
     t3_labels, _ = t3_input(runs, source_type, calibrations is not None or bool(subtract_accidentals))
+    lattice = runs_lattice(runs)
     if calibrations is not None:
         check_calibration_args(subtract_accidentals, channels)
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
@@ -122,6 +125,11 @@ def fringe_from_tags(
         "duration_max_s": t_max / 1e12,
         "duration_min_s": t_min / 1e12,
     }
+    offpeak_labels: tuple[str, ...] = ()
+    if subtract_accidentals or calibrations is not None:
+        counts["offpeak_p"], offpeak_labels = offpeak_check(
+            "bell_visibility", {"max": side_max, "min": side_min}, offsets, policy
+        )
     drift = False
     for ch in FRINGE_CHANNELS:
         n_max, n_min = int(np.asarray(runs["max"][ch]).size), int(np.asarray(runs["min"][ch]).size)
@@ -136,14 +144,18 @@ def fringe_from_tags(
     else:
         result = bell_visibility(c_max, c_min, policy=policy, window=window)
     labels = result.labels + (TWO_POINT,) + ((SINGLES_DRIFT,) if drift else ()) + t3_labels
+    if result.corrected is not None and offpeak_labels:
+        result = dataclasses.replace(result, corrected_labels=result.corrected_labels + offpeak_labels)
     if calibrations is not None:
         check_p, check_labels = forward_check(
             "bell_visibility", {"max": (runs["max"], (0.0,)), "min": (runs["min"], (0.0,))},
             FRINGE_CHANNELS, tuple(channels), window_ps=window.width_ps, delays_ps=dict(window.delays_ps),
-            calibrations=calibrations, policy=policy,
+            calibrations=calibrations, policy=policy, lattice_ps=lattice,
         )
         if check_p is not None:
             counts["forward_check_p"] = check_p
+        elif lattice == 0:
+            counts["forward_check_note"] = NO_LATTICE
         use_labels, use_counts = use_checks(
             "bell_visibility", [runs["max"], runs["min"]], FRINGE_CHANNELS, tuple(channels),
             calibrations=calibrations, policy=policy,
@@ -157,7 +169,7 @@ def fringe_from_tags(
             window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
-        corrected_labels = fwd.labels + check_labels + corrected_threshold_labels(
+        corrected_labels = fwd.labels + check_labels + offpeak_labels + corrected_threshold_labels(
             "bell_visibility", result.raw, fwd.estimate, range_ends(extra)
         )
         result = dataclasses.replace(

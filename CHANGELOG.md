@@ -361,6 +361,49 @@ release the package still reports version 0.1.1.
   - propagation gate at 200 replicates, unchanged: hom-snspd 94.5/94.5, hom-bright 95.0/95.5,
     hom-crosstalk 30.5/32.5 with 100% flagged, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0;
     both sharded merges run end to end; the 44 mutants the ruling names are all killed.
+- Review council round 8 (method `xcorr-gaussian-mle` 9; `dark`, `deadtime`, `accidentals`,
+  `dcr`, `heralding` unchanged):
+  - T3 lattice: `PtuFile.lattice_ps` and `tag_lattice_ps(folder)` give the lattice pair delays sit
+    on (the whole-ps dtime resolution in T3, the tick in T2); `tick_ps` keeps its round-7 meaning
+    and serves dead-time intervals only. `calibrate pairs` passed the 26 ps gap bound as the tick
+    on 25 ps data at a measured period: delay -12 ps, jitter covered 0 of 10, every artifact a
+    misfit. It now passes the lattice and the sync period; the delay fit's off-grid note no longer
+    fires on T3 cross-sync residues. `read_tags` carries `lattice_ps`; the predictive check and the
+    CHSH peak fits bin on it, with edges half a lattice step off the delays' modal residue. T3
+    with a resolution that is not whole ps skips the check (`forward_check_note`). The round-7
+    xfail passes;
+  - delay fit: the predictive check uses (groups - 1) degrees of freedom, as the forward check
+    (groups - 5 gave p < 0.05 in 9.5% of clean SNSPD pair runs);
+  - one refusal budget: on clean data an analysis is refused at analysis time with chance at most
+    1e-3, split as the forward check 4e-4 (`MISFIT_ALPHA`), the CHSH drift 2e-4 (`DRIFT_Z` 3.72;
+    the capture label keeps 3.29 as `CAPTURE_Z`), the off-peak check 2e-4 and the gap tests 2e-4
+    (README, "Refusals and their rates"). Behaviour change;
+  - dead-time gap tests: the downward floor is point - ln(K / 1e-4) / (N f) from the dark run's
+    gap count and dark rate (`gap_check_floor_kind` "exponential law"; the 3-width floor refused
+    clean channels at 2.5e-4 to 3.7e-4); the upward threshold is 100((K / 1e-4)^(1/100) - 1)
+    edge spacings (11.2 at four channels). New label `DEAD_TIME_ABOVE_GAPS` when the dark dead
+    time is longer than many analysed gaps; the correction keeps the dark value (limit stated;
+    the fix is M5a, with the second-order pair term and a new control regime);
+  - pulsed light on T2 or plain tags read V 10-40 sd off, unlabelled. Analyses that subtract
+    accidentals now check each acquisition's off-peak windows for flatness (exact dispersion at
+    20,000 simulations, and trend; `offpeak_p`) and refuse a value whose windows are not flat
+    (`Misspecified`, override `misfit_forward_model`, then `OFFPEAK_ACCEPTED`). Behaviour change;
+  - the CHSH drift override has its own label, `DELAY_DRIFT_ACCEPTED`. The propagation gate counts
+    the predictive check, the drift and the off-peak check under their own keys (the 1% cap
+    applies to their sum) and records refused replicates by type ("refused: <type>", not covered)
+    instead of aborting; any refusal still fails a regime (tolerance: owner item O12);
+  - wording: the 20% dead-fraction refusal gives its real reasons; user-facing text no longer
+    names milestone M5;
+  - plan: M5 split into M5a (series dead time at use) and M5b (NUTS); M2b, M3b and M4b take most
+    of M10's smaller items; an owner-items section (O1-O14); D3 as-built note; dependency fixes;
+  - CI: the slow-test job is in the `gates` job's needs;
+  - delay coverage at 1,000 replicates (CI seed) identical in all six pairs regimes; delay misfits
+    fell in sparse-snspd (0.3% to 0.0%) and broad-irf (0.1% to 0.0%). Deadtime coverage identical
+    to round 7 (95.5/99.9 series-spad, 94.6/99.0 passive-quench);
+  - propagation gate at 200 replicates (CI seed), no refusals and no flags in any clean regime:
+    hom-snspd 94.5/94.5, hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0,
+    hom-crosstalk 30.5/32.5 with 100% flagged (misfit artifacts 1.0% to 0.5%). Seed 4242:
+    chsh-spad 93.0/93.0, chsh-dead-time 97.0/85.0, no refusals.
 
 ### Published results as executable tests
 

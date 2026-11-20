@@ -403,12 +403,13 @@ jobs:
         run: python -m dadl.analysis.propagation merge shards/*.json
 
   gates:
-    # One check for every coverage and propagation gate, to be required on main (owner item,
-    # council round 4). It runs even when a gate job fails, and fails unless every one passed: a
-    # failed shard leaves its merge job skipped, which alone would count as passing.
+    # One check for every coverage and propagation gate and the slow tests, to be required on main
+    # (owner item, council rounds 4 and 8). It runs even when a gate job fails, and fails unless
+    # every one passed: a failed shard leaves its merge job skipped, which alone would count as
+    # passing.
     name: Statistical gates
     if: always()
-    needs: [coverage, coverage-shard, coverage-merge, propagation, propagation-shard, propagation-merge]
+    needs: [python-slow, coverage, coverage-shard, coverage-merge, propagation, propagation-shard, propagation-merge]
     runs-on: ubuntu-latest
     steps:
       - name: Every gate job succeeded

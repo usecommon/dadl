@@ -5,8 +5,8 @@ Nov 15, 2026 · decisions taken Nov 16, 2026 · builds on 0.1.1
 Phase 3 in [design.md](design.md#mvp-scope-and-milestones) delivers "forward model, joint Monte
 Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n)
 coincidences", gated by `guardrails`. This document turns that row, and the items the design and
-the review records defer to phase 3, into milestones of one pull request each. M0-M4 are merged
-(CHANGELOG, Unreleased); the rest is plan. Decisions that need the owner are marked **Decision** and collected at the end.
+the review records defer to phase 3, into milestones of one pull request each. M0-M3 are merged
+and M4 is in review (#26) (CHANGELOG, Unreleased); the rest is plan. Decisions that need the owner are marked **Decision** and collected at the end.
 
 ## Starting point
 
@@ -42,7 +42,7 @@ calibration uncertainty), so the gate has three parts, all required on every pul
    uncertainty switched off must fall below the band in at least one declared regime, otherwise
    the regime does not test propagation.
 3. **`coverage`** (extended): the phase 2 job plus the series dead-time regimes (M4) and, if
-   NUTS is adopted (M5), the same gates run with NUTS posteriors on the fast tier.
+   NUTS is adopted (M5b), the same gates run with NUTS posteriors on the fast tier.
 
 **Decision D1 (taken: three-part gate).** Adopt the three-part gate, or keep the design's `guardrails` job
 only. If adopted, design.md's phase table row changes to name all three.
@@ -50,21 +50,26 @@ only. If adopted, design.md's phase table row changes to name all three.
 ## Milestones
 
 One PR each. Dependencies are on merged milestones. Rough order: M0 and M4 can start at once;
-M1 → M2 → M3 is the critical path; M6 → M7 needs only M1.
+M1 → M2 → M3 is the critical path; M6 → M7 needs only M1. Council round 8 split M5 into M5a and
+M5b and moved most of M10's smaller items into M2b, M3b and M4b.
 
 | # | Milestone | Depends on |
 | --- | --- | --- |
 | M0 | Inference library benchmark (NumPyro, PyMC, Stan) and the decision record | none |
 | M1 | Calibration sets: loading, bracketing, joint draws | none |
 | M2 | Forward model and corrected HOM and fringe visibility | M1 |
+| M2b | IRF with an exponential tail (D8), with the common-vs-confined misfit test | M2 |
 | M3 | Corrected CHSH and the `propagation` gate | M2 |
+| M3b | Corrected-CHSH additions: efficiency normalisation, D3 union, pair-labelled heralding truth | M3 |
 | M4 | Series dead-time model: simulator and calibration | none |
-| M5 | NUTS backend for joint fits | M0, M2 |
+| M4b | Pre-registered dead-time gates and regimes, coarse and Fano checks | M4 |
+| M5a | Series dead time at use in the forward model | M2, M4 |
+| M5b | NUTS backend for joint fits | M0, M5a, the B1 decision |
 | M6 | Signing primitives, trust file and `dadl verify` | M1 |
 | M7 | Signed analysis plans, ledger and trial counting | M6 |
-| M8 | Photon-HDF5 export with phconvert validation | M1 (M6 for signatures in the file) |
-| M9 | Streaming O(n) coincidences and chunked PTU reading | none |
-| M10 | `guardrails` job, docs and release 0.2.0 | all |
+| M8 | Photon-HDF5 export with phconvert validation | M1, M6 |
+| M9 | Streaming O(n) coincidences and chunked PTU reading | none (its divided-T3 check needs a real file: external, O10) |
+| M10 | `guardrails` job, docs and release 0.2.0 | the gate minimum (Risks), plus the optional milestones that merged |
 
 ### M0. Inference library benchmark
 
@@ -192,13 +197,41 @@ series model below is phase 3"; README limit; expert review Q2.
 - Stays out: soft (continuous) recovery of SNSPDs and passive-quench efficiency recovery curves.
   The README limit is reworded, not removed.
 
-### M5. NUTS backend
+### M5a. Series dead time at use
+
+The forward model reads the dark dead time only; the `deadtime-series` artifacts that M4 writes
+have no consumer, and user-facing text says so ("not yet supported; see Known limits"). Council
+round 8 moved the entry items that do not need NUTS here.
+
+- Forward-model live fraction from an identified `deadtime-series` artifact (m/n from the series
+  closed form; M4 council round 1, D4), with a propagation regime that uses it.
+- Minimum method version at use (council round 5, V4): a table (kind, method) -> version in
+  `propagate` that refuses or labels older artifacts, with a test, before anything reads
+  `deadtime-series` artifacts.
+- Shared row index (B5): a series tau_p's draws lose their correlation (about 0.3) with the dark
+  afterpulse draws they were propagated from; `CalibrationSet.draws` needs a shared row index
+  across a series artifact and its cited dark artifact, with the reviewer's correlation test.
+- Scan range at use (T6): check the analysed rate against a series artifact's recorded scan
+  rates, renaming `scan_rate_low_cps` / `scan_rate_high_cps` to the `_min_`/`_max_` bracket
+  convention when the check is wired.
+- The dead time at the analysed gaps (council round 8, Ph4 and Ph5, one change): truncate every
+  dead-time draw, point and bound at the analysed shortest gap plus the D5 allowance, use the
+  additive pair live fraction (1 - fa)(1 - fb) + r_c min tau, and redesign the control regime.
+  Truncation alone gave 92.5% with a 93.0% control; both together are nearly unbiased (mean z
+  +0.13) but make chsh-dead-time cover with its control (94.0% / 94.0%), so the control regime
+  must change to one whose dead-time uncertainty survives truncation (owner item O8).
+- The dead fraction above 20% (R1 b), refused today, is in scope once the series model is read.
+- Whether M5a joins the gate minimum is owner item O6 (council: yes).
+
+### M5b. NUTS backend
 
 - `python/dadl/inference/` with `laplace.py` (moved from `stats.py`, unchanged numbers) and
   `nuts.py` (the M0 library, imported lazily). Selected by `--sampler {laplace,nuts}`; default
   `laplace`.
-- First users: the M2/M3 joint fits at low counts, and the dark fit below 5,000 gaps where draws
-  needed reweighting (W10). Not every calibration moves; each move bumps the method version.
+- First users, pending the B1 decision below: the M2/M3 forward model has no likelihood of its own,
+  so "joint fits at low counts" exist only if B1 adds one; otherwise the dark fit below 5,000 gaps
+  where draws needed reweighting (W10). Not every calibration moves; each move bumps the method
+  version.
 - `checks` records R-hat, bulk and tail ESS and divergences; R-hat > 1.01 or any divergence makes
   the artifact a misfit. Draws thinned to `N_DRAWS`.
 - Reproducibility: NUTS output is not bit-reproducible across platforms (design, "Content
@@ -207,9 +240,7 @@ series model below is phase 3"; README limit; expert review Q2.
 - Tests: Laplace and NUTS intervals agree where Laplace is valid (20,000-gap dark fit); `coverage`
   fast tier with `--sampler nuts`; optional-dependency tests skip cleanly without the extra.
 - CI: one job with the `mcmc` extra on Windows, Linux and macOS.
-- Entry item (council round 5, V4): before M5 reads `deadtime-series` artifacts, a minimum-version
-  table (kind, method) -> version in `propagate` that refuses or labels older ones, with a test.
-- Entry items (council round 6):
+- Entry items (council round 6; V4, B5 and T6 moved to M5a in round 8):
   - **What NUTS samples (B1; owner item).** Name the model NUTS samples (likelihood, parameters,
     priors): a new joint likelihood (the dip or fringe histogram with the IRF, or calibration and
     counts together), or state "calibration fits only". The M2/M3 forward model has no likelihood
@@ -225,16 +256,8 @@ series model below is phase 3"; README limit; expert review Q2.
     rate, logit p, log tau_a) inside the fit's box; rank checks confirm this (round 6). Near p = 0
     that prior is improper without the box. Declare proper priors per calibration, record them in
     the artifact, and bump the method version where draws move.
-  - **Shared row index (B5).** A series tau_p's draws lose their correlation (about 0.3) with the
-    dark afterpulse draws they were propagated from: `CalibrationSet.draws` needs a shared row
-    index across a series artifact and its cited dark artifact, with the reviewer's correlation
-    test.
   - **Stored draws gated (B7, review item 7.17).** A rank-statistic test per propagated
     calibration (as the round-6 `sbc_dark.py` probe), run with `--sampler nuts`.
-  - **Scan range at use (T6).** Check the analysed rate against a series artifact's recorded scan
-    rates, renaming `scan_rate_low_cps` / `scan_rate_high_cps` to the `_min_`/`_max_` bracket
-    convention when the check is wired.
-  - The round-5 V4 minimum-version table (above) is still open.
 
 ### M6. Signing primitives and `dadl verify`
 
@@ -315,7 +338,8 @@ bytes per record in T2 and up to about 170 in T3 (README limit; cycle 2.10; coun
 
 Entry item (council round 7, G5): check the T3 sync divider convention on one real divided T3
 file (the nsync step against `TTResult_SyncRate`). Until then `calibrate dark` and `calibrate
-deadtime` refuse T3 files with `HWSync_Divider` > 1 and analyses label them.
+deadtime` refuse T3 files with `HWSync_Divider` > 1 and analyses label them. The file is an
+external dependency (lab data, owner item O10); without it M9 ships the refusal only.
 
 - Rust core: `grid_coincidences` and `occupied_slots` over chunks with carried state at chunk
   edges; Python binding taking an iterator of chunks. The pure-Python reference stays the
@@ -325,6 +349,47 @@ deadtime` refuse T3 files with `HWSync_Divider` > 1 and analyses label them.
   chunked decoder covers both.)
 - Acceptance: memory bounded by the chunk size (test with a 1 GB synthetic file in the bindings
   job, recorded, not gated); results identical to the whole-file path on all examples.
+
+### M2b. IRF tail (D8)
+
+- IRF with an exponential tail (Gaussian core plus tail) in the delay fit and the forward model
+  (phase 2 review round 2; README "Gaussian timing response"). Without it SNSPD delay artifacts
+  are refused, so hom-snspd cannot use corrected values on real data (D8).
+- The common-vs-confined misfit test for CHSH: a timing tail common to all channels does not bias
+  S, so the predictive check need not refuse it (M4 council round 2, B5).
+- Whether M2b is in the gate minimum is for the owner (D8 says "in phase 3").
+
+### M3b. Corrected-CHSH additions
+
+- Opt-in per-detector efficiency normalisation for corrected S: a new correction name, a policy
+  line and a gate regime (M4 council round 2, B4).
+- D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a
+  chsh-dead-time regime whose dark runs identify the dead time or that gates the range (M4 council
+  round 2, B2, G; pre-registered with O8).
+- Pair-labelled simulation truth for the heralding gate (review item 7.14): the propagation
+  simulator does not label pairs yet.
+- `dadl simulate --heralding --pair A-,B+`: heralding runs for the other three CHSH channel pairs
+  (council round 6, R6).
+- May slip to 0.2.x (owner item O13).
+
+### M4b. Dead-time gates and regimes
+
+Every change here alters a gate or a regime, so all are pre-registered in one owner sitting
+before any run (owner item O8).
+
+- Rotating seeds for the coverage gates (expert review Q11), with a second seed (round 8, St2).
+- tau_np dead-time gate with power (M4 council round 1, G1).
+- A coverage regime with an unidentified tau_p (council round 6, T7 c); a regime past the
+  count-rate maximum with the user declaration and the per-run branch flip search (M4 council
+  rounds 3 and 4); a series regime at tau_p 5 ns / tau_np 22 ns (round 7, Q5).
+- Regimes closer to real labs (council round 8, Ph6): per-channel spread (efficiency +-20%, dead
+  time +-10%), tagger jitter of 10-20 ps after the dead time, an SNSPD at 2-5 Mcps per channel,
+  and a SPAD with an exponential IRF tail (recording its refusal rate).
+- Coarse grouped predictive check and the count-variance (Fano) check for the series dead time
+  (M4 council round 1, S5 and D1; each changes the misfit share, so the gate is re-run).
+- The 0.5 s passive-quench probe and the second-order pending-afterpulse term, if a regime needs
+  it (M4 council round 5, I2).
+- Gates with M5a (owner item O13).
 
 ### M10. `guardrails` job, docs and release 0.2.0
 
@@ -342,39 +407,43 @@ deadtime` refuse T3 files with `HWSync_Divider` > 1 and analyses label them.
   10. the published-results tests from the in-flight work, once merged.
 - Docs: design.md phase table (phase 3 Done, gate named), "What works today", the forward model
   and signing sections reconciled with what was built; README "Known limits" updated (corrected
-  values, series model, plans and what signatures do not prove); CHANGELOG 0.2.0.
+  values, series model, plans and what signatures do not prove); the site (`docs/index.html`),
+  which still describes 0.1.1 as released; CHANGELOG 0.2.0.
 - A review cycle in the format of `docs/reviews/2026-11-review-cycles.md`, before release, with
   at least a Bayesian computation, a Bell-test red team and a security lens.
 
 ### Smaller items assigned to phase 3
 
-From the review records; each can ride with the milestone named or go to 0.2.x.
+From the review records; each can ride with the milestone named or go to 0.2.x. Council round 8
+moved most rows from M10 to M2b, M3b, M4b and M5a.
 
 | Item | Source | Where |
 | --- | --- | --- |
-| IRF with exponential tail (Gaussian core plus tail) in the delay fit and forward model | phase 2 review round 2; README "Gaussian timing response" | Own PR after M2, **Decision D8** |
-| Common-vs-confined misfit test for CHSH: a timing tail common to all channels does not bias S, so the predictive check need not refuse it | M4 council round 2 (B5) | With the IRF-tail PR (D8) |
+| IRF with exponential tail (Gaussian core plus tail) in the delay fit and forward model | phase 2 review round 2; README "Gaussian timing response" | M2b, **Decision D8** |
+| Common-vs-confined misfit test for CHSH: a timing tail common to all channels does not bias S, so the predictive check need not refuse it | M4 council round 2 (B5) | M2b |
 | `grid_origin_ps` declared rather than fixed at 0 | cycle 1.18 | M7 |
-| Pair-labelled simulation truth for the heralding gate | cycle 7.14; summary of cycles | M3 (the propagation simulator labels pairs) |
-| Rotating seeds for the coverage gates | expert review Q11 | M10, if the owner agrees to change the gate rule before running |
-| τ_np dead-time gate with power: two-sided around its exact expected coverage, or a goodness-of-fit gate on the gap - τ_np histogram, with a random sub-tick dead-time phase in the regime | M4 council round 1 (G1) | M10, next to rotating seeds (a gate-rule change needs the owner's agreement before running) |
-| Coarse grouped predictive check, Bonferroni-combined with the fine one, for the series dead time | M4 council round 1 (S5) | M10 (changes the misfit share; gate re-run) |
-| Count-variance (Fano) stationarity check for dead-time scans | M4 council round 1 (D1) | M10 (needs the model's renewal Fano factor; gate re-run) |
-| Opt-in per-detector efficiency normalisation for corrected S (new correction name, policy line and a gate regime) | M4 council round 2 (B4) | M10; 0.2.x if not done |
-| D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a chsh-dead-time regime whose dark runs identify the dead time or that gates the range | M4 council round 2 (B2, G) | M10, next to rotating seeds (regimes were declared before the first run; needs the owner's agreement) |
-| Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5 (joint fits rebuild the forward model's dead-time inputs; propagation gate re-run) |
-| Stored draws gated, not only intervals (a rank-statistic test per propagated calibration) | cycle 7.17; council round 6 (B7) | M5 entry item (moved from M1; 7.17 stays open with that target) |
-| `dadl simulate --heralding --pair A-,B+`: heralding runs for the other three CHSH channel pairs | council round 6 (R6) | M10 |
-| A coverage regime with an unidentified tau_p, to gate the upper limit's level (one-sided about 97.5%) | council round 6 (T7 c) | M10, next to rotating seeds (owner's agreement) |
-| Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M10, next to rotating seeds (owner's agreement) |
-| User declaration of scan runs past the count-rate maximum | M4 council round 4 (DT3) | M10, with the past-maximum regime |
-| Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M10, checked on the past-maximum regime |
-| A 0.5 s passive-quench probe (0.5 s coverage 92.5%, matching the no-afterpulse control's 93.1%: check the profile's calibration at 1e6 gaps) | M4 council round 5 (I2) | M10 |
-| The second-order pending-afterpulse term (two pending, or one beside the record's own), if a regime needs it | M4 council round 5 (I2) | M10 |
-| Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | M5 entry item, before M5 reads `deadtime-series` artifacts |
-| A series coverage regime at tau_p 5 ns / tau_np 22 ns, 5-30 Mcps (the third point of `test_recovery_at_three_points`, in no regime: 3 of 20 seeds missed there) | M4 council round 7 (Q5) | M10, next to rotating seeds (owner's agreement) |
-| Pulsed sources: side-peak accidentals at multiples of the repetition period, so T3 input can be corrected without declaring the source CW | M4 council round 7 (G3) | v0.2+ (with the pulsed-source item below) |
-| The predictive check on T3 tags with a measured sync period (it bins on the 1 ps tick the tags show and flags clean 25 ps data, p about 1e-100; an xfail test records it) | M4 council round 7 (G1, Fix 1) | reported to the council; not loosened |
+| Pair-labelled simulation truth for the heralding gate | cycle 7.14; summary of cycles | M3b (M3 merged without it; the propagation simulator does not label pairs) |
+| Rotating seeds for the coverage gates, with a second seed | expert review Q11; council round 8 (St2) | M4b (owner item O8) |
+| τ_np dead-time gate with power: two-sided around its exact expected coverage, or a goodness-of-fit gate on the gap - τ_np histogram, with a random sub-tick dead-time phase in the regime | M4 council round 1 (G1) | M4b (owner item O8) |
+| Coarse grouped predictive check, Bonferroni-combined with the fine one, for the series dead time | M4 council round 1 (S5) | M4b (changes the misfit share; gate re-run) |
+| Count-variance (Fano) stationarity check for dead-time scans | M4 council round 1 (D1) | M4b (needs the model's renewal Fano factor; gate re-run) |
+| Opt-in per-detector efficiency normalisation for corrected S (new correction name, policy line and a gate regime) | M4 council round 2 (B4) | M3b; 0.2.x if not done |
+| D3 union interval (zero to the bound) for corrected values at a dead-time bound, and a chsh-dead-time regime whose dark runs identify the dead time or that gates the range | M4 council round 2 (B2, G) | M3b (regime pre-registered with O8) |
+| Forward model live fraction m/n from the series closed form when the set holds an identified `deadtime-series` artifact | M4 council round 1 (D4) | M5a (propagation gate re-run) |
+| The dead time at the analysed gaps (truncation, the additive pair term and a new control regime, as one change) | council round 8 (Ph4, Ph5) | M5a (owner item O8 for the regime) |
+| Stored draws gated, not only intervals (a rank-statistic test per propagated calibration) | cycle 7.17; council round 6 (B7) | M5b entry item (moved from M1; 7.17 stays open with that target) |
+| `dadl simulate --heralding --pair A-,B+`: heralding runs for the other three CHSH channel pairs | council round 6 (R6) | M3b |
+| A coverage regime with an unidentified tau_p, to gate the upper limit's level (one-sided about 97.5%) | council round 6 (T7 c) | M4b (owner item O8) |
+| Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M4b (owner item O8) |
+| User declaration of scan runs past the count-rate maximum | M4 council round 4 (DT3) | M4b, with the past-maximum regime |
+| Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M4b, checked on the past-maximum regime |
+| A 0.5 s passive-quench probe (0.5 s coverage 92.5%, matching the no-afterpulse control's 93.1%: check the profile's calibration at 1e6 gaps) | M4 council round 5 (I2) | M4b |
+| The second-order pending-afterpulse term (two pending, or one beside the record's own), if a regime needs it | M4 council round 5 (I2) | M4b |
+| Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | M5a entry item, before anything reads `deadtime-series` artifacts |
+| A series coverage regime at tau_p 5 ns / tau_np 22 ns, 5-30 Mcps (the third point of `test_recovery_at_three_points`, in no regime: 3 of 20 seeds missed there) | M4 council round 7 (Q5) | M4b (owner item O8) |
+| Gate regimes closer to real labs: per-channel spread, tagger jitter after the dead time, an SNSPD at Mcps, a SPAD IRF tail | council round 8 (Ph6) | M4b (owner item O8) |
+| Pulsed sources: side-peak accidentals at multiples of the repetition period, so T3 input can be corrected without declaring the source CW | M4 council round 7 (G3) | v0.2+ (with the pulsed-source item below); round 8 refuses pulsed light seen off-peak on any input |
+| The predictive check on T3 tags with a measured sync period | M4 council round 7 (G1, Fix 1) | Done in council round 8: histograms bin on the dtime lattice (`lattice_ps`) |
 
 ## Decisions
 
@@ -385,7 +454,7 @@ D2 is a preference going into M0; the benchmark still has to confirm it.
 | --- | --- | --- | --- |
 | D1 | What gates phase 3 | `guardrails` only (design) / plus `propagation` and extended `coverage` | Three-part gate: corrected intervals are the new numbers and need a coverage test |
 | D2 | MCMC library | NumPyro / PyMC / Stan, after M0 | NumPyro as an optional extra if it installs from wheels on Windows; Laplace stays default |
-| D3 | Upper-limit parameters (unidentified dead time, undetected afterpulsing) in corrections | Range at bound and zero / uniform prior / refuse | Range plus a label; never a uniform prior presented as a posterior |
+| D3 | Upper-limit parameters (unidentified dead time, undetected afterpulsing) in corrections | Range at bound and zero / uniform prior / refuse | Range plus a label; never a uniform prior presented as a posterior. **As built:** the value and its interval are at the bound; the two ends (zero and the bound) are points in `counts`, labelled when they differ by more than the error. The union interval is M3b. |
 | D4 | Schema for the series dead-time artifact | New kind `deadtime-series` in `calibration/1` (enum widened) / reuse `dark-afterpulse-deadtime` with a new method / `calibration/2` | New kind in `calibration/1`, documented as the one permitted kind of additive change; 0.1.x readers refuse it, which is acceptable |
 | D5 | Crypto dependency for ed25519 | `cryptography` (optional extra) / PyNaCl / shell out to `ssh-keygen -Y` or minisign | `cryptography` as the `sign` extra; accept SSH signatures in the trust file later |
 | D6 | `source: "plan"` without a verified plan, for CHSH | Refuse / label "plan not verified" | Label in 0.2.0, refuse in 0.3.0 after one release of warning; the quickstart uses a signed dev plan from day one |
@@ -394,6 +463,28 @@ D2 is a preference going into M0; the benchmark still has to confirm it.
 | D9 | Should calibration artifacts be signed in phase 3 (design: signing v0.2+) | Plans only / plans and artifacts | Both: same primitive, little extra code; HSM, TPM and QKD attestation stay out |
 | D10 | Dead time in the default HOM correction rule (taken during M2) | Keep an explicit override / add to the default rule | Keep the override: `Policy.allow("hom_visibility", "dead_time", reason)`, labelled "policy modified"; the pinned default policy fingerprint is unchanged |
 | D11 | Window capture (fixed-grid loss at a HOM reference delay, from a delay-jitter artifact) in the default HOM rule (taken during M2) | Keep an explicit override / add to the default rule | Keep the override, as D10: `Policy.allow("hom_visibility", "window_capture", reason)`; the default policy fingerprint is unchanged |
+
+## Owner items
+
+Consolidated from council rounds 4-8. Each needs the owner; the council's recommendation is in
+the last column.
+
+| # | Item | Source | Status | Recommendation |
+| --- | --- | --- | --- | --- |
+| O1 | Make "Statistical gates" (which now needs the slow-test job) a required check on `main` | r4 C1, r8 Pl5 | Open | Edit ruleset 27075146 |
+| O2 | Release requires gates on the tagged SHA (or a RELEASING policy); forbid direct pushes to main | r7 S6 | Open | Require it in `release.yml`'s `check` job |
+| O3 | Dev version (still 0.1.1; delay is at method 9, deadtime at 7) | r5 V2, r6, r7 | Open | 0.2.0.dev0 before more artifacts |
+| O4 | Calibration schema `$id` | r5 V7 | Open | With O3 |
+| O5 | D4 decision text ("0.1.x readers refuse") | r5 V6 | Open | Reword as r5 L2 |
+| O6 | M5 scope (B1), now M5a / M5b; whether M5a joins the gate minimum | r6 B1, r8 Pl1 | Open | Split; M5a in the gate minimum |
+| O7 | Accept the behaviour changes in release notes: refusal above 20% dead fraction; T3 needs `source.type: cw`; `t3-range` refusal; off-peak refusal of pulsed light on T2 and plain tags; forward check at 4e-4 and drift at 3.72 sd; the 1e-3 per-analysis refusal budget as the stated standard | r6, r7, r8 | Partly in CHANGELOG | Accept |
+| O8 | Pre-register gate and regime changes in one sitting: rotating seeds with a second seed, the tau_np gate, the D3 union with chsh-dead-time, past-maximum with declaration and flip search, unidentified tau_p, 5/22 ns, regimes closer to real labs (Ph6), a control regime that survives the M5a truncation | r1-r8 | Open | One sitting before any M4b or M5a run |
+| O9 | Purge the bench binaries from history | r7 S5 | Removed from the tree | Leave (default) |
+| O10 | A real divided T3 file | r7 G5 | Open | Source it, or ship the refusal |
+| O11 | Withdrawn deferral (pending afterpulse moved into M4) | r5 item 4 | Plan updated | Close |
+| O12 | Propagation gate refusal tolerance: replace "any refusal fails" with at most 5 refused per 1,000 (binomial at 1e-3, `FALSE_FAIL`), refused counted as not covered; the misfit (at most 18) and flag caps in the same binomial form; check the p < 0.01 share too | r8 St2, St5 | New | Adopt (a gate rule, so the owner's) |
+| O13 | Which of M2b, M3b and M4b may slip to 0.2.x | r8 Pl2 | New | M4b gates with M5a; M3b may slip |
+| O14 | PR #26 merge method, and whether fixes to merged milestones go in their own PRs or reviews are capped at a number of rounds | r8 Pl6 | New | Owner's choice (the reviewer advises a non-squash merge so the round commits stay traceable) |
 
 ## Risks
 
@@ -406,7 +497,7 @@ D2 is a preference going into M0; the benchmark still has to confirm it.
 | Signatures mistaken for proof of timing or honesty | Overclaimed plans | README and result text say what is shown (unchanged plan, ordering in the ledger) and what is not (time of creation, honest data) |
 | Series dead-time not identifiable at lab rates | Wide or prior-driven τ_p | Requires a rate scan; τ_p reported as a bound when not identified; prior-sensitivity check |
 | Schema changes after the freeze | Broken readers | Only additive fields; D4 decided before M4 merges |
-| Scope against team size | Phase slips | M0, M4, M9 are independent and can be deferred to 0.2.x without blocking the gate; M1–M3, M6, M7, M10 are the gate's minimum |
+| Scope against team size | Phase slips | M0, M4, M9 are independent and can be deferred to 0.2.x without blocking the gate; M1–M3, M6, M7, M10 are the gate's minimum. M5a is proposed for it (owner item O6); which of M2b, M3b and M4b may slip is owner item O13 |
 
 ## Out of phase 3
 

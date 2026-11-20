@@ -251,6 +251,7 @@ def test_a_delay_drift_since_calibration_is_refused(tmp_path):
     # Council round 2 (B1): delay artifacts taken before A+ and B+ drifted by 200 ps passed the
     # predictive check (it refits the delay); corrected S read 2.03-2.05 for 1.98.
     from dadl.errors import Misspecified
+    from dadl.analysis.chsh import DELAY_DRIFT_ACCEPTED
     from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
 
     rng = np.random.default_rng(3000)
@@ -261,15 +262,16 @@ def test_a_delay_drift_since_calibration_is_refused(tmp_path):
     window = Window(width_ps=1000, source="plan")
     current = simulate_chsh(MISDECLARED_SRC, _late(0), 1.0, rng, SETTINGS)
     r = chsh(current, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
-    assert FORWARD_MISFIT_ACCEPTED not in r.all_labels
+    assert FORWARD_MISFIT_ACCEPTED not in r.all_labels and DELAY_DRIFT_ACCEPTED not in r.all_labels
     drifted = simulate_chsh(MISDECLARED_SRC, _late(200), 1.0, rng, SETTINGS)
     with pytest.raises(Misspecified, match="calibrated delays"):
         chsh(drifted, window, strict, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
     loose = strict.allow("chsh", "misfit_forward_model", "comparing a stale calibration")
     cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=loose, dataset=CTX)
     r = chsh(drifted, window, loose, settings_deg=SETTINGS, calibrations=cset, channels=IDS, seed=1)
-    assert FORWARD_MISFIT_ACCEPTED in r.all_labels
-    assert abs(r.counts["delay_drift_z"]) > 3.29
+    # Council round 8 (St7): the drift has its own label, apart from the predictive check's.
+    assert DELAY_DRIFT_ACCEPTED in r.all_labels
+    assert abs(r.counts["delay_drift_z"]) > 3.72
     # Council round 3: 100 ps at 150 ps jitter and a 1 ns window is refused too.
     cset = CalibrationSet.load(tmp_path, analysis="chsh", policy=strict, dataset=CTX)
     drifted = simulate_chsh(MISDECLARED_SRC, _late(100), 1.0, rng, SETTINGS)
@@ -386,8 +388,9 @@ def test_chsh_checks_the_dark_dead_times_against_the_analysed_gaps(data):
     # Under the override the gap check passes it, labelled; its dead fraction (0.74) is then
     # refused (council round 6, R1 b).
     labels, counts = check_dead_time_gaps(long, IDS, [runs[k] for k in runs], analysis="chsh", policy=loose)
-    assert labels == (OUTSIDE_VALIDITY,) and 45_000 < counts["min_gap_ps"]["A+"] < 51_000
-    with pytest.raises(GuardrailRefusal, match="first-order live fraction does not hold"):
+    # The 1 us point is also above the gaps: labelled (council round 8, DEAD_TIME_ABOVE_GAPS).
+    assert tuple(lab for lab in labels if not lab.startswith("the dark dead time of")) == (OUTSIDE_VALIDITY,) and 45_000 < counts["min_gap_ps"]["A+"] < 51_000
+    with pytest.raises(GuardrailRefusal, match="pair term and the unmodelled paralyzable stage are not trusted"):
         chsh(runs, WINDOW, loose, calibrations=long, channels=IDS, seed=1)
     short = _with_darks(cset, [_dark(cid, 22_000, 500, seed=i) for i, cid in enumerate(IDS.values())])
     with pytest.raises(StaleCalibration, match="longer than its upper end"):
@@ -535,3 +538,51 @@ def test_chsh_threshold_labels_belong_to_the_corrected_value(data):
     assert (THRESHOLD_AFTER_CORRECTION in r.corrected_labels) == (r.raw.value < 2.0 <= c.value)
     assert NEAR_THRESHOLD_EXACT not in r.labels
     assert c.low <= 2.0 <= c.high
+
+
+# --- Council round 8 ----------------------------------------------------------------------------
+
+
+def test_a_drift_below_the_refusal_threshold_is_not_refused(monkeypatch):
+    # Council round 8 (Fix 4): the drift refuses at max(0.5 se, 3.72 sd) (two-sided 2e-4); a drift
+    # at z 3.5, above the 0.5 se floor, is no longer refused. The capture label keeps 3.29 sd.
+    import importlib
+
+    import dadl.forward as F
+    from dadl.errors import Misspecified
+    from dadl.forward import OUTCOME_SIGNS
+    from dadl.result import Estimate
+
+    C = importlib.import_module("dadl.analysis.chsh")
+    assert C.DRIFT_Z == 3.72 and C.CAPTURE_Z == 3.29
+    monkeypatch.setattr(F, "_pair_capture", lambda *a, **k: (np.full(10, 0.9), 0.9, False))
+    monkeypatch.setattr(C, "reweighted_s", lambda counts, caps: 2.0 if isinstance(caps[("+", "+")], float)
+                        else np.full(10, 2.0))
+    balance = dict.fromkeys(OUTCOME_SIGNS, (0.0, 100.0, 0.9, 1.0, 1.0))
+    corrected = Estimate(2.0, 0.01, stderr_statistical=0.01)
+    window = Window(width_ps=1000, source="plan")
+    labels, counts = C._delay_drift(window, Policy.default(), None, IDS, 1, ({}, 2.035, balance, 0.01), corrected)
+    assert labels == () and counts["delay_drift_z"] == pytest.approx(3.5)
+    with pytest.raises(Misspecified, match="calibrated delays"):
+        C._delay_drift(window, Policy.default(), None, IDS, 1, ({}, 2.038, balance, 0.01), corrected)
+    loose = Policy.default().allow("chsh", "misfit_forward_model", "test")
+    labels, _ = C._delay_drift(window, loose, None, IDS, 1, ({}, 2.038, balance, 0.01), corrected)
+    assert labels == (C.DELAY_DRIFT_ACCEPTED,)
+
+
+@pytest.mark.slow
+def test_clean_chsh_spad_runs_pass_the_off_peak_check():
+    # Council round 8 (Ph3, Fix 5): the off-peak check on the 16 histograms of clean chsh-spad
+    # runs (afterpulsing 0.5% at 50 us included) does not flag, over 20 runs.
+    from dadl.analysis._twopoint import OFFPEAK_ALPHA, offpeak_p
+    from dadl.analysis.propagation import CHSH_SETTINGS, REGIMES
+    from dadl.calibration.accidentals import shifted_coincidences, side_offsets
+
+    reg = REGIMES["chsh-spad"]
+    offsets = side_offsets(reg.window_ps)
+    for seed in range(20):
+        runs = simulate_chsh(reg.source, dict.fromkeys(("A+", "A-", "B+", "B-"), reg.detector), reg.duration_s,
+                             np.random.default_rng(900 + seed), CHSH_SETTINGS)
+        ps = [offpeak_p(shifted_coincidences(np.sort(r["A" + x]), np.sort(r["B" + y]), reg.window_ps, 0, 0, offsets),
+                        offsets) for r in runs.values() for x in "+-" for y in "+-"]
+        assert min(ps) >= OFFPEAK_ALPHA / len(ps)
