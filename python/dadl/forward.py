@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import special
@@ -151,6 +151,13 @@ class Corrected:
     corrections: tuple[str, ...]
     labels: tuple[str, ...]
     artifact_ids: tuple[str, ...]
+    #: Added to the result's counts: {"monte_carlo": {"seed", "n_draws"}} (council round 5, V3).
+    counts: Mapping[str, object] = field(default_factory=dict)
+
+
+def _mc_counts(seed: int, n_draws: int) -> dict[str, object]:
+    """The Monte Carlo seed and draw count: the corrected interval depends on both."""
+    return {"monte_carlo": {"seed": int(seed), "n_draws": int(n_draws)}}
 
 
 def _signal(run: RunCounts, c, offsum, tau_a, tau_b, capture=1.0) -> np.ndarray:
@@ -252,7 +259,9 @@ def check_dead_time_gaps(
     A non-paralyzable dead time tau leaves no gap shorter than tau on its channel, and the shortest
     gaps sit just above it. The check refuses a dark dead time that the analysed gaps contradict in
     either direction: gaps shorter than its floor (the point minus three lower half-widths, about
-    7% below the point for a 1 s dark run at 50 kcps), or a shortest analysed gap more than
+    7% below the point for a 1 s dark run at 50 kcps; the floor widens as the dark run has fewer
+    gaps: the bundled chsh-spad dark run (20 s at 500 cps) puts it 40-50% below the point, and the
+    downward test then catches only gross errors), or a shortest analysed gap more than
     9 / (edge density) above its upper end (chance about 1e-4 per channel). A dead time between the
     floor and the truth passes (live-fraction error up to about 1.5% at 5 Mcps for a 1 s dark
     run); at low analysed rates (about 1,000 gaps) the upward test has no power.
@@ -466,7 +475,7 @@ def corrected_visibility(
         stderr_statistical=float(np.std(stat[np.isfinite(stat)])),
         stderr_calibration=float(np.std(calib)) if dead is not None or capture is not None else 0.0,
     )
-    return Corrected(est, tuple(corrections), tuple(labels), ids)
+    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws))
 
 
 def bound_range(
@@ -772,7 +781,7 @@ def corrected_chsh(
     ids, used_labels = _used(calibrations, list(channels.values()) if dead is not None else (), pairs)
     labels += [lab for lab in used_labels if lab not in labels]
     labels.insert(1, chsh_model_label(corrections))
-    return Corrected(est, tuple(corrections), tuple(labels), ids)
+    return Corrected(est, tuple(corrections), tuple(labels), ids, _mc_counts(seed, n_draws))
 
 
 __all__ = [

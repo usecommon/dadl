@@ -7,6 +7,11 @@ and is versioned separately from the packages.
 
 ## Unreleased
 
+Artifacts written by 0.1.x start their validity at creation (`valid_for.from` = created); this
+branch starts it at acquisition. For data taken between an old artifact's acquisition and its
+creation, pass the validity override or rewrite the artifact with `--supersedes`. Until the next
+release the package still reports version 0.1.1.
+
 ### Phase 3, M0: inference library benchmark
 
 - `bench/ppl/` and the `PPL benchmark` workflow measure NumPyro, PyMC and Stan on Windows,
@@ -111,8 +116,8 @@ and is versioned separately from the packages.
   draws). The likelihood ratio against the hard-edge model is recorded.
 - CLI: `dadl simulate SETUP --deadtime-scan [--rates R1,R2,...]` (one rate per setting) and
   `dadl calibrate deadtime SETUP --tags scan.npz [--dark DIR] --out DIR`.
-- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI; locally
-  tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: the
+- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI; locally,
+  before the review rounds, tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: the
   edge density is about 1 gap per tick (series-spad 1.5, passive-quench 0.7), so the shortest gap
   equals tau_np in about 79% and 45% of replicates; the simulator's integer dead time makes the
   tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2% and 97.3%), so it is
@@ -135,7 +140,7 @@ and is versioned separately from the packages.
   - tau_p's point, upper end and draws are capped at tau_np's;
   - the afterpulse uncertainty is added to tau_p's upper limit too;
   - default scan rates are photon rates scaled by the smallest efficiency, so the avalanche rate
-    x dead time spans 0.05-0.5;
+    x dead time spans 0.05-0.5 over four settings (0.1 and 0.4 for two);
   - `coverage.merge` refuses shards that disagree on the gate or its rule.
   - coverage re-run locally at 1,000 replicates: tau_p covered 95.5% (series-spad) and 93.8%
     (passive-quench), tau_np 99.2% and 97.3%, misfits 0.3% and 0%.
@@ -239,6 +244,26 @@ and is versioned separately from the packages.
     shards (it timed out at 45 minutes); propagation chunks keep every worker busy; the coverage
     gate prints a line per finished chunk; a newer push to a pull request cancels its running
     checks.
+
+- Review council round 5 (method `series-gap-mle` 5):
+  - an afterpulse still pending when a gap starts is modelled to first order (one pending
+    candidate, Exp(tau_a) after the record by memorylessness; `afterpulse_pending_max` is now its
+    fraction pi). Checked against the simulator at 6e6 and 1e7 cps; it removes a tau_p bias of
+    about -170 ps that did not shrink with data (0.5 s runs: coverage 88.1% to 92.5%, bias
+    +18 +- 19 ps). The remainder, about pi (p + pi) of gaps, is recorded as
+    `afterpulse_unmodelled`, with a note when it times sqrt(gaps) exceeds 2 (the 0.5% note is gone);
+  - `BRANCH_MARGIN` 5 (was 3): about 0.5% of below-maximum scans switched to tau_p near 30 ns,
+    every one a miss; the false-switch rate is now at most about 8e-4;
+  - `deadtime-series` artifacts cite the dark artifact's inputs, and its ID (role
+    `previous-artifact`) from the CLI; the held sds of p and tau_a are in the conditions;
+  - corrected HOM, fringe and CHSH records carry `counts["monte_carlo"]` (seed and draws);
+  - `valid_for.conditions` is enforced at use, as the top-level conditions are;
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p covered 95.5% (series-spad) and
+    94.6% (passive-quench), misses below/above 19/26 and 28/26; no branch switches, 0 and 54
+    unions; tau_np 99.2% and 97.3%; misfits 0.3% and 0.0%. These replace the earlier figures
+    (round 4, not recorded then: 93.2% passive-quench, misses mostly low);
+  - docs: dev-branch validity rule and version, schema wording on `deadtime-series`, gap-check
+    floor at low dark counts, unreleased features marked, counts keys, CLI help and refusals.
 
 ### Published results as executable tests
 

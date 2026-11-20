@@ -442,7 +442,8 @@ def _corrected(runs, window: Window, policy: Policy, calibrations, channels, see
         reduced[key] = per
     grid = {"window_ps": window.width_ps, "delays_ps": {k: float(v) for k, v in d.items()}}
     fwd = corrected_chsh(reduced, channels, SIGNS, calibrations=calibrations, policy=policy, seed=seed, **grid)
-    counts: dict[str, object] = {**({"forward_check_p": check_p} if check_p is not None else {}), **gap_counts}
+    counts: dict[str, object] = {**({"forward_check_p": check_p} if check_p is not None else {}), **gap_counts,
+                                 **fwd.counts}
     if calibrations.dataset_record() is not None:
         counts["dataset"] = calibrations.dataset_record()
     labels = fwd.labels + detector_labels + check_labels + gap_labels

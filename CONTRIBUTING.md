@@ -47,8 +47,9 @@ it. `--regimes` picks regimes. Slow regimes run in CI as shards
 
 Run the gate of a calibration or analysis whose statistics you change, on the
 CI seed, before opening the pull request. A change to a pinned calibration
-module (`python/dadl/calibration/*.py`) also needs a new `METHOD_VERSION`;
-then `python python/tests/test_method_versions.py` regenerates the table that
+module (`MODULES` in `python/tests/test_method_versions.py`), or to shared code
+they call (`calibration/base.py`), also needs a new `METHOD_VERSION` for each
+affected method; then `python python/tests/test_method_versions.py` regenerates the table that
 `test_method_versions.py` checks. Never loosen a gate to make it pass.
 
 The CI job `gates` passes only when every coverage and propagation job

@@ -38,21 +38,37 @@ the paralyzable stage, and the next record follows the same law from there:
 with q(t) = a S(t - tau_p) for t >= tau_p (a discrete convolution on the fit's grid, q averaged
 over each cell so the profile is smooth in tau_p). p and tau_a are held at a dark artifact's
 estimates (`afterpulse=`); their uncertainty is carried by refitting at shifted values (a linear
-sensitivity, of tau_p or of its upper limit) and added to the intervals and draws. An afterpulse
-still pending when the next gap starts is not modelled (a fraction about p n tau_a / (1 + n tau_a)
-of gaps, recorded as `afterpulse_pending_max`); above 0.5% a note says tau_p is biased low.
+sensitivity, of tau_p or of its upper limit) and added to the intervals and draws.
+
+An afterpulse still pending when the next gap starts (from the previous avalanche, Exp(tau_a)
+after the record by memorylessness, a fraction pi of gaps recorded as `afterpulse_pending_max`) is
+modelled to first order: one pending candidate, without its product with the record's own
+afterpulse (council round 5). At v = r - tau_np in u, with r ~ Exp(tau_a) after the record, it has
+no effect below -tau_p, restarts the paralyzable stage between -tau_p and 0, and acts as the
+record's own afterpulse above 0:
+
+    g(u) = g_ap(u) + pi Delta1(u),  K = e^{-tau_np/tau_a},  Delta_own = the bracket above,
+    Delta1(u) = K Delta_own(u) - K (e^{tau_p/tau_a} - 1) g0(u) + (K/tau_a) int_0^tau_p e^{s/tau_a} q(u + s) ds
+    pi_own = p int f_E(e) (1 - S(e + tau_p)) de,  pi = pi_own / (1 - K pi_own / p)
+
+(Delta1 integrates to 0; pi counts a pending one that persists through the next gap.) The
+remainder, about pi (p + pi) of gaps, biases tau_p low by an amount that does not shrink with data
+(about 0.1 sd per unit of remainder x sqrt(gaps)); above 2 a note says so. Checked against the
+simulator at 6e6 cps (p 2%, tau_a 30 and 90 ns) and 1e7 cps (p 5%, tau_a 200 ns; pi 6.8%, where
+the remainder shows at 1.3e7 gaps, chi-square p 0.05).
 
 **Two rates per gap law.** Without afterpulsing the law depends on n only through
 a = n exp(-n tau_p), which takes each value twice (n tau_p below and above 1): past the count-rate
 maximum the gaps do not tell which rate it is. With afterpulsing the branches differ a little.
 Each run is taken below the count-rate maximum (n tau_p < 1, the designed scan) unless the fit
-with each run on its better branch is better by more than `BRANCH_MARGIN` = 3 in NLL (a likelihood
-ratio of about 20); then those runs are fitted past it. Within the margin the interval spans both
+with each run on its better branch is better by more than `BRANCH_MARGIN` = 5 in NLL (a likelihood
+ratio of about 150); then those runs are fitted past it. Within the margin the interval spans both
 fits and a note names the runs. Below the maximum the high branch fits worse in expectation
-(Asimov: 2.5-5.6 NLL for the CI and CHANGELOG scans) and wins by at most 2.1 on 256 simulated
-scans; past it (1/3/60 Mcps) the margin is passed in 36 of 48 and the union covers the rest but
-one. Refits for the afterpulse sensitivity hold each run's branch. Past the maximum, coverage is
-checked by probes only (no CI regime; M10).
+(Asimov: 2.5-5.6 NLL for the CI and CHANGELOG scans) and wins by more than 3 in about 0.5% of scans
+(9 of 2,000, round 5); with margin 5 the false-switch rate is at most about 8e-4 for any separation
+(Cox's normal approximation for non-nested fits: Phi(-sqrt(2M))). Past it (1/3/60 Mcps) the margin
+is passed in 28 of 48 and the union covers the rest. Refits for the afterpulse sensitivity hold
+each run's branch. Past the maximum, coverage is checked by probes only (no CI regime; M10).
 
 **Fit.** tau_np is the shortest gap over all runs, with the dark fit's exact tick-quantile
 interval (`dadl.calibration.dark._dead_time`) on the summed gap density at the edge. The gaps
@@ -95,7 +111,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "4"
+METHOD_VERSION = "5"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -113,10 +129,10 @@ PROFILE_TARGET = 3.841
 #: Grid points of the tau_p profile before its local minima are refined.
 PROFILE_GRID = 30
 F0_SAMPLES = 4000
-#: Above this fraction of gaps starting with an afterpulse still pending (not modelled), a note.
-PENDING_MAX = 0.005
-#: NLL by which the fit with runs past the count-rate maximum must beat the one below it (2 ln LR = 6).
-BRANCH_MARGIN = 3.0
+#: A note when the unmodelled pending remainder r (about pi (p + pi) of gaps) has r sqrt(gaps) above this.
+UNMODELLED_Z = 2.0
+#: NLL by which the fit with runs past the count-rate maximum must beat the one below it (2 ln LR = 10).
+BRANCH_MARGIN = 5.0
 PS_PER_S = 1e12
 
 UNITS = {"dead_time_p_ps": "ps", "dead_time_ps": "ps"}
@@ -175,6 +191,24 @@ def survival(w: np.ndarray, n: float, tau: float) -> np.ndarray:
     return out
 
 
+def _pending(p: float, x: float, k: float) -> float:
+    """pi = pi_own / (1 - K pi_own / p), with x = pi_own / p and K = exp(-tau_np / tau_a)."""
+    return p * x / (1.0 - k * x)
+
+
+def pending_fraction(n: float, tau_p: float, tau_np: float, p: float, tau_a: float) -> float:
+    """The fraction of gaps that start with an afterpulse candidate still pending (module
+    docstring, "Afterpulsing"), on a fine grid of its own."""
+    if p <= 0 or not tau_a:
+        return 0.0
+    cells = 8000
+    h = AFTERPULSE_TAUS * tau_a / cells
+    e = (np.arange(cells) + 0.5) * h
+    x = float(np.sum(np.exp(-e / tau_a) / tau_a * h * (1.0 - survival(e + tau_p, n, tau_p))))
+    x += math.exp(-AFTERPULSE_TAUS)
+    return _pending(p, x, math.exp(-tau_np / tau_a))
+
+
 def gap_cdf(u: np.ndarray, n: float, tau: float) -> np.ndarray:
     """P(gap - tau_np <= u) without afterpulsing."""
     n, tau = float(n), float(tau)
@@ -184,7 +218,9 @@ def gap_cdf(u: np.ndarray, n: float, tau: float) -> np.ndarray:
 class _Run:
     """One acquisition's gaps (past the shortest), binned for the fit."""
 
-    def __init__(self, s: np.ndarray, tick: int, tau_a: float | None) -> None:
+    def __init__(self, s: np.ndarray, tick: int, tau_a: float | None, tau_np: float | None = None) -> None:
+        #: tau_np (the fit's shortest gap): with it, the pending-afterpulse term is added (p > 0).
+        self.tau_np = tau_np
         self.n_gaps = s.size
         self.mean = float(s.mean()) if s.size else 1.0
         h = self.mean / BINS_PER_MEAN_GAP
@@ -213,11 +249,15 @@ class _Run:
         cdf = gap_cdf(self.edges.clip(min=0.0), n, tau)
         prob = np.diff(cdf)
         if p > 0 and tau_a:
-            prob = prob + p * self._afterpulse(n, tau, tau_a) * self.width
+            own, delta1, x = self._afterpulse(n, tau, tau_a)
+            prob = prob + p * own * self.width
+            if delta1 is not None:
+                prob = prob + _pending(p, x, math.exp(-self.tau_np / tau_a)) * delta1 * self.width
         return np.maximum(prob, 1e-300)
 
-    def _afterpulse(self, n: float, tau: float, tau_a: float) -> np.ndarray:
-        """Delta(u) at the bin midpoints (module docstring: the bracket multiplying p)."""
+    def _afterpulse(self, n: float, tau: float, tau_a: float) -> tuple[np.ndarray, np.ndarray | None, float]:
+        """At the bin midpoints: Delta_own(u) (module docstring: the bracket multiplying p), and with
+        `tau_np` the pending term Delta1(u) and pi_own / p (else None and 0)."""
         u = self.mid
         e_t = math.exp(-n * tau)
         a = n * e_t
@@ -227,8 +267,13 @@ class _Run:
         h = self.h
         n_w = int(min(self.n_uni, math.ceil(AFTERPULSE_TAUS * tau_a / h)))
         w = (np.arange(n_w) + 0.5) * h
-        f = np.exp(-w / tau_a) / tau_a * (survival(w + tau, n, tau) - survival(w, n, tau) * e_t) * h
-        lags = np.arange(self.n_uni) * h
+        s_wt = survival(w + tau, n, tau)
+        f_e = np.exp(-w / tau_a) / tau_a * h
+        f = f_e * (s_wt - survival(w, n, tau) * e_t)
+        pending = self.tau_np is not None
+        # The pending term reads q up to tau_p beyond the grid: ceil(tau_p / h) more lags.
+        n_s = int(math.ceil(tau / h)) if pending and tau > 0 else 0
+        lags = np.arange(self.n_uni + n_s + 1) * h
 
         def q_cell(t: np.ndarray) -> np.ndarray:
             # q averaged over the cell [t - h/2, t + h/2]: a S(t' - tau) for t' >= tau integrates to
@@ -237,12 +282,30 @@ class _Run:
             lo, hi = np.maximum(t - 0.5 * h, 0.0), np.maximum(t + 0.5 * h, 0.0)
             return (survival(lo, n, tau) - survival(hi, n, tau)) / h
 
-        conv = signal.fftconvolve(f, q_cell(lags))[: self.n_uni]
+        q_lags = q_cell(lags)
+        conv = signal.fftconvolve(f, q_lags[: self.n_uni])[: self.n_uni]
         out[: self.n_uni] += conv
-        if u.size > self.n_uni:
+        geo = u.size > self.n_uni
+        if geo:
             t = u[self.n_uni :, None] - w[None, :]
             out[self.n_uni :] += q_cell(t.ravel()).reshape(t.shape) @ f
-        return out
+        if not pending:
+            return out, None, 0.0
+        # pi_own / p = int f_E(e) (1 - S(e + tau_p)) de; past the grid S is negligible (the grid
+        # reaches 40 tau_a, the longest gap or 30 mean gaps), so the tail is exp(-W / tau_a).
+        x = float(np.sum(f_e * (1.0 - s_wt))) + math.exp(-n_w * h / tau_a)
+        k = math.exp(-self.tau_np / tau_a)
+        delta1 = k * out - k * math.expm1(tau / tau_a) * a * s_u
+        if n_s:
+            # (K / tau_a) int_0^tau_p e^{s/tau_a} q(u + s) ds: cells of width h in s (the last one cut
+            # at tau_p), q at u + s on the lag grid; a correlation with the lags already computed.
+            s_edges = np.minimum(np.arange(n_s + 1) * h, tau)
+            wgt = k * np.diff(np.exp(s_edges / tau_a))
+            delta1[: self.n_uni] += signal.fftconvolve(q_lags[1:], wgt[::-1], mode="valid")[: self.n_uni]
+            if geo:
+                t = u[self.n_uni :, None] + ((np.arange(n_s) + 0.5) * h)[None, :]
+                delta1[self.n_uni :] += q_cell(t.ravel()).reshape(t.shape) @ wgt
+        return out, delta1, x
 
     def nll(self, n: float, tau: float, p: float = 0.0, tau_a: float | None = None) -> float:
         prob = self.probs(n, tau, p, tau_a)
@@ -486,6 +549,11 @@ def calibrate_deadtime_series(
     `runs` are sorted int64 ps tags, one array per acquisition, under steady light at
     different rates. `afterpulse` is the channel's dark artifact (`calibrate_dark`), whose
     afterpulse probability and time constant are held fixed with their uncertainty propagated.
+
+    Refuses fewer than two runs, a run under 1,000 gaps, duplicate timestamps, the same run twice,
+    and an afterpulse artifact of another kind or channel. Each run is fitted below the count-rate
+    maximum unless the fit past it wins by `BRANCH_MARGIN` (module docstring, "Two rates per gap
+    law").
     """
     if len(runs) < MIN_RUNS:
         raise ValueError(f"need at least {MIN_RUNS} acquisitions at different rates; paralysis shows in how the "
@@ -531,7 +599,7 @@ def calibrate_deadtime_series(
         if i == which:
             s = np.delete(s, int(np.argmin(s)))
         shifted.append(s)
-    binned = [_Run(s, tick, tau_a) for s in shifted]
+    binned = [_Run(s, tick, tau_a, float(m)) for s in shifted]
     # The branch of each run is decided once (council round 4): the low branch (n tau_p < 1, the
     # designed scan) unless the fit with each run on its better branch is better by more than
     # BRANCH_MARGIN in NLL; within the margin, the interval spans both fits.
@@ -655,12 +723,19 @@ def calibrate_deadtime_series(
     if p > 0:
         cond.update({"afterpulse_prob_held": p, "afterpulse_tau_ps_held": float(tau_a),
                      "branch_nll_gain": branch_gain})
-        pending = max(p * n * tau_a / (1.0 + n * tau_a) for n in rates)
-        cond["afterpulse_pending_max"] = pending
-        if pending > PENDING_MAX:
-            notes.append(f"about {pending:.1%} of gaps start with an afterpulse still pending, which the gap law "
-                         "does not model: tau_p is biased low (by about 1 sd at 3%); scan at lower rates or with a "
-                         "detector whose afterpulsing is faster")
+        if ap_draws is not None:
+            cond["afterpulse_prob_sd_held"] = float(ap_draws[:, 0].std())
+            cond["afterpulse_tau_sd_held"] = float(ap_draws[:, 1].std())
+        pis = [pending_fraction(n, tau, m, p, tau_a) for n in rates]
+        r = max(pi * (p + pi) for pi in pis)
+        cond["afterpulse_pending_max"] = max(pis)
+        cond["afterpulse_unmodelled"] = r
+        z = r * math.sqrt(float(sizes.sum()))
+        if z > UNMODELLED_Z:
+            notes.append(f"about {r:.2%} of gaps carry a second pending afterpulse or one beside the record's own, "
+                         "which the gap law does not model: tau_p is biased low by an amount that does not shrink "
+                         f"with more data (about {0.1 * z:.1f} sd here, twice that for tau_a beyond twice tau_p); "
+                         "scan at lower rates or with faster afterpulsing")
     estimates = {"dead_time_p_ps": est_p, "dead_time_ps": est_np}
     return Calibration(
         kind=KIND,
@@ -674,7 +749,9 @@ def calibrate_deadtime_series(
         sample_params=("dead_time_p_ps", "dead_time_ps"),
         converged=True,
         ppc_pvalue=ppc,
-        inputs=tuple((d, "raw-tags", str(channel)) for d in digests),
+        # The dark artifact's own inputs too (as dcr does): two dark artifacts give different inputs.
+        inputs=tuple(dict.fromkeys([*((d, "raw-tags", str(channel)) for d in digests),
+                                    *(tuple(i) for i in (afterpulse.inputs if afterpulse is not None else ()))])),
         backend=backend,
         conditions={**cond, **(conditions or {})},
         unidentified=unidentified,

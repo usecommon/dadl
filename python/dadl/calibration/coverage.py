@@ -505,7 +505,7 @@ def run(
     name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None,
     part: range | None = None, progress=None,
 ) -> list[CoverageResult]:
-    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
+    """Every regime of one calibration family ("dark", "pairs", "dcr", "deadtime") or of all ("all"), or only
     the named `regimes` (CI splits the gate across runners this way).
 
     With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
@@ -627,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("files", nargs="*", help="merge: the shard files")
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
-    parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
+    parser.add_argument("--jobs", type=int, default=1, help="replicate chunks run in parallel processes (the result does not depend on it)")
     parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the family)")
     parser.add_argument("--shard", help="k/n: run only the k-th of n slices of the replicates; not gated")
     parser.add_argument("--out", help="with --shard: write the partial counts here, for merge")

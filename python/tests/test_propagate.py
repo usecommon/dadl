@@ -426,3 +426,26 @@ def test_validity_without_from_starts_at_creation():
         _check(member, ANALYSIS, Policy.default(), early, {})
     open_end = Member("x" * 64, cal, {"created": "2026-11-01T00:00:00Z", "valid_for": {"conditions": {}}})
     assert _check(open_end, ANALYSIS, Policy.default(), ctx(), {}) == []
+
+
+def test_valid_for_conditions_are_enforced(tmp_path):
+    # Council round 5 (V5): valid_for.conditions validated against the schema but were ignored.
+    import json
+
+    from dadl.artifact import artifact_id, canonical_json
+
+    path = write(make_cal(A, seed=1), tmp_path / "orig")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["valid_for"] = {**manifest.get("valid_for", {}), "conditions": {"temperature_K": 300.0, "bias_V": 25.0}}
+    aid = artifact_id(manifest)
+    d = tmp_path / "mut"
+    d.mkdir()
+    (d / f"{aid}.json").write_bytes(canonical_json(manifest))
+    (d / f"{aid}.posterior.npy").write_bytes(path.with_name(f"{path.stem}.posterior.npy").read_bytes())
+    cold = ctx(conditions={"temperature_K": 250.0, "bias_V": 5.0})
+    with pytest.raises(StaleCalibration, match="temperature_K = 300 recorded, 250"):
+        CalibrationSet.load(d, analysis=ANALYSIS, dataset=cold)
+    CalibrationSet.load(d, analysis=ANALYSIS, dataset=ctx(conditions={"temperature_K": 300.0, "bias_V": 25.0}))
+    policy = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "same detector, recalibrated at 250 K")
+    s = CalibrationSet.load(d, analysis=ANALYSIS, dataset=cold, policy=policy)
+    assert OUTSIDE_VALIDITY in s.labels and POLICY_MODIFIED in s.labels

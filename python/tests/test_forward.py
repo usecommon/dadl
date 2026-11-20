@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ from dadl.forward import (
     DEAD_TIME_BOUND,
     FORWARD_MODEL,
     JITTER_BOUND,
+    N_MC,
     RunCounts,
     corrected_visibility,
     grid_capture,
@@ -78,6 +80,17 @@ def test_corrected_hom_recovers_the_injected_visibility(setup):
     rec = r.as_record()
     assert rec["corrected_stderr_calibration"] == c.stderr_calibration
     assert "calibration" in rec["corrected_uncertainty"]
+
+
+def test_the_record_carries_the_monte_carlo_seed_and_draws(setup):
+    # Council round 5 (V3): the corrected interval depends on both, and neither was recorded.
+    runs, cset = setup
+    recs = []
+    for seed in (0, 1):
+        r, _ = hom_from_tags(runs, WINDOW, policy=POLICY, calibrations=cset, channels=(CA, CB), seed=seed,
+                             reference_delay_ps=20.0)
+        recs.append(json.loads(r.as_record()["counts"])["monte_carlo"])
+    assert recs[0] == {"seed": 0, "n_draws": N_MC} and recs[1] == {"seed": 1, "n_draws": N_MC}
 
 
 def test_dead_time_correction_needs_the_policy(setup):

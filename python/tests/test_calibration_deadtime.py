@@ -115,6 +115,21 @@ def test_afterpulsing_is_held_at_the_dark_artifact():
     assert any("held at the dark artifact" in n for n in with_ap.notes)
 
 
+def test_the_dark_artifact_is_cited():
+    # Council round 5 (V1): two dark artifacts from different dark runs gave identical inputs.
+    det = _det(30_000, 50_000, dark_rate_cps=50_000.0, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
+    runs = _runs(_det(30_000, 50_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0), (2e6, 5e6), 0.01, 10)
+    cals = []
+    for seed in (1, 2):
+        dark = calibrate_dark(simulate_dark(det, 0.5, np.random.default_rng(seed)), CH, backend="sim", seed=1,
+                              n_draws=400)
+        cal = calibrate_deadtime_series(runs, CH, afterpulse=dark, backend="sim", seed=1, n_draws=10)
+        assert set(dark.inputs) <= set(cal.inputs)
+        assert cal.conditions["afterpulse_prob_sd_held"] > 0 and cal.conditions["afterpulse_tau_sd_held"] > 0
+        cals.append(cal)
+    assert cals[0].inputs != cals[1].inputs
+
+
 def test_refusals():
     runs = _runs(_det(20_000, 50_000), (2e6, 5e6), 0.01, 11)
     with pytest.raises(ValueError, match="at least 2"):
@@ -146,6 +161,12 @@ def test_cli_scan_and_calibrate(tmp_path, capsys):
                  "--out", str(out)]) == 0
     text = capsys.readouterr().out
     assert "deadtime-series" in text and "settings [0, 1]" in text
+    # Council round 5 (V1): the artifact cites the dark artifact it used.
+    arts = [load_calibration(f) for f in sorted(out.glob("*.json"))]
+    dark_ids = [f.stem for f, a in zip(sorted(out.glob("*.json")), arts) if a.kind == "dark-afterpulse-deadtime"]
+    series = next(a for a in arts if a.kind == KIND)
+    assert len(dark_ids) == 1
+    assert any(i[0] == dark_ids[0] and i[1] == "previous-artifact" for i in series.inputs)
     assert main(["simulate", "chsh-spad", "--rates", "1e6,2e6", "--out", str(tmp_path / "x.npz")]) != 0
     assert "--rates applies to --deadtime-scan" in capsys.readouterr().err
 
@@ -241,28 +262,83 @@ def _afterpulse_artifact(p: float, tau_a: float, rel_sd: float):
     return SimpleNamespace(
         estimates={"afterpulse_prob": Interval(p, p * 0.9, p * 1.1), "afterpulse_tau_ps": Interval(tau_a, tau_a * 0.9, tau_a * 1.1)},
         stand_in=(), sample_params=("afterpulse_prob", "afterpulse_tau_ps"), samples=samples,
-        kind="dark-afterpulse-deadtime", channels=(CH,), status="ok", ppc_pvalue=0.5,
+        kind="dark-afterpulse-deadtime", channels=(CH,), status="ok", ppc_pvalue=0.5, inputs=(),
     )
 
 
-def test_pending_afterpulses_are_noted():
-    from dadl.calibration.coverage import DEADTIME_REGIMES
-    from dadl.calibration.deadtime import PENDING_MAX
+def _chi2_groups(counts: np.ndarray, prob: np.ndarray, min_expected: float = 20.0) -> float:
+    """Pearson chi-square p of binned counts against bin probabilities, bins merged to >= 20 expected."""
+    mu = prob * counts.sum()
+    obs, exp, acc_o, acc_e = [], [], 0.0, 0.0
+    for o, e in zip(counts, mu):
+        acc_o += o
+        acc_e += e
+        if acc_e >= min_expected:
+            obs.append(acc_o)
+            exp.append(acc_e)
+            acc_o = acc_e = 0.0
+    obs[-1] += acc_o
+    exp[-1] += acc_e
+    o, e = np.array(obs), np.array(exp)
+    return float(stats.chi2.sf(np.sum((o - e) ** 2 / e), o.size - 1))
 
-    det = _det(20_000, 50_000, afterpulse_prob=0.05, afterpulse_tau_ps=200_000.0)
-    cal = calibrate_deadtime_series(_runs(det, (2e6, 5e6, 1e7), 0.01, 21), CH,
-                                    afterpulse=_afterpulse_artifact(0.05, 200_000.0, 0.02), backend="sim", seed=1,
+
+STRESS = {"tau_p": 20_000, "tau_np": 50_000, "rate": 1e7, "p": 0.05, "tau_a": 200_000.0}
+
+
+def test_pending_afterpulse_law_matches_the_simulator():
+    # Council round 5 (I2): at 1e7 cps with p 5% and tau_a 200 ns, 6.8% of gaps start with an
+    # afterpulse pending. The law with the pending term fits the simulated gaps; without it, not.
+    import dadl.calibration.deadtime as dtm
+
+    tp, tnp, rate, p, tau_a = STRESS.values()
+    det = _det(tp, tnp, dark_rate_cps=0.0, afterpulse_prob=p, afterpulse_tau_ps=tau_a)
+    g = np.diff(_runs(det, (rate,), 0.2, 5)[0]).astype(float) - tnp
+    run = dtm._Run(g, 1, tau_a, float(tnp))
+    plain = dtm._Run(g, 1, tau_a)
+    n = rate / 1e12
+    assert _chi2_groups(run.counts, run.probs(n, tp, p, tau_a)) > 1e-3
+    assert _chi2_groups(plain.counts, plain.probs(n, tp, p, tau_a)) < 1e-6
+
+
+def test_pending_fraction_matches_the_simulator():
+    # The simulated fractions of gaps starting with a pending candidate (council round 5,
+    # law_stress.txt and law_regime.txt: 2.3e7 and 1.3e7 gaps).
+    import dadl.calibration.deadtime as dtm
+
+    tp, tnp, rate, p, tau_a = STRESS.values()
+    assert dtm.pending_fraction(rate / 1e12, tp, tnp, p, tau_a) == pytest.approx(0.0671, rel=0.03)
+    assert dtm.pending_fraction(6.05e6 / 1e12, 40_000, 45_000, 0.02, 30_000.0) == pytest.approx(0.00284, rel=0.03)
+    # The fit's own value (from the kernel it already evaluates) agrees with the fine grid.
+    g = np.random.default_rng(0).exponential(1e5, 5_000)
+    run = dtm._Run(g, 1, tau_a, float(tnp))
+    x = run._afterpulse(rate / 1e12, tp, tau_a)[2]
+    pi = dtm._pending(p, x, np.exp(-tnp / tau_a))
+    assert pi == pytest.approx(dtm.pending_fraction(rate / 1e12, tp, tnp, p, tau_a), rel=1e-3)
+
+
+def test_unmodelled_pending_afterpulses_are_noted():
+    from dadl.calibration.coverage import DEADTIME_REGIMES
+    from dadl.calibration.deadtime import UNMODELLED_Z
+
+    tp, tnp, _, p, tau_a = STRESS.values()
+    det = _det(tp, tnp, afterpulse_prob=p, afterpulse_tau_ps=tau_a)
+    cal = calibrate_deadtime_series(_runs(det, (2e6, 5e6, 1e7), 0.09, 21), CH,
+                                    afterpulse=_afterpulse_artifact(p, tau_a, 0.02), backend="sim", seed=1,
                                     n_draws=100)
-    assert cal.conditions["afterpulse_pending_max"] == pytest.approx(0.033, abs=0.003)
-    assert any("afterpulse still pending" in n for n in cal.notes)
+    assert cal.conditions["gaps"] > 1e6
+    assert cal.conditions["afterpulse_pending_max"] == pytest.approx(0.068, rel=0.05)
+    r = cal.conditions["afterpulse_unmodelled"]
+    assert r * np.sqrt(cal.conditions["gaps"]) > UNMODELLED_Z
+    assert any("second pending afterpulse" in n for n in cal.notes)
     # The passive-quench coverage regime stays below the guard.
     reg = DEADTIME_REGIMES["passive-quench"].detector
     rng = np.random.default_rng(22)
     runs = [detect(poisson_times(r, 0.01, rng), reg, 0.01, rng) for r in DEADTIME_REGIMES["passive-quench"].rates_cps]
     pq = calibrate_deadtime_series(runs, CH, afterpulse=_afterpulse_artifact(reg.afterpulse_prob, reg.afterpulse_tau_ps, 0.02),
                                    backend="sim", seed=1, n_draws=100)
-    assert pq.conditions["afterpulse_pending_max"] < PENDING_MAX
-    assert not any("afterpulse still pending" in n for n in pq.notes)
+    assert pq.conditions["afterpulse_unmodelled"] * np.sqrt(pq.conditions["gaps"]) < UNMODELLED_Z
+    assert not any("second pending afterpulse" in n for n in pq.notes)
 
 
 @pytest.mark.parametrize(
@@ -345,6 +421,25 @@ def test_a_run_past_the_count_rate_maximum_is_fitted_on_its_branch(seed):
     assert cal.conditions["branch_nll_gain"] > 0
 
 
+def test_a_false_branch_switch_becomes_a_union():
+    # Council round 5 (I1): on CI-seed passive-quench replicate 477 the fit past the maximum won by
+    # 4.17 in NLL (margin 3) and switched to tau_p near 30 ns, excluding 40 ns. With margin 5 the
+    # interval spans both fits.
+    from dadl.calibration.coverage import DEADTIME_REGIMES, _children
+
+    reg = DEADTIME_REGIMES["passive-quench"]
+    child = list(_children(20261111, 478, range(477, 478), "passive-quench"))[0]
+    sim_seq, fit_seq = child.spawn(2)
+    rng = np.random.default_rng(sim_seq)
+    seed = int(fit_seq.generate_state(1)[0])
+    ap = calibrate_dark(simulate_dark(reg.detector, reg.dark_duration_s, rng), CH, backend="sim", seed=seed, n_draws=400)
+    runs = [detect(poisson_times(r, reg.duration_s, rng), reg.detector, reg.duration_s, rng) for r in reg.rates_cps]
+    cal = calibrate_deadtime_series(runs, CH, afterpulse=ap, backend="sim", seed=seed, n_draws=10)
+    assert 3.0 < cal.conditions["branch_nll_gain"] <= 5.0
+    assert any("fit about as well past the count-rate maximum" in n for n in cal.notes)
+    assert cal.estimates["dead_time_p_ps"].contains(40_000.0)
+
+
 def _passive_quench_scan(i: int):
     """The council round 4 scan (tau_p 40 ns, tau_np 45 ns, 1/3/6 Mcps), seeds [777, i, 1]."""
     det = _det(40_000, 45_000, dark_rate_cps=50_000.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0)
@@ -372,7 +467,7 @@ def test_afterpulse_refits_hold_the_decided_branch():
 @pytest.mark.parametrize("i", [36, 119])
 def test_a_scan_below_the_maximum_stays_on_the_low_branch(i):
     # Council round 4 (DT2): with both branches searched, these scans put the 6 Mcps run at about
-    # 9e7 cps with tau_p near 31 ns and a false "afterpulse still pending" note. The high branch
+    # 9e7 cps with tau_p near 31 ns and a false pending-afterpulse note. The high branch
     # fits better by 2.1 and 1.5 in NLL, inside the margin: the point stays on the low branch and
     # the interval spans both fits.
     from dadl.calibration.deadtime import BRANCH_MARGIN
@@ -381,7 +476,7 @@ def test_a_scan_below_the_maximum_stays_on_the_low_branch(i):
     assert abs(cal.estimates["dead_time_p_ps"].value - 40_000.0) < 2_000.0
     assert 0 < cal.conditions["branch_nll_gain"] <= BRANCH_MARGIN
     assert any("fit about as well past the count-rate maximum" in n for n in cal.notes)
-    assert not any("afterpulse still pending" in n for n in cal.notes)
+    assert not any("second pending afterpulse" in n for n in cal.notes)
     assert all("input rate 1e+08" not in n and "input rate 9" not in n for n in cal.notes if n.startswith("run 2"))
 
 

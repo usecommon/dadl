@@ -213,7 +213,13 @@ def _check(
             ):
                 problems.append(f"acquired {dataset.acquired.isoformat()} is outside {start or 'any time'} to "
                                 f"{end or 'any time'}")
-    problems += condition_mismatches(cal.conditions, dataset.conditions)
+    # valid_for.conditions are enforced too, merged with the top-level conditions; a key in both
+    # must match in both (council round 5, V5).
+    extra = (valid or {}).get("conditions") or {}
+    found = condition_mismatches(cal.conditions, dataset.conditions)
+    if extra:
+        found += condition_mismatches({**cal.conditions, **extra}, dataset.conditions)
+    problems += list(dict.fromkeys(found))
     return labels + _outside(problems, cal.kind, aid, analysis, rule)
 
 

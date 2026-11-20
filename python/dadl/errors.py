@@ -22,8 +22,9 @@ class AdapterError(DadlError):
 
 
 class StaleCalibration(DadlError):
-    """A calibration artifact does not cover the dataset: outside its validity time range, or
-    recorded under conditions (tagger settings, temperature, bias) that do not match it."""
+    """A calibration artifact does not cover the dataset: outside its validity time range,
+    recorded under conditions (tagger settings, temperature, bias) that do not match it, or that
+    the analysed data contradict (another detector serial, a dark dead time the gaps rule out)."""
 
 
 class Misspecified(DadlError):

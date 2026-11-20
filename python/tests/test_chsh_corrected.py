@@ -160,6 +160,8 @@ def test_a_stand_in_jitter_corrects_chsh(tmp_path):
         delays_ps={"B+": 1013.0, "B-": 1013.0},
     )
     assert np.isfinite(c.estimate.value) and "window_capture" in c.corrections
+    # Council round 5 (V3): the Monte Carlo seed and draw count go into the result's counts.
+    assert c.counts["monte_carlo"] == {"seed": 0, "n_draws": 4000}
 
 
 MISDECLARED_DET = DetectorParams(efficiency=0.5, dark_rate_cps=500.0, dead_time_ps=22_000, jitter_sigma_ps=150.0)

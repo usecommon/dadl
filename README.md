@@ -13,10 +13,11 @@ result look better than the data supports.
 a short technical report on the problem DADL solves, how it is used in an
 experiment, its guardrails and its roadmap.
 
-> **Status: pre-alpha (0.1.1): phase 1 partial, phase 2 done.** Anything may change in 0.x. The
+> **Status: pre-alpha (0.1.1): phase 1 done (unreleased), phase 2 done, phase 3 in progress (M0-M4,
+> unreleased).** Anything may change in 0.x. The
 > canonical phase plan is in [docs/design.md](docs/design.md#mvp-scope-and-milestones).
 
-## What works today (0.1.0)
+## What works today (0.1.1, and unreleased on main)
 
 - A seeded time-tag simulator with injected efficiency, dark counts,
   non-paralyzable dead time (optionally after a paralyzable stage), jitter,
@@ -32,13 +33,14 @@ experiment, its guardrails and its roadmap.
   combined jitter, off-peak accidentals in the declared window and the
   heralding efficiency; `calibrate_dcr_temperature` fits DCR(T) (Arrhenius)
   from dark calibrations at several temperatures. `dadl calibrate deadtime`
-  fits a series dead time (paralyzable, then non-paralyzable) from
+  (unreleased) fits a series dead time (paralyzable, then non-paralyzable) from
   acquisitions under steady light at two or more rates
   (`dadl simulate chsh-spad --deadtime-scan --out scan.npz`), with
   afterpulsing held at the dark artifact (`--dark artifacts/`).
 - `setup.yaml` drives everything: copy it with `dadl init`, edit it, run it.
 - Raw CHSH S from fixed-grid coincidences with a planned window, from
-  simulated tags or **your own tags** (`dadl analyze`).
+  simulated tags or **your own tags** (`dadl analyze`); with `--calibrations`
+  (unreleased), a corrected value from the forward model too.
 - Bell fringe and HOM dip visibility, with accidental subtraction only where
   the guardrail policy allows it. `dadl quickstart hom-snspd` simulates a HOM
   dip on two SNSPDs and analyses it from the tags.
@@ -58,7 +60,8 @@ Not yet: signing, the explain engine, MCP.
 
 Raw values (S, visibility) report a statistical Gaussian 1σ error;
 visibilities also always carry an exact 95% interval. Corrected values from
-the forward model (HOM, fringe and CHSH with `--calibrations`) include the
+the forward model (unreleased; HOM and CHSH with `--calibrations`; fringe through
+`fringe_from_tags(calibrations=)`) include the
 calibration uncertainty, by joint Monte Carlo over counts and calibration
 draws.
 Calibrations report 95% intervals that need not be symmetric, validated by
@@ -124,19 +127,28 @@ plainly:
   its own jitter after the dead time, so the shortest gap sits about
   4 sqrt(2) sigma_tagger below the detector's dead time (about 0.1 ns for
   20 ps rms); the interval does not cover that offset.
-  An afterpulse still pending when the next gap starts is not modelled; when
-  more than 0.5% of gaps start with one, a note says tau_p is biased low
-  (by about 1 sd at 3%). In the simulator, avalanche candidates blocked by
+  An afterpulse still pending when the next gap starts (from the previous
+  avalanche, Exp(tau_a) after the record by memorylessness, a fraction pi of
+  gaps recorded as `afterpulse_pending_max`) is modelled to first order: one
+  pending candidate, without its product with the record's own afterpulse.
+  The remainder, about pi (p + pi) of gaps, biases tau_p low by an amount
+  that does not shrink with data (about 0.1 sd per unit of remainder x
+  sqrt(gaps)); above 2 a note says so. Checked against the simulator at
+  6e6 cps (p 2%, tau_a 30 and 90 ns) and 1e7 cps (p 5%, tau_a 200 ns; pi
+  6.8%, where the remainder shows at 1.3e7 gaps, chi-square p 0.05). In the simulator, avalanche candidates blocked by
   the dead time restart the paralyzable stage but neither afterpulse nor
   emit crosstalk.
   Each scan run is taken below the count-rate maximum (n tau_p < 1, the
   designed scan) unless the fit with each run on its better branch is better
-  by more than 3 in NLL (a likelihood ratio of about 20); then those runs are
-  fitted past it. Within that margin the interval spans both fits and a note
-  names the runs. Below the maximum the high branch fits worse in expectation
-  and won by at most 2.1 on 256 simulated scans; past it (1/3/60 Mcps) the
-  margin is passed in 36 of 48 and the union covers the rest but one. Past
-  the maximum, coverage is checked by probes only, not by a CI regime.
+  by more than 5 in NLL (a likelihood ratio of about 150); then those runs
+  are fitted past it. Within that margin the interval spans both fits and a
+  note names the runs. Below the maximum the high branch fits worse in
+  expectation and wins by more than 3 in about 0.5% of scans (9 of 2,000);
+  with margin 5 the false-switch rate is at most about 8e-4 for any
+  separation (Cox's normal approximation for non-nested fits). Past it
+  (1/3/60 Mcps) the margin is passed in 28 of 48 and the union covers the
+  rest. Past the maximum, coverage is checked by probes only, not by a CI
+  regime.
   The analyses' forward model uses the dark calibration's non-paralyzable
   dead time only. With paralysis the live fraction is overestimated: for
   tau_p close to tau_np by about 0.5% at a 10% dead fraction and 3-4% at the
@@ -280,12 +292,18 @@ plainly:
   and the conditions you give (`--condition temperature_K=233`), but it is
   not a calibration record in the ISO/IEC 17025 sense: uncertainty is
   statistical only, and traceability is recorded, not enforced. Validity is
-  enforced (from acquisition, or creation without one, to `--valid-until`);
+  enforced (from acquisition, or creation without one, to `--valid-until`;
+  `valid_for.conditions` too, as the top-level conditions are);
   an artifact with no validity range is labelled; supersession
   (`--supersedes`) is recorded, not enforced. The ID gives
   integrity, not authenticity: signing is planned. Parameters reported only
   as a bound have `value: null` and `bound: "upper"`, and draw columns that
   are stand-ins rather than a posterior are listed in `posterior.stand_in`.
+  Artifacts written by 0.1.x start their validity at creation
+  (`valid_for.from` = created); this branch starts it at acquisition. For
+  data taken between an old artifact's acquisition and its creation, pass
+  the validity override or rewrite the artifact with `--supersedes`. Until
+  the next release the package still reports version 0.1.1.
 - **Interactive use, not unattended operation yet.** Setups have exactly the
   four CHSH roles (or two HOM ones), so an 8-input tagger is calibrated as two
   setups; output is text, with no `--json`; nothing compares a calibration
@@ -381,22 +399,31 @@ analysed gaps contradict, is refused as outside its validity (overridable).
 
 The dead-time check refuses a dark dead time that the analysed gaps contradict in either
 direction: gaps shorter than its floor (the point minus three lower half-widths, about 7% below
-the point for a 1 s dark run at 50 kcps), or a shortest analysed gap more than
+the point for a 1 s dark run at 50 kcps; the floor widens as the dark run has fewer gaps: the bundled
+chsh-spad dark run (20 s at 500 cps) puts it 40-50% below the point, and the downward test then
+catches only gross errors), or a shortest analysed gap more than
 9 / (edge density) above its upper end (chance about 1e-4 per channel). A dead time between the
 floor and the truth passes (live-fraction error up to about 1.5% at 5 Mcps for a 1 s dark run);
 at low analysed rates (about 1,000 gaps) the upward test has no power.
 
-Corrected results add these keys to `counts`:
+CHSH results, raw and corrected, add these keys to `counts`:
 
 | Key | What |
 | --- | --- |
-| `capture_offsets_ps` | each outcome pair's peak offset from its declared delay (CHSH) |
-| `capture_sd_data` | standard deviation of S reweighted by the captures, from the peak fits (CHSH) |
+| `capture_offsets_ps` | each outcome pair's peak offset from its declared delay |
+| `capture_reweighted_s` | S reweighted by the window captures from the peak fits |
+| `capture_sd_data` | standard deviation of that S, from the peak fits |
+
+Corrected results add these:
+
+| Key | What |
+| --- | --- |
 | `delay_drift_diff`, `delay_drift_z` | analysed minus calibrated capture-reweighted S, and over its noise (CHSH) |
-| `min_gap_ps` | the shortest analysed gap per channel |
-| `gap_check_floor_ps` | the dead-time floor per channel; None when not checked downward |
 | `dataset` | the dataset context the calibrations were checked against |
 | `forward_check_p` | the predictive check's p-value; absent without delay-jitter artifacts |
+| `monte_carlo` | the Monte Carlo `seed` and `n_draws` the corrected interval depends on |
+| `min_gap_ps` | with dark artifacts: the shortest analysed gap per channel |
+| `gap_check_floor_ps` | with dark artifacts: the dead-time floor per channel; None when not checked downward |
 
 From Python:
 

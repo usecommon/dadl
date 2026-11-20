@@ -5,8 +5,8 @@ Nov 15, 2026 · decisions taken Nov 16, 2026 · builds on 0.1.1
 Phase 3 in [design.md](design.md#mvp-scope-and-milestones) delivers "forward model, joint Monte
 Carlo, corrected CHSH and HOM; signed analysis plans with trial counting; streaming O(n)
 coincidences", gated by `guardrails`. This document turns that row, and the items the design and
-the review records defer to phase 3, into milestones of one pull request each. Nothing here is
-code yet. Decisions that need the owner are marked **Decision** and collected at the end.
+the review records defer to phase 3, into milestones of one pull request each. M0-M4 are merged
+(CHANGELOG, Unreleased); the rest is plan. Decisions that need the owner are marked **Decision** and collected at the end.
 
 ## Starting point
 
@@ -165,8 +165,8 @@ Python loops).
   regime (crosstalk injected by the in-flight crosstalk simulator, or afterpulsing not
   propagated), where the pass criterion is that the predictive check flags misfit in at least
   90% of replicates instead of returning confident wrong intervals (design, "Validation").
-- CI: `propagation` job alongside `coverage`, split across runners under the same 50-minute
-  limit.
+- CI: `propagation` job alongside `coverage`, split across runners under the 40-45-minute step
+  timeouts.
 - Acceptance: all regimes within band; the uncertainty-off control falls below the band in the
   declared regime(s); misfit artifacts at most 2% and forward flags at most 1% of clean runs.
 
@@ -207,6 +207,8 @@ series model below is phase 3"; README limit; expert review Q2.
 - Tests: Laplace and NUTS intervals agree where Laplace is valid (20,000-gap dark fit); `coverage`
   fast tier with `--sampler nuts`; optional-dependency tests skip cleanly without the extra.
 - CI: one job with the `mcmc` extra on Windows, Linux and macOS.
+- Entry item (council round 5, V4): before M5 reads `deadtime-series` artifacts, a minimum-version
+  table (kind, method) -> version in `propagate` that refuses or labels older ones, with a test.
 
 ### M6. Signing primitives and `dadl verify`
 
@@ -326,7 +328,6 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Pair-labelled simulation truth for the heralding gate | cycle 7.14; summary of cycles | M3 (the propagation simulator labels pairs) |
 | Rotating seeds for the coverage gates | expert review Q11 | M10, if the owner agrees to change the gate rule before running |
 | τ_np dead-time gate with power: two-sided around its exact expected coverage, or a goodness-of-fit gate on the gap - τ_np histogram, with a random sub-tick dead-time phase in the regime | M4 council round 1 (G1) | M10, next to rotating seeds (a gate-rule change needs the owner's agreement before running) |
-| Afterpulse pending at the next gap modelled in the series gap law (now only a note above 0.5%) | M4 council round 1 (S4) | M10; 0.2.x if not done (new gap law, regime and gate re-run) |
 | Coarse grouped predictive check, Bonferroni-combined with the fine one, for the series dead time | M4 council round 1 (S5) | M10 (changes the misfit share; gate re-run) |
 | Count-variance (Fano) stationarity check for dead-time scans | M4 council round 1 (D1) | M10 (needs the model's renewal Fano factor; gate re-run) |
 | Opt-in per-detector efficiency normalisation for corrected S (new correction name, policy line and a gate regime) | M4 council round 2 (B4) | M10; 0.2.x if not done |
@@ -336,11 +337,14 @@ From the review records; each can ride with the milestone named or go to 0.2.x.
 | Coverage regime with a dead-time scan past the count-rate maximum (1/tau_p) | M4 council round 3 (N2) | M10, next to rotating seeds (owner's agreement) |
 | User declaration of scan runs past the count-rate maximum | M4 council round 4 (DT3) | M10, with the past-maximum regime |
 | Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M10, checked on the past-maximum regime |
+| A 0.5 s passive-quench probe (0.5 s coverage 92.5%, matching the no-afterpulse control's 93.1%: check the profile's calibration at 1e6 gaps) | M4 council round 5 (I2) | M10 |
+| The second-order pending-afterpulse term (two pending, or one beside the record's own), if a regime needs it | M4 council round 5 (I2) | M10 |
+| Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | M5 entry item, before M5 reads `deadtime-series` artifacts |
 
 ## Decisions
 
-The owner took all nine on Nov 16, 2026, each as recommended below. D2 is a
-preference going into M0; the benchmark still has to confirm it.
+The owner took all nine on Nov 16, 2026 (D10, D11 later, during M2), each as recommended below.
+D2 is a preference going into M0; the benchmark still has to confirm it.
 
 | # | Question | Options | Decided |
 | --- | --- | --- | --- |

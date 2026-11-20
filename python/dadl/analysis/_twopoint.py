@@ -46,16 +46,17 @@ def forward_from_counts(
     seed: int,
     window_ps: int,
     declared_delay_ps: float,
-) -> tuple[object, dict[str, float]]:
-    """The forward-model correction and the counts it adds (the D3 range when a dead time is a bound,
-    labelled when it is wider than the corrected value's standard error)."""
+) -> tuple[object, dict[str, object]]:
+    """The forward-model correction and the counts it adds (the Monte Carlo seed and draws; the D3
+    range when a dead time is a bound, labelled when it is wider than the corrected value's standard
+    error)."""
     import dataclasses
 
     from dadl.forward import DEAD_TIME_RANGE_WIDE, bound_range, corrected_visibility
 
     grid = {"window_ps": window_ps, "declared_delay_ps": declared_delay_ps}
     fwd = corrected_visibility(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, seed=seed, **grid)
-    extra: dict[str, float] = {}
+    extra: dict[str, object] = dict(fwd.counts)
     rng = bound_range(analysis, high, low, tuple(channels), calibrations=calibrations, policy=policy, **grid)
     if rng is not None:
         extra["corrected_at_zero_dead_time"] = rng["at_zero"]

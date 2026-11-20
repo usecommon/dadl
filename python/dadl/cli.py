@@ -690,9 +690,13 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
         channel = setup.channel_id(name)
         acquisitions = [runs[keys[i]][name] for i in settings]
         afterpulse = None
+        dark_input: tuple = ()
         try:
             if args.dark:
+                from dadl.artifact import artifact_id, read_artifact
+
                 dark_path, afterpulse = _dark_artifact_for(args.dark, channel)
+                dark_input = ((artifact_id(read_artifact(dark_path)[0]), "previous-artifact", str(channel)),)
                 print(f"  {name}: afterpulsing from {dark_path}")
             cal = calibrate_deadtime_series(
                 acquisitions, channel, afterpulse=afterpulse, backend=backend, seed=setup.seed,
@@ -703,7 +707,7 @@ def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
             print(f"  {name}: not calibrated: {exc}")
             failed.append(name)
             continue
-        cal = dataclasses.replace(cal, inputs=cal.inputs + inputs)
+        cal = dataclasses.replace(cal, inputs=cal.inputs + dark_input + inputs)
         print()
         print(cal)
         try:
@@ -974,7 +978,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     qs = sub.add_parser(
         "quickstart",
-        help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility)",
+        help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility), and a "
+        "corrected value from simulated calibrations",
         description="Simulate an experiment (CHSH or HOM) from a setup file and analyse it with a fixed, planned window.",
     )
     qs.add_argument(
@@ -1013,7 +1018,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument(
         "--rates", default=None, metavar="R1,R2,...",
         help="--deadtime-scan: photon rate at each detector (before efficiency) per s, one per setting (default: "
-        "avalanche rate x dead time 0.05 to 0.5)",
+        "avalanche rate x dead time from 0.05 to 0.5 over four settings; 0.1 and 0.4 for two)",
     )
     sim.add_argument(
         "--duration-s", type=float, default=None,
@@ -1022,7 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sim.set_defaults(func=cmd_simulate)
 
-    an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")
+    an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file (corrected too with "
+                        "--calibrations)")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
     an.add_argument("--tags", required=True, help="tag file (.npz or .csv: columns setting, channel, timestamp_ps) or a folder of PTU files setting0.ptu, ...")
     an.add_argument(
@@ -1069,6 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
         "attenuated CW laser with its intensity stable to about 1-2% over each run, not pulsed light or a "
         "mains-powered lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz modulation biased "
         "tau_p 10% low with the predictive check passing; +-40% is flagged.",
+        epilog="HOM, fringe and CHSH do not use this artifact yet (they take the dark dead time; M5).",
     )
     dt.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
     dt.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, one rate per setting")
