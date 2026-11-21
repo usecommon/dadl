@@ -21,6 +21,15 @@ used on its dataset:
 - **Another detector** (council round 3): when the artifact's channel record and the setup's
   channel (`channels=`) both name a detector and they differ, the artifact is outside its
   validity as above. `ChannelId` equality is the tagger input; the detector is checked here.
+- **Method version** (council round 5, V4): an artifact whose method version is below
+  `METHOD_MINIMUM` for its (kind, method) is refused (`GuardrailRefusal`) unless the policy allows
+  `outdated_calibration_method` (then labelled `OUTDATED_ACCEPTED`); one below `METHOD_LABELLED`'s
+  version loads with a label saying what it lacks. Methods the tables do not list are not checked.
+  Delay artifacts from 0.1.x (method 8) are labelled, not refused (council round 10, L3).
+- **Scan range** (council round 6, T6): a deadtime-series artifact records the count rates it was
+  scanned at (`rate_min_cps`, `rate_max_cps`); the analysed channel's recorded count rate
+  (`DatasetContext.rates_cps`, or a `rate_cps` condition for every channel) must lie within them,
+  as any `_min_`/`_max_` bracket: an effective tau_p describes the scanned rates only.
 - **Calibrated on the analysed data** (design, "Joint posteriors and data reuse"; expert review
   Q4): an artifact whose raw input hashes overlap the dataset's raises `GuardrailRefusal`. There
   is no override: reusing the data narrows the intervals, and the fix is a joint fit.
@@ -34,7 +43,10 @@ pass the one to use; the drift between them is not propagated.
 
 Draws (`CalibrationSet.draws`): the columns of one artifact share a sample index, so parameters
 fitted together keep their correlation; different artifacts are drawn independently, each from
-a generator keyed on the seed and its own artifact ID (the rule of `draws_rng`, cycle 3.1).
+a generator keyed on the seed and its own artifact ID (the rule of `draws_rng`, cycle 3.1). The
+exception is a deadtime-series artifact and the dark artifact it cites (council round 6, B5): its
+row i was built from the dark artifact's row i, so both take the dark artifact's row index and
+tau_p keeps its correlation with the afterpulse draws.
 Stand-in columns (uniform below an upper limit, not a posterior) are never drawn: they are
 returned as bounds, and phase 3 reports a corrected value at the bound and at zero, as a
 labelled range (decision D3). The forward model labels which parameter is a bound
@@ -82,6 +94,32 @@ T3_CLOCK_CHANGED = (
 )
 #: A recorded condition the comparison does not understand (council round 9, Rd4).
 NOT_COMPARED = "condition {key} recorded, not compared"
+#: Oldest method version accepted at use, per (kind, method) (council round 5, V4). Set to the
+#: oldest version a release or the main branch wrote: every artifact in use today loads. A fix that
+#: makes older artifacts wrong raises the minimum (and says so in the CHANGELOG).
+METHOD_MINIMUM: Mapping[tuple[str, str], int] = MappingProxyType({
+    ("accidentals", "offpeak-grid"): 3,
+    ("dark-afterpulse-deadtime", "interarrival-mle"): 7,
+    ("dcr-temperature", "arrhenius-wls"): 2,
+    ("delay-jitter", "xcorr-gaussian-mle"): 8,
+    ("heralding-efficiency", "herald-ratio"): 6,
+    ("deadtime-series", "series-gap-mle"): 8,
+})
+#: Versions at or above the minimum that load with a label: (kind, method) -> (the first version
+#: that needs none, what the older ones lack).
+METHOD_LABELLED: Mapping[tuple[str, str], tuple[int, str]] = MappingProxyType({
+    # Council round 10 (Mg7, L3): 0.1.x delay artifacts still load.
+    ("delay-jitter", "xcorr-gaussian-mle"): (
+        10, "its misfit flag was computed before council round 8's (groups - 1) degrees of freedom; refit it if "
+        "that matters"),
+    ("deadtime-series", "series-gap-mle"): (
+        9, "its tau_p draws do not share the dark artifact's rows and its scan rates are not checked at use; refit it"),
+})
+OLD_METHOD = "{kind} artifact {aid} from {method} version {version}: {why}"
+OUTDATED_ACCEPTED = "outdated calibration method accepted"
+#: The scanned count-rate bracket of a deadtime-series artifact, and the dataset key it brackets.
+SCAN_RATE_KEYS = ("rate_min_cps", "rate_max_cps")
+RATE_KEY = "rate_cps"
 #: Kinds whose artifact belongs to the tagger that recorded it (its channel skew and own dead
 #: time): calibrated on another tagger, they do not cover the dataset (council round 7, G6).
 TAGGER_KINDS = ("delay-jitter", "deadtime-series")
@@ -123,6 +161,9 @@ class DatasetContext:
     #: T3 input under an explicit `source.type: cw`: the sync is a clock only, and a changed clock
     #: is labelled for `CLOCK_FREE_KINDS` instead of refused (council round 9, Tw3).
     t3_cw: bool = False
+    #: Each analysed channel's recorded count rate (s^-1), checked against a deadtime-series
+    #: artifact's scanned rates (council round 6, T6). Overrides a `rate_cps` condition.
+    rates_cps: Mapping[ChannelId, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.acquired is not None and self.acquired.tzinfo is None:
@@ -131,6 +172,7 @@ class DatasetContext:
         object.__setattr__(self, "instrument", MappingProxyType(
             {str(k): str(v) for k, v in self.instrument.items() if v not in (None, "")}))
         object.__setattr__(self, "input_sha256", frozenset(str(h) for h in self.input_sha256))
+        object.__setattr__(self, "rates_cps", MappingProxyType({k: float(v) for k, v in self.rates_cps.items()}))
 
 
 @dataclass(frozen=True)
@@ -221,8 +263,10 @@ def uncompared_conditions(recorded: Mapping[str, float], dataset: Mapping[str, f
     """Recorded conditions outside the compared forms that look like a condition of use: the dataset
     gives the same key (`analyze --condition`), or the name says temperature (council round 9,
     Rd4: `detector_temperature_K` 233 against 298 passed silently). The fit's own diagnostics are
-    not listed."""
-    return sorted(k for k in recorded if not _compared(k) and (k in dataset or "temperature" in k))
+    not listed, nor `dark_*` keys: a deadtime-series artifact's copy of its dark artifact's
+    conditions, compared with the scan's when it was calibrated (council round 10, Rg3)."""
+    return sorted(k for k in recorded
+                  if not _compared(k) and not k.startswith("dark_") and (k in dataset or "temperature" in k))
 
 
 def clock_changes(recorded: Mapping[str, float], dataset: Mapping[str, float]) -> str | None:
@@ -291,6 +335,41 @@ def check_detectors(
     return tuple(dict.fromkeys(labels))
 
 
+def _method_version(member: Member, analysis: str, rule) -> list[str]:
+    """Refuse an artifact below its method's minimum version, or label it (council round 5, V4)."""
+    cal, aid = member.calibration, member.artifact_id[:12]
+    key = (cal.kind, cal.method)
+    if key not in METHOD_MINIMUM:
+        return []
+    text = str(cal.method_version).strip()
+    version = int(text) if text.isdigit() else None
+    minimum = METHOD_MINIMUM[key]
+    if version is None or version < minimum:
+        if "outdated_calibration_method" not in rule.allowed_corrections:
+            raise GuardrailRefusal(
+                f"{cal.kind} artifact {aid} was written by {cal.method} version {text}; the oldest version accepted "
+                f"at use is {minimum}: refit it with this version of DADL. "
+                f"{override_hint(analysis, 'outdated_calibration_method')}"
+            )
+        return [OUTDATED_ACCEPTED]
+    if key in METHOD_LABELLED and version < METHOD_LABELLED[key][0]:
+        return [OLD_METHOD.format(kind=cal.kind, aid=aid, method=cal.method, version=version,
+                                  why=METHOD_LABELLED[key][1])]
+    return []
+
+
+def _dataset_conditions(member: Member, dataset: DatasetContext) -> Mapping[str, float]:
+    """The dataset's conditions for one artifact: for a deadtime-series artifact that records its
+    scanned rates, `rate_cps` is its channel's analysed rate when the dataset gives it (T6)."""
+    if member.kind != _SERIES_KIND or not any(k in member.calibration.conditions for k in SCAN_RATE_KEYS):
+        return dataset.conditions
+    rates = [dataset.rates_cps[c] for c in member.channels if c in dataset.rates_cps]
+    if not rates:
+        return dataset.conditions
+    # A series artifact has one channel.
+    return {**dataset.conditions, RATE_KEY: rates[0]}
+
+
 def _check(
     member: Member, analysis: str, policy: Policy, dataset: DatasetContext | None, setup: Mapping[ChannelId, ChannelId],
     accepted: list[str] | None = None,
@@ -299,6 +378,7 @@ def _check(
     labels: list[str] = []
     cal, aid = member.calibration, member.artifact_id[:12]
     rule = policy.rule_for(analysis)
+    labels += _method_version(member, analysis, rule)
     if cal.status == "misfit":
         if "misfit_calibration" not in rule.allowed_corrections:
             raise GuardrailRefusal(
@@ -337,14 +417,15 @@ def _check(
     # must match in both (council round 5, V5).
     extra = (valid or {}).get("conditions") or {}
     merged = {**cal.conditions, **extra}
-    found = condition_mismatches(cal.conditions, dataset.conditions, hint=True)
+    given = _dataset_conditions(member, dataset)
+    found = condition_mismatches(cal.conditions, given, hint=True)
     if extra:
-        found += condition_mismatches(merged, dataset.conditions, hint=True)
-    changed = clock_changes(merged, dataset.conditions) if dataset.t3_cw and cal.kind in CLOCK_FREE_KINDS else None
+        found += condition_mismatches(merged, given, hint=True)
+    changed = clock_changes(merged, given) if dataset.t3_cw and cal.kind in CLOCK_FREE_KINDS else None
     if changed:
         found = [f for f in found if not f.startswith(f"{PERIOD_KEY} = ")]
         labels.append(changed)
-    labels += [NOT_COMPARED.format(key=k) for k in uncompared_conditions(merged, dataset.conditions)]
+    labels += [NOT_COMPARED.format(key=k) for k in uncompared_conditions(merged, given)]
     problems += list(dict.fromkeys(found))
     tagger = instrument_mismatches(member.manifest.get("instrument"), dataset.instrument)
     if tagger and cal.kind in TAGGER_KINDS:
@@ -517,18 +598,45 @@ class CalibrationSet:
             raise KeyError(f"{len(hits)} {kind} calibrations{'' if channel is None else f' for {channel}'} in the set")
         return hits[0]
 
+    def cited_dark(self, member: Member) -> Member | None:
+        """The set's dark artifact a deadtime-series artifact was calibrated with, or None: the one
+        its `previous-artifact` input names (`dadl calibrate deadtime --dark`), else the one on its
+        channel whose raw inputs it cites (the Python API copies them)."""
+        if member.kind != _SERIES_KIND:
+            return None
+        darks = [m for m in self.members if m.kind == "dark-afterpulse-deadtime" and set(m.channels) & set(member.channels)]
+        named = {i[0] for i in member.calibration.inputs if len(i) > 1 and i[1] == "previous-artifact"}
+        for d in darks:
+            if d.artifact_id in named:
+                return d
+        cited = set(member.calibration.inputs)
+        for d in darks:
+            raw = {tuple(i) for i in d.calibration.inputs if len(i) > 1 and i[1] in _RAW_ROLES}
+            if raw and raw <= cited:
+                return d
+        return None
+
     def draws(self, n: int, seed: int) -> JointDraws:
-        """`n` joint draws: one shared row index per artifact, independent across artifacts."""
+        """`n` joint draws: one shared row index per artifact, independent across artifacts, except
+        that a deadtime-series artifact takes the row index of the dark artifact it cites (B5)."""
         if n < 1:
             raise ValueError("n must be at least 1")
         columns: dict[tuple, np.ndarray] = {}
         bounds: dict[tuple, tuple[float, float]] = {}
+        index: dict[str, np.ndarray] = {}
         for m in self.members:
-            cal = m.calibration
+            rows = m.calibration.samples.shape[0]
             words = [int.from_bytes(hashlib.sha256(m.artifact_id.encode()).digest()[i : i + 4], "little") for i in range(0, 16, 4)]
             rng = np.random.default_rng(np.random.SeedSequence([int(seed) & 0xFFFFFFFF, int(seed) >> 32 & 0xFFFFFFFF, *words]))
-            rows = cal.samples.shape[0]
-            idx = rng.permutation(rows)[:n] if n <= rows else rng.integers(0, rows, n)
+            index[m.artifact_id] = rng.permutation(rows)[:n] if n <= rows else rng.integers(0, rows, n)
+        for m in self.members:
+            dark = self.cited_dark(m)
+            # Series row i holds the dark artifact's row i mod its rows: shared when the dark rows fit.
+            if dark is not None and dark.calibration.samples.shape[0] <= m.calibration.samples.shape[0]:
+                index[m.artifact_id] = index[dark.artifact_id]
+        for m in self.members:
+            cal = m.calibration
+            idx = index[m.artifact_id]
             for j, name in enumerate(cal.sample_params):
                 key = (cal.kind, name, cal.channels)
                 if name in cal.stand_in:
@@ -549,6 +657,10 @@ __all__ = [
     "SERIES_UNUSED",
     "OTHER_TAGGER",
     "OUTSIDE_VALIDITY",
+    "METHOD_LABELLED",
+    "METHOD_MINIMUM",
+    "OLD_METHOD",
+    "OUTDATED_ACCEPTED",
     "TEMPERATURE_TOLERANCE_K",
     "CalibrationSet",
     "DatasetContext",

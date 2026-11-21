@@ -10,8 +10,10 @@ and is versioned separately from the packages.
 ### Behaviour changes since 0.1.1
 
 Delay artifacts from 0.1.x (method 8) still load. Their misfit flag was computed before round 8's
-(groups - 1) degrees of freedom; refit them if it matters. No method version is checked at use
-until M5a.
+(groups - 1) degrees of freedom; refit them if it matters. From M5a method versions are checked at
+use: these artifacts load with a label that says so, and an artifact below its method's oldest
+accepted version is refused (override `outdated_calibration_method`); every version a release
+wrote is accepted.
 
 - New refusals: an identified dark dead time above a 20% dead fraction (rate x dead time); T3
   input without an explicit `source.type: cw` (the templates' `spdc-cw` no longer counts); the T3
@@ -22,7 +24,7 @@ until M5a.
 - Refusal hints give the CLI form (`--allow NAME=REASON`); a recorded condition the dataset does
   not give names the `--condition` to pass.
 - Method versions: delay `xcorr-gaussian-mle` 8 -> 10 (T3 lattice and sync edges; T2 outputs
-  unchanged); deadtime `series-gap-mle` is new, at 8; accidentals, dark, dcr and heralding are
+  unchanged); deadtime `series-gap-mle` is new, at 9 (8 before M5a); accidentals, dark, dcr and heralding are
   unchanged.
 - Artifacts: still `calibration/1`, with the new kind `deadtime-series`. Artifacts written by 0.1.x
   start their validity at creation (`valid_for.from` = created); unreleased versions start it at
@@ -515,6 +517,33 @@ until M5a.
     replicates identical to round 9 in all five regimes, no refusals (hom-snspd 94.5/94.5,
     hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0, hom-crosstalk 30.5/32.5
     with 100% flagged). All 48 mutants killed (the 47 of round 9 and "drop the round-10 widening", which the 20-seed coarse-tick test kills on its own).
+
+### Phase 3, M5a: entry items
+
+- Method versions at use (council round 5, V4): `dadl.propagate.METHOD_MINIMUM`, (kind, method) ->
+  oldest version accepted, refuses older artifacts with `GuardrailRefusal` (new override
+  `outdated_calibration_method`, label "outdated calibration method accepted"). The minima are
+  the oldest versions any release or main wrote, so every existing artifact loads.
+  `METHOD_LABELLED` labels delay `xcorr-gaussian-mle` below 10 (0.1.x, method 8: the record, r10
+  Mg7 / L3, says they still load, so they are labelled, not refused) and deadtime
+  `series-gap-mle` 8 (no shared draw rows, no scan range at use). Methods not in the tables are
+  not checked.
+- Series condition keys (r10 Rg3): `dark_*` keys (a series artifact's copy of its dark artifact's
+  bias and temperature) are no longer labelled "recorded, not compared".
+- Shared draw rows (r6 B5): a series artifact's stored tau_p draws are the statistical split
+  normal plus sens . (dark row i - mean), and `CalibrationSet.draws` gives a series artifact the
+  row index of the dark artifact it cites (`previous-artifact` input, else its raw inputs), so
+  tau_p keeps its correlation with the afterpulse draws. The tau_p and tau_np intervals are
+  unchanged; the stored tau_p draws move (median slightly toward the skewed side, 95% ends
+  within a few % of the interval's).
+- Scan range at use (r6 T6): `scan_rate_low_cps` / `scan_rate_high_cps` are renamed
+  `rate_min_cps` / `rate_max_cps`, a bracket the analysed rate must lie in.
+  `DatasetContext.rates_cps` gives each channel's analysed count rate (else a `rate_cps`
+  condition); outside the bracket, or not given, the series artifact is outside its validity
+  (`calibration_outside_validity`). No analysis reads series artifacts yet.
+- Method versions: deadtime `series-gap-mle` 8 -> 9 (renamed condition keys, stored tau_p draws).
+- Gates: deadtime coverage at 200 replicates (sanity only, CI seed; intervals are unchanged by construction): tau_p 95.0% and tau_np 100.0% (series-spad), 98.0% and 98.5% (passive-quench), all pass. No gate, regime,
+  band or seed changed.
 
 ### Published results as executable tests
 

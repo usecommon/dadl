@@ -626,7 +626,7 @@ def test_the_tau_p_budget_is_recorded():
     assert (e.low, e.high) == (pytest.approx(28_397.5, abs=1.0), pytest.approx(41_882.2, abs=1.0))
     assert c["dead_time_p_u_afterpulse_ps"] == pytest.approx(371, abs=1)
     assert {"dtau_p_dp_ps", "dtau_p_dtau_a", "afterpulse_p_tau_corr_used", "afterpulse_tau_ps_sd_held"} <= set(c)
-    assert c["scan_rate_low_cps"] < c["scan_rate_high_cps"] and c["scan_duration_low_s"] > 0
+    assert c["rate_min_cps"] < c["rate_max_cps"] and c["scan_duration_low_s"] > 0
     assert "avalanche-candidate rate" in next(n for n in cal.notes if n.startswith("run 0"))
     manifest, _ = build_manifest(cal)
     assert manifest["uncertainty"]["kind"].startswith("statistical, with afterpulse parameters propagated")

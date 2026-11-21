@@ -372,7 +372,10 @@ plainly:
   the next release the package still reports version 0.1.1.
   Delay artifacts from 0.1.x (method 8) still load. Their misfit flag was
   computed before round 8's (groups - 1) degrees of freedom; refit them if
-  it matters. No method version is checked at use until M5a.
+  it matters. They load with a label saying so: method versions are checked
+  at use, and an artifact below its method's oldest accepted version is
+  refused (`outdated_calibration_method`); every version a release wrote is
+  accepted.
 - **Interactive use, not unattended operation yet.** Setups have exactly the
   four CHSH roles (or two HOM ones), so an 8-input tagger is calibrated as two
   setups; output is text, with no `--json`; nothing compares a calibration
@@ -490,12 +493,16 @@ the policy does not allow, one refusal lists every `--allow` they need. The name
 | `dead_time_contradicted` | a dark dead time the analysed gaps contradict (labelled with the problems, recorded as `dead_time_gap_problems`) |
 | `misfit_forward_model` | a failed predictive check, a CHSH delay drift, or off-peak windows that are not flat |
 | `misfit_calibration` | an artifact whose own check failed |
+| `outdated_calibration_method` | an artifact written by a method version older than the oldest accepted at use |
 
 Conditions: an artifact's `temperature_K` must be within 0.5 K of the dataset's, and recording
 `temperature_K` at calibration (`--condition temperature_K=...`) makes it required at analysis.
 `bias*` and `tagger_*` values must be equal, and a `<name>_<unit>` must lie within a recorded
 `<name>_min_<unit>` / `<name>_max_<unit>` (one-sided when only one is recorded). Other recorded
-names are labelled "recorded, not compared".
+names are labelled "recorded, not compared", except a series dead-time artifact's `dark_*` copies
+of its dark artifact's conditions, which were compared when it was calibrated. A series dead-time
+artifact records its scanned count rates as `rate_min_cps` / `rate_max_cps`, and the analysed
+channel's count rate must lie between them.
 
 The dead-time check refuses a dark dead time that the analysed gaps contradict in either
 direction. Downward: gaps shorter than its floor, point − ln(K / 1e-4) / (N f), with N the dark
@@ -553,6 +560,9 @@ one per line, those from your overrides first, then the fixed "Calibration part 
 | "calibration outside its validity" | label | corrected | the Overrides lines say what was overridden | `calibration_outside_validity` |
 | "... artifact ... is a misfit" | refusal | corrected | re-take that calibration run | `misfit_calibration`; `calibrate --accept-misfit` writes such an artifact |
 | "misfit calibration accepted" | label | corrected | quote it with the value | `misfit_calibration` |
+| "... artifact ... was written by ... version ...; the oldest version accepted at use is ..." | refusal | corrected | refit it with this version of DADL | `outdated_calibration_method` |
+| "outdated calibration method accepted" | label | corrected | quote it with the value | `outdated_calibration_method` |
+| "delay-jitter artifact ... from xcorr-gaussian-mle version 8: ..." | label | corrected | refit it if its misfit flag matters | — |
 | "the dark artifacts do not describe the analysed detectors" | refusal | corrected | a dark run of the analysed detectors, or move the dark artifacts out | `dead_time_contradicted` |
 | "dead time contradicted by the analysed gaps, accepted" | label | corrected | quote it with the value | `dead_time_contradicted` |
 | "the dead time of ... ; at the recorded rate, rate x dead time = ..." | refusal | corrected | move the dark artifacts out (each `.json` with its `.posterior.npy`) to correct the rest | — |

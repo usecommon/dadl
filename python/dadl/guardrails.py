@@ -108,6 +108,9 @@ KNOWN_CORRECTIONS = frozenset(
         # a misfit artifact, and one whose validity or conditions do not cover the dataset.
         "misfit_calibration",
         "calibration_outside_validity",
+        # An artifact written by a method version older than the oldest accepted at use
+        # (dadl.propagate.METHOD_MINIMUM; council round 5, V4).
+        "outdated_calibration_method",
         # The analysed gaps contradicting a dark dead time (dadl.forward.check_dead_time_gaps;
         # council round 9: no longer under calibration_outside_validity).
         "dead_time_contradicted",

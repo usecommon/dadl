@@ -577,3 +577,182 @@ def test_an_unknown_condition_names_the_flag_and_the_override_is_recorded(tmp_pa
     assert CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(conditions={"temperature_K": 233.0})).overridden == ()
     # Without the CLI hint (calibrate deadtime's use), the text is as before.
     assert condition_mismatches({"temperature_K": 233.0}, {}) == ["temperature_K = 233 recorded, not given for the dataset"]
+
+
+# -- M5a entry items ------------------------------------------------------------------------------
+
+
+def _method(cal, method, version):
+    from dataclasses import replace
+
+    return replace(cal, method=method, method_version=version)
+
+
+def test_method_versions_below_the_minimum_are_refused_and_0_1_delay_artifacts_labelled(tmp_path):
+    # Council round 5 (V4): method versions were never checked at use. Round 10 (Mg7, L3): delay
+    # artifacts from 0.1.x (method 8) still load, with a label saying what they lack.
+    from dadl.propagate import METHOD_LABELLED, METHOD_MINIMUM, OLD_METHOD, OUTDATED_ACCEPTED
+
+    old = tmp_path / "old"
+    write(_method(make_cal(A, seed=1, kind="delay-jitter"), "xcorr-gaussian-mle", "7"), old)
+    with pytest.raises(GuardrailRefusal, match=r"xcorr-gaussian-mle version 7; the oldest version accepted at use is "
+                       r"8.*--allow outdated_calibration_method=REASON"):
+        CalibrationSet.load(old, analysis=ANALYSIS, dataset=ctx())
+    with pytest.raises(GuardrailRefusal, match="outdated_calibration_method"):
+        CalibrationSet.load(old, analysis=ANALYSIS)  # without a dataset too, as the misfit check
+    loose = Policy.default().allow(ANALYSIS, "outdated_calibration_method", "raw data lost; refit impossible")
+    s = CalibrationSet.load(old, analysis=ANALYSIS, policy=loose, dataset=ctx())
+    assert OUTDATED_ACCEPTED in s.labels and POLICY_MODIFIED in s.labels
+
+    v01 = tmp_path / "v01"
+    write(_method(make_cal(A, seed=1, kind="delay-jitter"), "xcorr-gaussian-mle", "8"), v01)
+    s = CalibrationSet.load(v01, analysis=ANALYSIS, dataset=ctx())
+    why = METHOD_LABELLED[("delay-jitter", "xcorr-gaussian-mle")][1]
+    assert OLD_METHOD.format(kind="delay-jitter", aid=s.artifact_ids[0][:12], method="xcorr-gaussian-mle",
+                             version=8, why=why) in s.labels
+    assert "groups - 1" in why
+    now = tmp_path / "now"
+    write(_method(make_cal(A, seed=1, kind="delay-jitter"), "xcorr-gaussian-mle", "10"), now)
+    assert CalibrationSet.load(now, analysis=ANALYSIS, dataset=ctx()).labels == (
+        NO_VALIDITY.format(aid=CalibrationSet.load(now, analysis=ANALYSIS, dataset=ctx()).artifact_ids[0][:12]),)
+    bad = tmp_path / "bad"
+    write(_method(make_cal(A, seed=1), "interarrival-mle", "7b"), bad)
+    with pytest.raises(GuardrailRefusal, match="version 7b"):
+        CalibrationSet.load(bad, analysis=ANALYSIS, dataset=ctx())
+    assert set(METHOD_LABELLED) <= set(METHOD_MINIMUM)
+
+
+def test_every_method_passes_at_its_current_version_without_a_label():
+    # The minima admit what the code writes today, and every method is in the table.
+    import importlib
+
+    from dadl.propagate import METHOD_LABELLED, METHOD_MINIMUM
+
+    mods = ("accidentals", "dark", "dcr", "deadtime", "delay", "heralding")
+    seen = set()
+    for name in mods:
+        mod = importlib.import_module(f"dadl.calibration.{name}")
+        key = (mod.KIND, mod.METHOD)
+        seen.add(key)
+        assert key in METHOD_MINIMUM, key
+        assert int(mod.METHOD_VERSION) >= METHOD_MINIMUM[key]
+        assert int(mod.METHOD_VERSION) >= METHOD_LABELLED.get(key, (0, ""))[0]
+    assert seen == set(METHOD_MINIMUM)
+
+
+def test_dark_keys_of_series_artifacts_are_not_labelled_not_compared(tmp_path):
+    # Council round 10 (Rg3): a series artifact's copy of its dark artifact's temperature,
+    # `dark_temperature_K`, read "recorded, not compared" on every use.
+    from dadl.propagate import NOT_COMPARED, uncompared_conditions
+
+    assert uncompared_conditions({"dark_temperature_K": 233.0, "dark_bias_V": 25.0}, {"dark_bias_V": 25.0}) == []
+    assert uncompared_conditions({"detector_temperature_K": 233.0}, {}) == ["detector_temperature_K"]
+    write(make_cal(A, seed=2, kind="deadtime-series", conditions={"dark_temperature_K": 233.0, "dark_bias_V": 25.0}),
+          tmp_path)
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(), kinds=["deadtime-series"])
+    assert not any(lab.startswith("condition ") for lab in s.labels)
+    assert NOT_COMPARED.format(key="dark_temperature_K") not in s.labels
+
+
+def test_the_analysed_rate_must_lie_in_a_series_artifact_s_scanned_rates(tmp_path):
+    # Council round 6 (T6): the scanned rates were recorded but not checked at use; an effective
+    # tau_p describes the scanned rates only.
+    write(make_cal(A, seed=2, kind="deadtime-series", conditions={"rate_min_cps": 1e6, "rate_max_cps": 5e6}), tmp_path)
+
+    def load(policy=None, **kw):
+        return CalibrationSet.load(tmp_path, analysis=ANALYSIS, policy=policy, dataset=ctx(**kw),
+                                   kinds=["deadtime-series"])
+
+    assert OUTSIDE_VALIDITY not in load(rates_cps={A: 2e6}).labels
+    assert OUTSIDE_VALIDITY not in load(conditions={"rate_cps": 1e6}).labels  # the bracket is inclusive
+    with pytest.raises(StaleCalibration, match="rate_cps = 9000000 outside the calibrated 1000000 to 5000000"):
+        load(rates_cps={A: 9e6})
+    with pytest.raises(StaleCalibration, match="rate_cps = 500000 outside"):
+        load(rates_cps={A: 5e5}, conditions={"rate_cps": 2e6})  # the channel's own rate wins
+    with pytest.raises(StaleCalibration, match="rate_min_cps = 1000000 recorded, not given for the dataset"):
+        load(rates_cps={B: 2e6})
+    loose = Policy.default().allow(ANALYSIS, "calibration_outside_validity", "rate just above the scan")
+    s = load(loose, rates_cps={A: 6e6})
+    assert OUTSIDE_VALIDITY in s.labels and "rate_cps = 6000000 outside" in s.overridden[0]
+    # Other kinds keep comparing only the dataset's conditions.
+    other = tmp_path / "other"
+    write(make_cal(A, seed=3, conditions={"rate_min_cps": 1e6}), other)
+    with pytest.raises(StaleCalibration, match="rate_min_cps = 1000000 recorded, not given"):
+        CalibrationSet.load(other, analysis=ANALYSIS, dataset=ctx(rates_cps={A: 2e6}))
+
+
+def _dark_for_series(channel, rel_sd=0.2, rho=0.5):
+    """A dark artifact with wide, correlated afterpulse draws, so the afterpulse share of tau_p is large."""
+    rng = np.random.default_rng(4)
+    z = rng.multivariate_normal([0, 0], [[1, rho], [rho, 1]], size=2000)
+    p, tau_a = 0.03 * (1 + rel_sd * z[:, 0]), 30_000.0 * (1 + rel_sd * z[:, 1])
+    est = {"afterpulse_prob": Interval(0.03, *np.quantile(p, [0.025, 0.975])),
+           "afterpulse_tau_ps": Interval(30_000.0, *np.quantile(tau_a, [0.025, 0.975]))}
+    return Calibration(
+        kind="dark-afterpulse-deadtime", method="test", method_version="1", channels=(channel,), estimates=est,
+        units={"afterpulse_prob": "1", "afterpulse_tau_ps": "ps"}, samples=np.column_stack([p, tau_a]),
+        sample_params=("afterpulse_prob", "afterpulse_tau_ps"), converged=True, ppc_pvalue=0.5,
+        inputs=((f"{77:064x}", "raw-tags", str(channel)),), backend="sim",
+    )
+
+
+def test_series_tau_p_draws_keep_their_correlation_with_the_dark_afterpulse_draws(tmp_path):
+    # Council round 6 (B5): the afterpulse part of tau_p was an independent normal term, and the
+    # set drew the series and dark artifacts with independent indices, so corr(tau_p, p) was lost
+    # (about 0.3 in passive-quench). The reviewer's test: across joint draws, corr(series tau_p,
+    # dark p) matches sens . cov[:, p] / (sd(tau_p) sd(p)).
+    from dataclasses import replace
+
+    from dadl.calibration.deadtime import calibrate_deadtime_series
+    from dadl.sim import detect, poisson_times
+
+    ch = ChannelId("sim", 0)
+    dark = _dark_for_series(ch)
+    det = DetectorParams(efficiency=1.0, dark_rate_cps=1000.0, jitter_sigma_ps=0.0, dead_time_ps=50_000,
+                         dead_time_p_ps=30_000, afterpulse_prob=0.03, afterpulse_tau_ps=30_000.0)
+    rng = np.random.default_rng(10)
+    runs = [detect(poisson_times(r, 0.01, rng), det, 0.01, rng) for r in (2e6, 5e6, 1e7)]
+    series = calibrate_deadtime_series(runs, ch, afterpulse=dark, backend="sim", seed=1)
+    c = series.conditions
+    assert series.unidentified == () and c["dead_time_p_u_afterpulse_ps"] > 0
+    sens = np.array([c["dtau_p_dp_ps"], c["dtau_p_dtau_a"]])
+    cov = np.cov(dark.samples.T)
+    stored = series.samples[:, 0]
+    expected = float(sens @ cov[:, 0] / (stored.std(ddof=1) * np.sqrt(cov[0, 0])))
+    assert abs(expected) > 0.2  # the test has power: the afterpulse share is large here
+    # The stored draws still span the interval (statistical and afterpulse halves in quadrature).
+    e = series.estimates["dead_time_p_ps"]
+    lo, hi = np.quantile(stored, [0.025, 0.975])
+    assert lo == pytest.approx(e.low, abs=0.05 * (e.high - e.low))
+    assert hi == pytest.approx(e.high, abs=0.05 * (e.high - e.low))
+
+    write(dark, tmp_path)
+    write(series, tmp_path)  # cites the dark artifact's raw inputs (the Python API path)
+    s = CalibrationSet.load(tmp_path, analysis=ANALYSIS, dataset=ctx(rates_cps={ch: 3e6}),
+                            kinds=["deadtime-series", "dark-afterpulse-deadtime"])
+    series_m = next(m for m in s.members if m.kind == "deadtime-series")
+    assert s.cited_dark(series_m).kind == "dark-afterpulse-deadtime"
+    d = s.draws(2000, seed=5)
+    got = np.corrcoef(d.column("deadtime-series", "dead_time_p_ps"),
+                      d.column("dark-afterpulse-deadtime", "afterpulse_prob"))[0, 1]
+    assert got == pytest.approx(expected, abs=0.05)
+    assert s.draws(500, seed=5).column("deadtime-series", "dead_time_p_ps").size == 500
+
+    # The CLI path: the dark artifact named by its ID (`previous-artifact`), without its raw inputs.
+    named = tmp_path / "named"
+    dark_id = write(dark, named).stem
+    write(replace(series, inputs=(*(i for i in series.inputs if i not in dark.inputs),
+                                  (dark_id, "previous-artifact", str(ch)))), named)
+    s = CalibrationSet.load(named, analysis=ANALYSIS, dataset=ctx(rates_cps={ch: 3e6}),
+                            kinds=["deadtime-series", "dark-afterpulse-deadtime"])
+    d = s.draws(2000, seed=5)
+    got = np.corrcoef(d.column("deadtime-series", "dead_time_p_ps"),
+                      d.column("dark-afterpulse-deadtime", "afterpulse_prob"))[0, 1]
+    assert got == pytest.approx(expected, abs=0.05)
+    # Another channel's dark artifact is not shared with.
+    other = tmp_path / "other"
+    write(_dark_for_series(ChannelId("sim", 1)), other)
+    write(series, other)
+    s = CalibrationSet.load(other, analysis=ANALYSIS, dataset=ctx(rates_cps={ch: 3e6}),
+                            kinds=["deadtime-series", "dark-afterpulse-deadtime"])
+    assert s.cited_dark(next(m for m in s.members if m.kind == "deadtime-series")) is None

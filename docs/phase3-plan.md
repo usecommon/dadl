@@ -205,18 +205,21 @@ round 8 moved the entry items that do not need NUTS here.
 
 - Forward-model live fraction from an identified `deadtime-series` artifact (m/n from the series
   closed form; M4 council round 1, D4), with a propagation regime that uses it.
-- Minimum method version at use (council round 5, V4): a table (kind, method) -> version in
+- **Done.** Minimum method version at use (council round 5, V4): a table (kind, method) -> version in
   `propagate` that refuses or labels older artifacts, with a test, before anything reads
-  `deadtime-series` artifacts.
-- Condition keys of series artifacts (council round 10, Rg3): `uncompared_conditions` labels any
+  `deadtime-series` artifacts. (`METHOD_MINIMUM` refuses, override `outdated_calibration_method`;
+  `METHOD_LABELLED` labels 0.1.x delay artifacts and deadtime 8.)
+- **Done.** Condition keys of series artifacts (council round 10, Rg3): `uncompared_conditions` labels any
   recorded key containing "temperature", so the series artifact's `dark_temperature_K` would read
   "recorded, not compared" on every use once series artifacts load; exclude `dark_*` keys.
-- Shared row index (B5): a series tau_p's draws lose their correlation (about 0.3) with the dark
+- **Done.** Shared row index (B5): a series tau_p's draws lose their correlation (about 0.3) with the dark
   afterpulse draws they were propagated from; `CalibrationSet.draws` needs a shared row index
   across a series artifact and its cited dark artifact, with the reviewer's correlation test.
-- Scan range at use (T6): check the analysed rate against a series artifact's recorded scan
+- **Done.** Scan range at use (T6): check the analysed rate against a series artifact's recorded scan
   rates, renaming `scan_rate_low_cps` / `scan_rate_high_cps` to the `_min_`/`_max_` bracket
-  convention when the check is wired.
+  convention when the check is wired. (`rate_min_cps` / `rate_max_cps` against
+  `DatasetContext.rates_cps`, in the calibration-set layer; analyses must fill it when they read
+  series artifacts.)
 - The dead time at the analysed gaps (council round 8, Ph4 and Ph5, one change): truncate every
   dead-time draw, point and bound at the analysed shortest gap plus the D5 allowance, use the
   additive pair live fraction (1 - fa)(1 - fb) + r_c min tau, and redesign the control regime.
@@ -445,7 +448,7 @@ moved most rows from M10 to the M2b/M3b/M4b/M5a milestones.
 | Per-run branch flip search to restore the passive-quench gate's speed | M4 council round 4 | M4b, checked on the past-maximum regime |
 | A 0.5 s passive-quench probe (0.5 s coverage 92.5%, matching the no-afterpulse control's 93.1%: check the profile's calibration at 1e6 gaps) | M4 council round 5 (I2) | M4b |
 | The second-order pending-afterpulse term (two pending, or one beside the record's own), if a regime needs it | M4 council round 5 (I2) | M4b |
-| Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | M5a entry item, before anything reads `deadtime-series` artifacts |
+| Minimum method version at use: a table (kind, method) -> version in `propagate` that refuses or labels older artifacts, with a test | M4 council round 5 (V4) | Done in M5a (`METHOD_MINIMUM`, `METHOD_LABELLED`) |
 | A series coverage regime at tau_p 5 ns / tau_np 22 ns, 5-30 Mcps (the third point of `test_recovery_at_three_points`, in no regime: 3 of 20 seeds missed there) | M4 council round 7 (Q5) | M4b (owner item O8) |
 | Gate regimes closer to real labs: per-channel spread, tagger jitter after the dead time, an SNSPD at Mcps, a SPAD IRF tail | council round 8 (Ph6) | M4b (owner item O8) |
 | Pulsed sources: side-peak accidentals at multiples of the repetition period, so T3 input can be corrected without declaring the source CW | M4 council round 7 (G3) | v0.2+ (with the pulsed-source item below); round 8 refuses pulsed light seen off-peak on any input |

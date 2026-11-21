@@ -101,10 +101,13 @@ times the afterpulse shift sd (`dead_time_p_u_afterpulse_ps`, from the sensitivi
 `dtau_p_dp_ps` and `dtau_p_dtau_a` and the dark draws' covariance, correlation
 `afterpulse_p_tau_corr_used`), side by side in quadrature. An upper limit on tau_p uses the
 two-sided 95% threshold (2 ln LR = 3.84); on the tau_p >= 0 boundary that is a one-sided limit of
-about 97.5%. No coverage regime is unidentified, so this level is not gated. The scanned range is
-recorded (`scan_rate_low_cps`, `scan_rate_high_cps`: recorded count rates; `scan_duration_low_s`,
-`scan_duration_high_s`); an effective tau_p describes those rates, not rates above them (checked at
-use from M5).
+about 97.5%. No coverage regime is unidentified, so this level is not gated. The stored tau_p
+draws are the statistical split normal plus the afterpulse shift of the dark artifact's own rows,
+sens . (draw_i - mean) for row i (council round 6, B5), so `dadl.propagate.CalibrationSet.draws`,
+which gives both artifacts one row index, keeps their correlation. The scanned range is recorded
+(`rate_min_cps`, `rate_max_cps`: recorded count rates; `scan_duration_low_s`,
+`scan_duration_high_s`); an effective tau_p describes those rates, not others, and the analysed
+rate is checked against them at use (`dadl.propagate`, council round 6, T6).
 
 **Conditions.** The dark artifact's recorded conditions are compared with the scan's
 (`dadl.propagate.condition_mismatches`): afterpulsing depends on bias and temperature, so a
@@ -144,7 +147,7 @@ from dadl.stats import Interval
 
 KIND = "deadtime-series"
 METHOD = "series-gap-mle"
-METHOD_VERSION = "8"
+METHOD_VERSION = "9"
 MIN_RUNS = 2
 MIN_GAPS = 1000
 #: Terms of the exact series for S; beyond K tau_p its two real modes.
@@ -755,9 +758,16 @@ def calibrate_deadtime_series(
         lo_hw = math.hypot(lo_hw, 1.96 * shift_sd)
         hi_hw = math.hypot(hi_hw, 1.96 * shift_sd)
         est_p = Interval(tau, max(0.0, tau - lo_hw), tau + hi_hw)
-        # Draws: a split normal matching the interval's two halves (in ps).
+        # Draws: a split normal matching the interval's two halves (in ps), for the edge density
+        # below. The stored draws (`stored`) share their afterpulse part with the dark artifact's
+        # rows: the statistical split normal on the same z plus sens . (draw_i - mean), which has
+        # the same sd (council round 6, B5).
         z = rng.standard_normal(n_draws)
+        shift = np.zeros(n_draws)
+        if ap_draws is not None and shift_sd > 0:
+            shift = (ap_draws[np.arange(n_draws) % ap_draws.shape[0]] - ap_draws.mean(axis=0)) @ sens
         tau_draws = np.maximum(0.0, tau + np.where(z < 0, z * lo_hw, z * hi_hw) / 1.96)
+        stored = np.maximum(0.0, tau + np.where(z < 0, z * (tau - low), z * (high - tau)) / 1.96 + shift)
         if union:
             # Two fits within the branch margin: an equal-weight mixture of their split normals
             # (conservative), not one split normal over the union (council round 6, B6).
@@ -765,12 +775,16 @@ def calibrate_deadtime_series(
             for k, (t_c, lo_c, hi_c) in enumerate(union):
                 lo_w, hi_w = math.hypot(t_c - lo_c, 1.96 * shift_sd), math.hypot(hi_c - t_c, 1.96 * shift_sd)
                 pick = second == bool(k)
-                tau_draws[pick] = np.maximum(0.0, t_c + np.where(z[pick] < 0, z[pick] * lo_w, z[pick] * hi_w) / 1.96)
+                zk = z[pick]
+                tau_draws[pick] = np.maximum(0.0, t_c + np.where(zk < 0, zk * lo_w, zk * hi_w) / 1.96)
+                stored[pick] = np.maximum(0.0, t_c + np.where(zk < 0, zk * (t_c - lo_c), zk * (hi_c - t_c)) / 1.96
+                                          + shift[pick])
         notes.append(f"the hard-edge (non-paralyzable) model is rejected: 2 ln(likelihood ratio) = {lr:.1f}")
     else:
         upper = math.hypot(high, 1.96 * shift_sd) if shift_sd else high
         est_p = Interval(tau, 0.0, upper)
         tau_draws = rng.uniform(0.0, upper, n_draws)
+        stored = tau_draws
         unidentified = ("dead_time_p_ps",)
         stand_in = ("dead_time_p_ps",)
 
@@ -806,7 +820,7 @@ def calibrate_deadtime_series(
     est_p = Interval(min(est_p.value, est_np.value), min(est_p.low, cap_high), cap_high)
     stat_high = min(stat_high, est_np.high)
     stat_low = min(stat_low, stat_high)
-    tau_draws = np.minimum(tau_draws, np_draws)
+    tau_draws = np.minimum(stored, np_draws)
     if not identified:
         notes.append(
             f"the hard-edge (non-paralyzable) model is not rejected (2 ln(likelihood ratio) = {lr:.2f}): "
@@ -839,9 +853,9 @@ def calibrate_deadtime_series(
             "tag_tick_ps": float(tick), "tag_tick_declared": float(tick_source == "declared"),
             "dead_time_p_stat_low_ps": float(stat_low), "dead_time_p_stat_high_ps": float(stat_high),
             "dead_time_p_u_afterpulse_ps": shift_sd,
-            # Recorded count rates and run durations of the scan (council round 6, T6); named outside
-            # the _min_/_max_ bracket convention until M5 checks them at use.
-            "scan_rate_low_cps": float(recorded.min()), "scan_rate_high_cps": float(recorded.max()),
+            # Recorded count rates and run durations of the scan (council round 6, T6). The rates are
+            # a _min_/_max_ bracket that the analysed rate must lie in at use (`dadl.propagate`).
+            "rate_min_cps": float(recorded.min()), "rate_max_cps": float(recorded.max()),
             "scan_duration_low_s": float(spans.min()), "scan_duration_high_s": float(spans.max()),
             **dark_conditions}
     if p > 0:
