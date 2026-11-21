@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -237,7 +238,14 @@ def test_a_chsh_dead_time_replicate_carries_the_dead_time_above_gaps_label():
 #:
 #:     OPENBLAS_NUM_THREADS=1 python -c "import sys; sys.path.insert(0, 'tests'); \
 #:         import test_propagation as t; t.write_r8_fixture()"
+#:
+#: The values are pinned for the platform that generated them only. On Linux CI (council round 10
+#: follow-up) floats moved by 3-5% and a predictive-check p by 0.70 -> 0.16, far beyond last-bit noise:
+#: artifact IDs hash their float contents and seed the joint draws, so a last-bit difference in a
+#: calibration gives different Monte Carlo draws downstream. Elsewhere the test skips; the coverage and
+#: propagation gates are the cross-platform check. Per-platform fixtures are owner item O20.
 R8_FIXTURE = Path(__file__).parent / "data" / "r8_gate_replicates.json"
+R8_PLATFORM = ("darwin", "arm64")
 R8_REGIMES = ("chsh-dead-time", "chsh-spad", "hom-bright", "hom-crosstalk", "hom-snspd")
 R8_REL_TOL, R8_ABS_TOL = 1e-9, 1e-12
 
@@ -308,6 +316,11 @@ def compare_to_fixture(got, pinned):
 @pytest.mark.slow
 @pytest.mark.parametrize("regime", R8_REGIMES)
 def test_the_performance_changes_leave_the_gate_replicates_unchanged(regime):
+    import platform
+
+    here = (sys.platform, platform.machine())
+    if here != R8_PLATFORM:
+        pytest.skip(f"values pinned on {R8_PLATFORM}, this is {here} (owner item O20)")
     pinned = json.loads(R8_FIXTURE.read_text())[regime]
     problems = compare_to_fixture(_flatten_replicates(regime), pinned)
     assert not problems, "\n".join(problems)
