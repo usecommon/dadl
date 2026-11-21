@@ -7,6 +7,36 @@ and is versioned separately from the packages.
 
 ## Unreleased
 
+### Behaviour changes since 0.1.1
+
+Delay artifacts from 0.1.x (method 8) still load. Their misfit flag was computed before round 8's
+(groups - 1) degrees of freedom; refit them if it matters. No method version is checked at use
+until M5a.
+
+- New refusals: an identified dark dead time above a 20% dead fraction (rate x dead time); T3
+  input without an explicit `source.type: cw` (the templates' `spdc-cw` no longer counts); the T3
+  range and a divided T3 sync in `calibrate dark` and `calibrate deadtime`; off-peak windows that
+  are not flat (pulsed light), now in CHSH too; analysed gaps that contradict the dark dead time.
+- A new override, `dead_time_contradicted`; `calibration_outside_validity` no longer covers the
+  gap tests.
+- Refusal hints give the CLI form (`--allow NAME=REASON`); a recorded condition the dataset does
+  not give names the `--condition` to pass.
+- Method versions: delay `xcorr-gaussian-mle` 8 -> 10 (T3 lattice and sync edges; T2 outputs
+  unchanged); deadtime `series-gap-mle` is new, at 8; accidentals, dark, dcr and heralding are
+  unchanged.
+- Artifacts: still `calibration/1`, with the new kind `deadtime-series`. Artifacts written by 0.1.x
+  start their validity at creation (`valid_for.from` = created); unreleased versions start it at
+  acquisition. For data taken between an old artifact's acquisition and its creation, pass the
+  validity override or rewrite the artifact with `--supersedes`.
+- Known limit: analyses hold all tags in memory (about 80-150 GB for a 10-minute 1 Mcps CHSH run;
+  chunked analysis in M9).
+- The package still reports version 0.1.1 until the next release (owner item O3).
+- Round 10: `dadl analyze` prints the overrides with their reasons and what each let through; one
+  refusal lists every `--allow` the calibrations need; raw values are no longer labelled "policy
+  modified" (they say "policy loosened for the corrected value only; raw value unchanged", and
+  the corrected value keeps "policy modified"); labels print one per line; the corrected "±" is
+  marked "(1 sd)".
+
 ### Phase 3, M0: inference library benchmark
 
 - `bench/ppl/` and the `PPL benchmark` workflow measure NumPyro, PyMC and Stan on Windows,
@@ -68,7 +98,10 @@ and is versioned separately from the packages.
   setting pair's four outcome combinations get their own accidentals (off-peak bins), live
   fraction and grid capture. The live fraction's conditional term models dead-time selection:
   at 3e6 pairs/s and 50 ns, raw S read 1.6 sigma high on average over 12 runs and the corrected
-  S 0.26 sigma (+-0.29). Efficiencies are not corrected (fair sampling stays assumed).
+  S 0.26 sigma low (+-0.29). The corrected point uses each dark artifact's reported dead time, the
+  shortest gap: an upper edge, high by about one mean gap divided by the number of gaps. The
+  interval comes from the posterior draws, so the corrected point sits low in it (about 0.4 sd for
+  S in chsh-dead-time). Efficiencies are not corrected (fair sampling stays assumed).
 - The default CHSH rule allows no correction: each of `dead_time`, `accidental_subtraction` and
   `window_capture` needs `Policy.allow("chsh", ...)`. Delay-jitter artifacts must cover all four
   channel pairs, and dark artifacts every channel, or the corrected value is refused rather than
@@ -92,6 +125,396 @@ and is versioned separately from the packages.
 - Misspecified regime `hom-crosstalk`: hom-bright with 0.1% crosstalk each way at 400 ps. It
   passes when the check flags at least 90% of replicates; clean regimes may be flagged in at
   most 1%.
+
+### Phase 3, M4: series dead-time model
+
+- Simulator: `DetectorParams.dead_time_p_ps` (setup.yaml `dead_time_p_ps`, default 0), a
+  paralyzable stage before the non-paralyzable `dead_time_ps`. Every avalanche candidate
+  (photon, dark count, afterpulse, crosstalk) restarts it, in the filter path and both event
+  loops. Two `series` cases join the shared Rust/Python test vectors.
+- `dadl.calibration.deadtime.calibrate_deadtime_series` (kind `deadtime-series`, decision D4;
+  method `series-gap-mle` 1): tau_p and tau_np from two or more illuminated acquisitions at
+  different rates. The gap law of the series chain is exact (a delay equation solved as a finite
+  series, then its dominant mode); afterpulsing is held at the dark artifact's estimates with its
+  uncertainty propagated by a linear sensitivity. tau_p's interval is the profile likelihood's;
+  when the hard-edge model is not rejected, tau_p is an upper limit (unidentified, stand-in
+  draws). The likelihood ratio against the hard-edge model is recorded.
+- CLI: `dadl simulate SETUP --deadtime-scan [--rates R1,R2,...]` (one rate per setting) and
+  `dadl calibrate deadtime SETUP --tags scan.npz [--dark DIR] --out DIR`.
+- `coverage` regimes `series-spad` and `passive-quench` (1,000 replicates each in CI; locally,
+  before the review rounds, tau_p covered 95.5% and 96.9%, tau_np 99.2% and 97.3%). tau_np is gated at least 95%: the
+  edge density is about 1 gap per tick (series-spad 1.5, passive-quench 0.7), so the shortest gap
+  equals tau_np in about 79% and 45% of replicates; the simulator's integer dead time makes the
+  tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2% and 97.3%), so it is
+  gated at least 95%; this gate has little power against edge-density errors (M10 item).
+- `python -m dadl.calibration.coverage` gains `--shard k/n --out FILE` and `merge FILES`, as the
+  propagation gate has; CI runs passive-quench in twelve shards.
+- Stays out: soft recovery of SNSPDs and passive-quench efficiency recovery. The analyses'
+  forward model uses the dark calibration's non-paralyzable dead time only. With paralysis the
+  live fraction is overestimated: for tau_p close to tau_np by about 0.5% at a 10% dead fraction
+  and 3-4% at the 20% limit, per channel (about twice that for a pair); ratios such as S and V
+  cancel much of it.
+- Review council round 1 (method `series-gap-mle` 2):
+  - the interruption check tests each scan run on its own bounds, Bonferroni over runs (runs of
+    unequal length, or taken one after another on a running clock, were flagged misfit);
+  - the survival function continues past 8 tau_p with both real modes (the tail was 20-60% low
+    near n tau_p = 1);
+  - the afterpulse kernel is averaged over each grid cell, so the profile of tau_p is smooth;
+  - `afterpulse_pending_max` is recorded, with a note above 0.5% (pending afterpulses bias tau_p
+    low and are not modelled);
+  - tau_p's point, upper end and draws are capped at tau_np's;
+  - the afterpulse uncertainty is added to tau_p's upper limit too;
+  - default scan rates are photon rates scaled by the smallest efficiency, so the avalanche rate
+    x dead time spans 0.05-0.5 over four settings (0.1 and 0.4 for two);
+  - `coverage.merge` refuses shards that disagree on the gate or its rule.
+  - coverage re-run locally at 1,000 replicates: tau_p covered 95.5% (series-spad) and 93.8%
+    (passive-quench), tau_np 99.2% and 97.3%, misfits 0.3% and 0%.
+
+- Review council round 2 (corrected values; no method version changes):
+  - a dead time known only as an upper limit gives the corrected value and its interval at the
+    bound (the two-point value was at zero, so it could fall outside its own interval); CHSH
+    records `corrected_at_zero_dead_time` and `corrected_at_bound_dead_time` in its counts as HOM
+    and fringe do. "Threshold crossed only after correction" also counts the range's ends, and a
+    range wider than the corrected value's error is labelled;
+  - a stand-in jitter (a coarse tagger's upper limit, status ok) is used at its bound and labelled
+    when the capture depends on it (every corrected analysis raised KeyError);
+  - raw CHSH fits each outcome pair's peak over the four settings and records the offsets and S
+    reweighted by the window captures; delays that miss the peaks are labelled "unequal window
+    capture" (A+ and B+ 400 ps late, declared 0: S 2.20 for 1.98, unlabelled before);
+  - corrected CHSH refuses (`Misspecified`, override `misfit_forward_model`) calibrated delays that
+    no longer match the analysed peaks: a 200 ps drift since calibration read corrected S 2.03-2.05
+    for 1.98 and passed the predictive check;
+  - the predictive check adds a start with the background from the outer bins (the floor start
+    stalled on a clean histogram whose peak fills the window: p about 1e-206);
+  - `hom_from_tags(calibrations=...)` requires `reference_delay_ps` (without it the reference was
+    treated as unsplit and V read 10 sigma low, unlabelled);
+  - fringe results carry a two-point label, record each channel's singles ratio between the max and
+    min acquisitions, and are labelled when it differs beyond 4 sigma (+3% pump drift on the max run
+    read 0.707 for 0.699);
+  - a forward-model corrected visibility above 1 is labelled, not clipped;
+  - corrected values cite only the artifacts the model read; `deadtime-series` artifacts are
+    skipped (and labelled) for HOM, fringe and CHSH; the set-level "parameter known only as an upper
+    limit" label is dropped (the forward model says which parameter); afterpulsing reported by a
+    dark artifact is labelled as not modelled; a set loaded without a `DatasetContext` is labelled;
+    the CHSH accidentals label says efficiencies are not corrected; the HOM two-point label names a
+    reference delay inside the coherence time, and the CLI warns when setup.yaml's
+    `coherence_time_ps` makes it so; the CLI's "V reads low" warning says the corrected value models
+    the capture when it does;
+  - an artifact's `valid_for` starts at `acquired` when recorded, not at `created`.
+
+- Review council round 3 (method `series-gap-mle` 3):
+  - CHSH capture balance: each outcome pair's pooled peak is refitted on a region 5 sigma wider than
+    the window with bins of sigma/3 (narrow peaks sat in one or two bins; wide ones traded their
+    offset against the background), with standard errors; S reweighted by the captures records its
+    standard deviation (`capture_sd_data`). "Unequal window capture" needs the shift to exceed half
+    a standard error and 3.29 of those deviations, or a low capture with the peak off the declared
+    delay; a low capture with the peak on it is labelled "window narrow against the pair jitter"
+    (matched delays at 495 ps jitter and a 0.8 ns window: 9/20 labelled before, 0/20 now);
+  - the delay-drift refusal adds a noise term (the artifacts' capture draws and the peak fits) and
+    records `delay_drift_diff` and `delay_drift_z`: false refusals on current artifacts were 2-65%,
+    now 0/264 in the council's runs; 200-400 ps drifts are still refused;
+  - the predictive check polishes a histogram's fit when its p is below 0.01, with a second start
+    at the highest bin (L-BFGS-B stalled with the start delay tens of ps off: p 2e-6 on clean data);
+  - the corrected CHSH label says what was modelled and what was not (it said dead time and window
+    capture were modelled when neither was); a corrected S without dark artifacts on a raw value
+    with dead-time selection is labelled so;
+  - an artifact recorded for another detector serial than the setup's is outside its validity
+    (`CalibrationSet.load(..., channels=)`, passed by the CLI); a dark dead time undercut by more than
+    max(10, 0.1%) of the analysed gaps is refused (`forward.check_dead_time_gaps`), and the shortest
+    gaps are recorded (`min_gap_ps`); both are overridable with `calibration_outside_validity`;
+  - a recorded temperature or bracket the dataset does not give is a mismatch, as a bias is; an
+    artifact with no validity range is labelled; corrected results record the dataset context they
+    were checked against (`counts["dataset"]`); two artifacts for one channel pair in either order are
+    ambiguous;
+  - the CHSH CLI prints the dead-time range when a dead time is a bound;
+  - docs: validity, tagger settings and bias are enforced at use, not only recorded;
+  - series dead time (method `series-gap-mle` 3): each run's rate is fitted on both branches of
+    n exp(-n tau_p) and the better kept (a 6e7 cps run past the count-rate maximum was fitted at
+    7e6 and biased tau_p to tau_np, 4/4 intervals excluding the truth); the profile of tau_p is
+    searched for every minimum and the interval spans those inside it. The branches differ only
+    through the afterpulses, and below the count-rate maximum the high branch at a lower tau_p can
+    fit better by up to about 4 NLL (a scan to 1e7 cps at tau_p 30 ns read 25.9 ns, interval
+    excluding 30), so the interval is joined with that of the fit held to the low branch, with a
+    note when this widens it. Without afterpulsing a run past the maximum notes both rates;
+    `survival` and `gap_cdf` accept an integer tau_p.
+
+- Review council round 4 (method `series-gap-mle` 4):
+  - deadtime method version 4: the round-3 joined interval is removed; intervals on
+    below-maximum scans are narrower (pq p90 5.1 ns from 12.9; s30 2.4 from 15.2), tau_p and the
+    fitted rates no longer jump to the high branch (about 5% of scans in round 3). Each run is
+    taken below the count-rate maximum unless the fit with runs past it is better by more than
+    `BRANCH_MARGIN` = 3 in NLL; within the margin the interval spans both fits and a note names
+    the runs (`branch_nll_gain` in the conditions). Round 3's reason for the join was wrong:
+    below the maximum the high branch fits worse in expectation (Asimov: by 2.5-5.6 NLL), not
+    better by a few. The afterpulse-sensitivity refits hold each run's branch (they jumped to the
+    other minimum: a shift sd up to 1.5e4 ps). The calibration refuses duplicate timestamps, the
+    same run twice, and an afterpulse artifact of another kind or channel, and notes a misfit one;
+  - the dead-time gap check drops its 0.9 factor (a dead time up to about 16% too long passed)
+    and adds an upward test: a shortest analysed gap more than 9 mean edge spacings above the
+    dead time's upper end is refused (22 ns calibrated on a 50 ns detector passed), for upper
+    limits too. The floor per channel is in the counts (`gap_check_floor_ps`);
+  - the detector-serial check runs on the API paths (`chsh`, `hom_from_tags`, `fringe_from_tags`
+    with calibrations), not only through `CalibrationSet.load(channels=)`;
+  - corrected CHSH runs the predictive check only with delay-jitter artifacts, as HOM and fringe
+    do (an accidentals-only corrected S was refused as a misfit);
+  - a dark artifact for only some channels gives the named error in HOM and fringe (a bare
+    `KeyError`, a CLI traceback, before);
+  - `calibrate pairs` prints the window capture from the forward model's closed form (its own
+    integral read about 0 for a narrow peak in a wide window); HOM's forward path records
+    `subtracted` 1.0; `valid_for` without `from` starts at acquisition or creation, and without
+    `to` has no end (a `KeyError` before); the schema says validity is enforced; the CLI help names
+    CHSH; the README lists the counts keys;
+  - CI: a `gates` job fails unless every coverage and propagation job passed (a failed shard
+    left its merge job skipped, which counts as passing); chsh-spad propagation runs in four
+    shards (it timed out at 45 minutes); propagation chunks keep every worker busy; the coverage
+    gate prints a line per finished chunk; a newer push to a pull request cancels its running
+    checks.
+
+- Review council round 5 (method `series-gap-mle` 5):
+  - an afterpulse still pending when a gap starts is modelled to first order (one pending
+    candidate, Exp(tau_a) after the record by memorylessness; `afterpulse_pending_max` is now its
+    fraction pi). Checked against the simulator at 6e6 and 1e7 cps; it removes a tau_p bias of
+    about -170 ps that did not shrink with data (0.5 s runs: coverage 88.1% to 92.5%, bias
+    +18 +- 19 ps). The remainder, about pi (p + pi) of gaps, is recorded as
+    `afterpulse_unmodelled`, with a note when it times sqrt(gaps) exceeds 2 (the 0.5% note is gone);
+  - `BRANCH_MARGIN` 5 (was 3): about 0.5% of below-maximum scans switched to tau_p near 30 ns,
+    every one a miss; the false-switch rate is now at most about 8e-4;
+  - `deadtime-series` artifacts cite the dark artifact's inputs, and its ID (role
+    `previous-artifact`) from the CLI; the held sds of p and tau_a are in the conditions;
+  - corrected HOM, fringe and CHSH records carry `counts["monte_carlo"]` (seed and draws);
+  - `valid_for.conditions` is enforced at use, as the top-level conditions are;
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p covered 95.5% (series-spad) and
+    94.6% (passive-quench), misses below/above 19/26 and 28/26; no branch switches, 0 and 54
+    unions; tau_np 99.2% and 97.3%; misfits 0.3% and 0.0%. These replace the earlier figures
+    (round 4, not recorded then: 93.2% passive-quench, misses mostly low);
+  - docs: dev-branch validity rule and version, schema wording on `deadtime-series`, gap-check
+    floor at low dark counts, unreleased features marked, counts keys, CLI help and refusals.
+
+- Review council round 6 (method `series-gap-mle` 6; `dark` unchanged at 7):
+  - **Behaviour change (owner to accept in the release notes):** an identified dark dead time
+    whose dead fraction at the analysed rate exceeds 20% is refused, as a bound was (it was only
+    labelled; there is no override). A 22 ns SPAD above about 9 Mcps loses its corrected value
+    until M5's series route. To correct the rest, move the dark artifacts out of the calibrations
+    folder;
+  - an SNSPD's 30 ns read as an identified 20 us in 7 of 200 default dark runs, none covering,
+    and gave V = 0.55 +- 6.2 with exit 0; the dead-fraction refusal above refuses all 7 at the
+    referee's 85 kcps. When three widths reach below zero the gap check tests the 95% lower end for
+    a label only (`DEAD_TIME_BELOW_DARK`, in `corrected_labels`; `gap_check_floor_kind` "3 widths"
+    (refusing) or "lower end (label only)"): the lower end misses in 5% of channels by design, and
+    refusing it (as first implemented) refused 42 of 200 chsh-dead-time replicates (council round 6
+    addendum). The 20 covering loose chsh-spad identifications are neither refused nor labelled.
+    `calibrate dark` warns when the lower end is more than 3x the declared dead time;
+  - results keep the corrected value's labels apart (`corrected_labels`, a new record column;
+    `all_labels` is both): threshold labels are evaluated per value, and calibration labels come
+    only from the artifacts the value used. The CLI prints them under the corrected line;
+  - forward-model HOM and fringe values carry "secondary; the headline is raw V" and the CLI
+    marks the HOM line "(secondary; not an indistinguishability claim)";
+  - corrected records carry `calibration_excludes` (the used artifacts' `uncertainty.not_included`),
+    printed on one line; stat and calibration parts print with 2 significant figures;
+  - refusal text names the analysis (HOM: "corrected values are secondary; the headline V uses raw
+    counts") and the CLI remedy; HOM analyze prints the declaration caveat; quickstart and
+    `calibrate pairs` say that CHSH window capture needs four heralding runs;
+  - series tau_np: the interval allows one tick either side and the draws add the rounding of two
+    floored times (an off-grid truth was missed every time: 0 of 400 at 25 ps; now 98.75%);
+    `tag_tick_ps` recorded. On the simulator's grid the widening is conservative by
+    construction, so the coverage gate's tau_np figure says little; the off-grid test checks the
+    tick term;
+  - series: a dark artifact recorded under other conditions (bias, temperature, tagger settings)
+    is refused unless `allow_condition_mismatch` (CLI `--allow-condition-mismatch REASON`) gives
+    a reason, which is noted; `dark_bias_V` and `dark_temperature_K` are recorded;
+  - series record: the tau_p budget (`dead_time_p_stat_low_ps`, `dead_time_p_stat_high_ps`,
+    `dead_time_p_u_afterpulse_ps`, `dtau_p_dp_ps`, `dtau_p_dtau_a`, `afterpulse_p_tau_corr_used`),
+    the scan range (`scan_rate_low_cps`, `scan_rate_high_cps`, `scan_duration_low_s`,
+    `scan_duration_high_s`), `uncertainty.kind` per kind; `lr_hard_edge` renamed
+    `two_ln_lr_hard_edge` and `afterpulse_tau_sd_held` `afterpulse_tau_ps_sd_held`; notes say
+    "2 ln(likelihood ratio)" and "avalanche-candidate rate ... s^-1"; tau_np's definition
+    separates the quantity from its estimator;
+  - union intervals are drawn as an equal-weight mixture of the two branch fits' split normals
+    (one split normal put 18% of draws in the gap between disjoint branches; now 2.8%, the
+    components' tails);
+  - printed intervals state their level ("95% interval", "95% upper limit") and round to two
+    significant figures of the smaller half-width (display only);
+  - docs: README methods section for corrected values and the limits found (identified dark dead
+    time, model-conditional calibration part, tick, four heralding runs, flat priors of stored
+    draws); phase 3 plan: M5 entry items (what NUTS samples, starts, boundaries, priors, shared
+    row index, stored draws gated, scan range at use) and M10 items; benchmark record: steady-
+    state speed;
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p covered 95.5% (series-spad) and 94.6%
+    (passive-quench), as in round 5; tau_np 99.9% and 99.0% (was 99.2% and 97.3%; conservative by
+    construction on the grid, gate "at least 95%" unchanged); misfits 0.3% and 0.0%;
+  - propagation gate at 200 replicates: hom-snspd, hom-bright, hom-crosstalk and chsh-spad
+    unchanged (94.5/94.5, 95.0/95.5, 30.5/32.5 with 100% flagged, 93.5/93.5); chsh-dead-time at 400
+    replicates: corrected 95.5%, control 87.5% (band 91.0-98.2%), misfit artifacts 0.8%, no flags,
+    no refusals (the 1,000-replicate run is CI's).
+
+- Review council round 7 (method `series-gap-mle` 7; `dark`, `delay`, `accidentals` unchanged):
+  - T3 tick: a recorded T3 gap is within one dtime resolution of the true gap whatever the sync
+    period, but a measured (non-whole) period left the tags a 1 ps tick, so tau_np widened by
+    1 ps on 25 ps data (10 of 20 covered). `PtuFile.tick_ps` and `tag_tick_ps(folder)` give the
+    dtime resolution in T3 (plus 1 ps when tags are rounded); `calibrate_deadtime_series(...,
+    tick_ps=)` takes the larger of it and the tags' own, recorded as `tag_tick_ps` with
+    `tag_tick_declared`; `calibrate deadtime` and `calibrate pairs` pass it. tau_np then covers 20 of 20;
+  - the T3 sync period (`tagger_MeasDesc_GlobalResolution`) is compared to 1e-4, within a folder
+    and at use (two files 10 Hz apart at 80 MHz were refused; 80 against 76 MHz still is);
+    mismatches print 10 significant digits and both values;
+  - T3 input from a sync source: analyses label it ("T3 input: DADL models CW light") and refuse a
+    corrected value unless the source is declared CW (`source.type: cw`, `source_type="cw"`);
+    `read_tags` carries the sync period in each acquisition's metadata (`RunTags`). A pulsed
+    76 MHz HOM read V = 0.962 +- 0.001 for a true 1, unlabelled. Behaviour change: T3 users lose
+    corrected values until they declare the source;
+  - T3 files whose dtime range is shorter than the sync period get a `t3-range` event and note,
+    and `read_tags` refuses them; T3 with `HWSync_Divider` > 1 is refused by `calibrate dark` and
+    `calibrate deadtime` and labelled by analyses (convention unverified; M9 entry item);
+  - delay-jitter and deadtime-series artifacts from another tagger (model or serial in
+    `instrument`) are outside their validity; other kinds are labelled;
+  - sharded gate merges recompute the gates from the code, refuse an empty merge, and refuse a
+    result set other than the one the recorded family (or analysis) and regimes produce;
+  - a posterior `.npy` header is checked against the manifest before the table is read (a
+    192-byte file declaring 2^52 rows raised `MemoryError`);
+  - docs and hygiene: T3 memory figure (about 170 bytes per record), the T3 limit in the READMEs,
+    `persist-credentials: false` in `ppl-bench.yml`, the CmdStan binaries removed from the tree;
+  - tests: gate verdicts on synthetic results, coverage merge tiling, channel order and declared
+    delays on HOM, fringe and CHSH, wired labels observed through the analyses, behavioural oracles
+    for the dead-time intervals, the predictive check's statistics; two seed-fragile tests reworked
+    (CHSH selection at 2 s: 20 of 20 seeds; HOM with the capture modelled: 20 of 20 within 3 se);
+    slow tests run in one Linux CI job;
+  - known: the predictive check flags clean T3 tags with a measured sync period (p about 1e-100 at
+    25 ps, 12500.3 ps); reported to the council, not loosened (xfail test);
+  - coverage re-run locally at 1,000 replicates (CI seed): tau_p 95.5% (series-spad) and 94.6%
+    (passive-quench), tau_np 99.9% and 99.0%, misfits 0.3% and 0.0%: identical to round 6 (the
+    simulator's tags are on the 1 ps grid and no tick is declared);
+  - propagation gate at 200 replicates, unchanged: hom-snspd 94.5/94.5, hom-bright 95.0/95.5,
+    hom-crosstalk 30.5/32.5 with 100% flagged, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0;
+    both sharded merges run end to end; the 44 mutants the ruling names are all killed.
+- Review council round 8 (method `xcorr-gaussian-mle` 9; `dark`, `deadtime`, `accidentals`,
+  `dcr`, `heralding` unchanged):
+  - T3 lattice: `PtuFile.lattice_ps` and `tag_lattice_ps(folder)` give the lattice pair delays sit
+    on (the whole-ps dtime resolution in T3, the tick in T2); `tick_ps` keeps its round-7 meaning
+    and serves dead-time intervals only. `calibrate pairs` passed the 26 ps gap bound as the tick
+    on 25 ps data at a measured period: delay -12 ps, jitter covered 0 of 10, every artifact a
+    misfit. It now passes the lattice and the sync period; the delay fit's off-grid note no longer
+    fires on T3 cross-sync residues. `read_tags` carries `lattice_ps`; the predictive check and the
+    CHSH peak fits bin on it, with edges half a lattice step off the delays' modal residue. T3
+    with a resolution that is not whole ps skips the check (`forward_check_note`). The round-7
+    xfail passes;
+  - delay fit: the predictive check uses (groups - 1) degrees of freedom, as the forward check
+    (groups - 5 gave p < 0.05 in 9.5% of clean SNSPD pair runs);
+  - one refusal budget: on clean data an analysis is refused at analysis time with chance at most
+    1e-3, split as the forward check 4e-4 (`MISFIT_ALPHA`), the CHSH drift 2e-4 (`DRIFT_Z` 3.72;
+    the capture label keeps 3.29 as `CAPTURE_Z`), the off-peak check 2e-4 and the gap tests 2e-4
+    (README, "Refusals and their rates"). Behaviour change;
+  - dead-time gap tests: the downward floor is point - ln(K / 1e-4) / (N f) from the dark run's
+    gap count and dark rate (`gap_check_floor_kind` "exponential law"; the 3-width floor refused
+    clean channels at 2.5e-4 to 3.7e-4); the upward threshold is 100((K / 1e-4)^(1/100) - 1)
+    edge spacings (11.2 at four channels). New label `DEAD_TIME_ABOVE_GAPS` when the dark dead
+    time is longer than many analysed gaps; the correction keeps the dark value (limit stated;
+    the fix is M5a, with the second-order pair term and a new control regime);
+  - pulsed light on T2 or plain tags read V 10-40 sd off, unlabelled. Analyses that subtract
+    accidentals now check each acquisition's off-peak windows for flatness (exact dispersion at
+    20,000 simulations, and trend; `offpeak_p`) and refuse a value whose windows are not flat
+    (`Misspecified`, override `misfit_forward_model`, then `OFFPEAK_ACCEPTED`). Behaviour change;
+  - the CHSH drift override has its own label, `DELAY_DRIFT_ACCEPTED`. The propagation gate counts
+    the predictive check, the drift and the off-peak check under their own keys (the 1% cap
+    applies to their sum) and records refused replicates by type ("refused: <type>", not covered)
+    instead of aborting; any refusal still fails a regime (tolerance: owner item O12);
+  - wording: the 20% dead-fraction refusal gives its real reasons; user-facing text no longer
+    names milestone M5;
+  - plan: M5 split into M5a (series dead time at use) and M5b (NUTS); M2b, M3b and M4b take most
+    of M10's smaller items; an owner-items section (O1-O14); D3 as-built note; dependency fixes;
+  - CI: the slow-test job is in the `gates` job's needs;
+  - delay coverage at 1,000 replicates (CI seed) identical in all six pairs regimes; delay misfits
+    fell in sparse-snspd (0.3% to 0.0%) and broad-irf (0.1% to 0.0%). Deadtime coverage identical
+    to round 7 (95.5/99.9 series-spad, 94.6/99.0 passive-quench);
+  - propagation gate at 200 replicates (CI seed), no refusals and no flags in any clean regime:
+    hom-snspd 94.5/94.5, hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0,
+    hom-crosstalk 30.5/32.5 with 100% flagged (misfit artifacts 1.0% to 0.5%). Seed 4242:
+    chsh-spad 93.0/93.0, chsh-dead-time 97.0/85.0, no refusals.
+- Review council round 9 (method `xcorr-gaussian-mle` 10; `deadtime` 7 re-pinned, code changed
+  with outputs byte-identical; `dark`, `accidentals`, `dcr`, `heralding` unchanged):
+  - off-peak check: at 20,000 fixed draws the doubled dispersion p could never reach 2e-4 / 16, so
+    only the trend half could refuse in CHSH. The dispersion test is now sequential Monte Carlo
+    (Besag-Clifford: stop at the 20th exceedance, else at 8 x sides / 2e-4 draws), seeded from the
+    counts (`offpeak_draws` in the counts). It is about 90x cheaper on clean data, refuses a pulsed
+    share of half or more of one CHSH acquisition, and passes smaller shares (limit stated).
+    Behaviour change: the off-peak check can now refuse in CHSH;
+  - upward gap test: one cable echo set the shortest gap to the dark bound and switched the test
+    off (S 2.03 for 1.98, unrefused). It now reads gap j = max(10, 0.1% of the gaps) against
+    (j + 1) F.isf(1e-4 / K, 2 (j + 1), 2M), the exact law of an exponential edge; a zero spacing
+    or NaN is refused. It loses power at low rates (stated). `DEAD_TIME_BOUND` no longer says the
+    truth lies between without "if the bound holds". `dadl analyze` labels a dark dead time below
+    half the setup's declared `dead_time_ps` (one rule with `calibrate dark`'s warning, now at
+    half);
+  - the gap tests have their own override, `dead_time_contradicted`, labelled with the problems
+    (also in `dead_time_gap_problems`). `calibration_outside_validity` no longer covers them.
+    Behaviour change;
+  - T3 delay: pair delays across a sync edge sat k r off the dtime lattice and were floored into
+    the wrong bin (-7 ps at 4.4 ns, 80 ps, 12500.3 ps, status ok). The delay fit, the predictive
+    check and the CHSH peak fits put them back on the lattice by sync-count group and fit one
+    delay with each group's peak shifted by -k r (`PairData.t3_period_ps`, from the tags'
+    metadata). T2 and periods on the lattice are unchanged;
+  - on T3 input only `source.type: cw` declares the sync a clock; the templates' `spdc-cw` is
+    refused with a sentence saying so. Behaviour change;
+  - tagger settings record `tagger_mode`; the T2 tick and the T3 period (one header key) are
+    compared only within a mode, so a T2 dark artifact covers a T3 run. Under `cw`, a changed T3
+    clock labels dark and pair artifacts instead of refusing them;
+  - refusals that name `Policy.allow` also give the CLI form (`override_hint`); the README lists
+    the override names and the condition rules; the SNSPD refusal no longer suggests a remedy no
+    command delivers; the README says detector serials are required for recorded data;
+  - recorded conditions the comparison does not understand (a temperature not named
+    `temperature_K`, or a key the dataset also gives) are labelled "recorded, not compared"; a
+    lone `_min_` or `_max_` is compared one-sided; the CLI prints `forward_check_note`;
+    `calibrate dark`, `pairs` and `deadtime` read only the settings they use, and take a single
+    .ptu file as setting 0; `dadl init` prints both first runs and the examples carry a commented
+    `hardware:` block; "no validity range" is one label listing the artifacts;
+  - performance, values unchanged: sorted input is no longer re-sorted or copied (`as_sorted`),
+    `occupied_slots` de-duplicates sorted input in one pass, CHSH memoises its grid counts, the
+    dead-time estimate takes one `np.quantile` call, and the series dead-time constants are
+    cached. Three gate replicates per regime hash as before;
+  - Known limits: analyses hold every channel's tags in memory (about 80-150 GB for a 10-minute
+    CHSH run at 1 Mcps per channel; chunked analysis is planned for M9); the off-peak check's
+    power; the gap tests' tolerance of a few short gaps; the T3 source declaration;
+  - CI: the unit jobs have a 75-minute timeout; plan: owner items O15-O18, O7 extended;
+  - delay (pairs) coverage at 1,000 replicates (CI seed) identical to round 8 in every regime;
+    deadtime coverage identical (95.5/99.9 series-spad, 94.6/99.0 passive-quench); propagation
+    gate at 200 replicates identical in all five regimes with no refusals (hom-snspd 94.5/94.5,
+    hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0, hom-crosstalk 30.5/32.5
+    with 100% flagged), in 278 s against 371 s (chsh-spad 150 to 90 s). Off-peak p < 0.01 in 0.5%
+    of clean chsh-spad and hom-snspd analyses. The named mutants and three new ones (the F
+    threshold's degrees of freedom and alpha / K, the sequential stop) are all killed.
+
+- Review council round 10 (method `series-gap-mle` 8; `delay` stays 10; `accidentals`, `dark`,
+  `dcr`, `heralding` unchanged; record in
+  [docs/reviews/2026-11-phase3-council.md](docs/reviews/2026-11-phase3-council.md)):
+  - tau_p on a coarse tick: round 1's cap stopped tau_p's upper end at the shortest gap while
+    tau_np was widened a tick above it, so a nearly fully paralyzable detector on a 25-80 ps tick
+    was covered 7-8 / 60. When the profile reaches the shortest gap, tau_p's upper end is now
+    tau_np's (60 / 60); every other fit is unchanged. Limit L2 in README and the docstring;
+  - the replicate hash of round 9 was a single-platform pin (it failed on Linux in the last bits).
+    The gate replicates are compared against a pinned values file instead
+    (`python/tests/data/r8_gate_replicates.json`): integers, strings, booleans and None exactly,
+    floats to a relative 1e-9;
+  - the "dark dead time ... longer than ... of the analysed gaps" label says how often it fires,
+    has its own wording for a bound, and is left out on a channel that already carries the
+    lower-end label or a gap problem;
+  - display: an exactly-zero calibration part prints as 0, and an interval never rounds a positive
+    end to 0;
+  - `dadl analyze`: an `Overrides:` block (name, reason, and for `calibration_outside_validity` and
+    `dead_time_contradicted` what was overridden); one pre-flight refusal naming every missing
+    `--allow`; "--allow had no effect: no corrected value"; the missing-pairs refusal and the
+    condition refusal say what to do; "rate x dead time = 2.66 (limit 0.2)" for the dead-fraction
+    refusal; new corrected labels "no predictive check (needs delay-jitter artifacts)" and, on HOM
+    and fringe, "dead time (no dark artifacts) not modelled"; labels one per line, overrides first;
+    stdout flushed before an error. `--allow` help lists all nine names; README table "Labels and
+    refusals";
+  - the propagation gate's `describe` says the control rule is not decidable below about 400
+    replicates (L1, CONTRIBUTING);
+  - review record: the summary in `docs/reviews/2026-11-phase3-council.md` and the rulings and
+    reviewer reports verbatim in `docs/reviews/phase3/` (paths scrubbed), with a test that every
+    cited id resolves;
+  - gates: deadtime coverage at 1,000 replicates (CI seed) unchanged: tau_p 95.5% and tau_np 99.9% (series-spad), 94.6% and 99.0% (passive-quench); the CI regimes use a 1 ps tick, where the widening rarely applies; propagation at 200
+    replicates identical to round 9 in all five regimes, no refusals (hom-snspd 94.5/94.5,
+    hom-bright 95.0/95.5, chsh-spad 93.5/93.5, chsh-dead-time 95.5/85.0, hom-crosstalk 30.5/32.5
+    with 100% flagged). All 48 mutants killed (the 47 of round 9 and "drop the round-10 widening", which the 20-seed coarse-tick test kills on its own).
 
 ### Published results as executable tests
 

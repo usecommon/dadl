@@ -452,7 +452,7 @@ def test_corrected_values_carry_a_label_and_tampered_records_are_refused(tmp_pat
 def hom_visibility_labels():
     from dadl.analysis.visibility import hom_visibility
 
-    return hom_visibility(1000.0, 120.0, accidentals=40.0).labels
+    return hom_visibility(1000.0, 120.0, accidentals=40.0).corrected_labels
 
 
 def test_long_delays_fit_like_short_ones():
@@ -634,11 +634,40 @@ def test_ci_coverage_matrix_runs_every_regime():
     ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
     if not ci.exists():
         pytest.skip("repository CI file not present")
-    args = re.findall(r'args: "([^"]+)"', ci.read_text(encoding="utf-8"))
+    text = ci.read_text(encoding="utf-8")
+    args = re.findall(r'args: "([^"]+)"', text)
     whole = {a.split()[0] for a in args if "--regimes" not in a}
     listed = {r for a in args if "--regimes" in a for r in a.split("--regimes")[1].split()}
+    # Sharded regimes run as their own command, summed and gated by `coverage merge`.
+    if "dadl.calibration.coverage merge" in text:
+        listed |= {r for m in re.findall(r"dadl\.calibration\.coverage \w+ --regimes ([\w -]+?) --", text)
+                   for r in m.split()}
     for family, regimes in UNITS.items():
         assert family in whole or set(regimes) <= listed, family
+    # Council round 4 (C6): the propagation regimes too, and every sharded gate merged and gated.
+    import yaml
+
+    from dadl.analysis.propagation import REGIMES
+
+    jobs = yaml.safe_load(text)["jobs"]
+    runs = [step.get("run", "") for job in jobs.values() for step in job.get("steps", [])]
+    matrix = [part for job in jobs.values() for part in job.get("strategy", {}).get("matrix", {}).get("part", [])]
+    shards = jobs["propagation-shard"]["strategy"]["matrix"]["include"]
+    sharded = {s["regime"] for s in shards}
+    covered = {r for p in matrix if p["args"].split()[0] in ("hom", "chsh") for r in p["args"].split("--regimes")[1].split()}
+    assert set(REGIMES) <= covered | sharded and not covered & sharded
+    for regime in sharded:
+        mine = [s for s in shards if s["regime"] == regime]
+        of = {s["of"] for s in mine}
+        assert len(of) == 1 and sorted(s["shard"] for s in mine) == list(range(1, of.pop() + 1)), regime
+    assert sharded == set(jobs["propagation-merge"]["strategy"]["matrix"]["regime"])
+    assert any("dadl.analysis.propagation merge" in r for r in runs)
+    for merge_job, shard_job in (("coverage-merge", "coverage-shard"), ("propagation-merge", "propagation-shard")):
+        assert jobs[merge_job]["needs"] in (shard_job, [shard_job]), merge_job
+    gates = jobs["gates"]
+    assert gates["if"] == "always()"
+    gate_jobs = {"coverage", "coverage-shard", "coverage-merge", "propagation", "propagation-shard", "propagation-merge"}
+    assert gate_jobs <= set(gates["needs"])
 
 
 # --- Cycle 7 -----------------------------------------------------------------------------------

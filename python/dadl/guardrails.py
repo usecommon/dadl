@@ -7,7 +7,18 @@ the headline) and where its coincidence window may come from.
 Users may loosen a rule, but never silently: loosening goes through
 `Policy.allow`, which needs a written reason; every result records the
 policy fingerprint and the overrides with their reasons, and any policy
-that differs from the shipped default is labelled "policy modified".
+that differs from the shipped default is labelled "policy modified" (on the
+raw value, "policy loosened for the corrected value only; raw value
+unchanged" when only corrections were allowed; council round 10).
+
+Refusals and their rates (council round 8): on clean data within the tested regimes, DADL refuses
+an analysis at analysis time with probability at most 1 in 1,000, all checks together: the
+forward-model check 4e-4, the CHSH delay-drift check 2e-4, the off-peak flatness check 2e-4, and
+the dead-time gap tests 2e-4. Each check corrects for its own number of channels or acquisitions.
+Separately, a calibration whose model check fails (p < 0.001 per artifact) is not written; a CHSH
+calibration set of eight artifacts meets this in under 1% of sets, and the remedy is to re-take
+that calibration run. Labels are not refusals: some fire on a few percent of clean analyses, and
+their text says how often.
 
 What this does not do in phase 1: it cannot verify that a window declared as
 coming from the plan really was fixed before acquisition, and it trusts the
@@ -22,12 +33,16 @@ import json
 import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from dadl.errors import GuardrailRefusal
 from dadl.result import Estimate
 
 POLICY_MODIFIED = "policy modified"
+#: On a raw value when every override only allows corrections: raw values use none (council round
+#: 10, Ux2: "S = 2.6941 ± 0.0105 (policy modified)" read as corrected). The corrected value keeps
+#: `POLICY_MODIFIED`.
+POLICY_CORRECTED_ONLY = "policy loosened for the corrected value only; raw value unchanged"
 THRESHOLD_AFTER_CORRECTION = "threshold crossed only after correction"
 NEAR_THRESHOLD = "within 1.96 sigma of the threshold"
 GAUSSIAN_INVALID = "Gaussian error invalid at boundary (stderr is zero)"
@@ -60,6 +75,24 @@ INTERRUPTED = (
     "interrupted: a channel has a gap far longer than its count rate allows (latch, shutdown or lost data); "
     "the result is not reliable"
 )
+#: Council round 7 (G3, G5): PTU T3 input comes from a sync (usually pulsed) source.
+T3_INPUT = "T3 input: DADL models CW light (see README)"
+T3_SOURCE_REFUSAL = (
+    "T3 input from a sync source: the side-window accidentals assume CW light; pulsed accidentals sit in side "
+    "peaks. Declare `source.type: cw` in the setup if the source is CW and the sync is a clock only"
+)
+#: Added to `T3_SOURCE_REFUSAL` for `spdc-cw` (council round 9, Rd3).
+T3_TEMPLATE_SOURCE = (
+    "; the template's spdc-cw is the default and does not count: declare source.type: cw if the sync is a clock only"
+)
+T3_DIVIDER = (
+    "T3 sync divider {divider}: the divider convention is unverified; rates may be off by the divider"
+)
+#: Source types that declare CW light (`source_type=`, setup.yaml's `source.type`).
+CW_SOURCE_TYPES = ("cw", "spdc-cw")
+#: On T3 input only this explicit type declares the sync a clock (council round 9, Rd3): the
+#: templates' `spdc-cw` is the default and did not count as a declaration.
+T3_CLOCK_SOURCE = "cw"
 
 #: Corrections the library knows how to apply. `Policy.allow` refuses others.
 KNOWN_CORRECTIONS = frozenset(
@@ -75,6 +108,9 @@ KNOWN_CORRECTIONS = frozenset(
         # a misfit artifact, and one whose validity or conditions do not cover the dataset.
         "misfit_calibration",
         "calibration_outside_validity",
+        # The analysed gaps contradicting a dark dead time (dadl.forward.check_dead_time_gaps;
+        # council round 9: no longer under calibration_outside_validity).
+        "dead_time_contradicted",
         # The forward model's predictive check failing on the analysed data (dadl.forward_check).
         "misfit_forward_model",
     }
@@ -125,6 +161,15 @@ DEFAULT_RULES: Mapping[str, AnalysisRule] = MappingProxyType(
             allowed_corrections=frozenset({"accidental_subtraction"}),
             window_sources=frozenset({"plan"}),
         ),
+    }
+)
+
+#: Why a correction is refused by default, per analysis (the refusal text).
+REFUSAL_REASONS: Mapping[str, str] = MappingProxyType(
+    {
+        "chsh": "Bell-type headline numbers use raw counts only",
+        "bell_visibility": "Bell-type headline numbers use raw counts only",
+        "hom_visibility": "corrected values are secondary; the headline V uses raw counts",
     }
 )
 
@@ -205,8 +250,9 @@ class Policy:
     def allow(self, analysis: str, correction: str, reason: str) -> Policy:
         """Return a new policy that allows `correction` for `analysis`.
 
-        A written reason is mandatory. Results under the new policy carry the
-        "policy modified" label and record the override with its reason.
+        A written reason is mandatory. Corrected values under the new policy carry
+        the "policy modified" label (raw values say they are unchanged), and results
+        record the override with its reason.
         """
         if correction not in KNOWN_CORRECTIONS:
             raise ValueError(f"unknown correction {correction!r}; known: {sorted(KNOWN_CORRECTIONS)}")
@@ -221,10 +267,12 @@ class Policy:
 
     def check_correction(self, analysis: str, correction: str) -> None:
         if correction not in self.rule_for(analysis).allowed_corrections:
+            # Council round 6 (R7): HOM refusals read "Bell-type headline numbers".
+            why = REFUSAL_REASONS.get(analysis, "corrections are secondary values, allowed one by one")
             raise GuardrailRefusal(
-                f"Correction '{correction}' is not allowed for '{analysis}'. "
-                "Bell-type headline numbers use raw counts only; see docs/design.md, "
-                "'Scientific guardrails'."
+                f"Correction '{correction}' is not allowed for '{analysis}': {why}. Allow it with a written reason "
+                f"(Policy.allow({analysis!r}, {correction!r}, reason); on the CLI, --allow {correction}=REASON); see "
+                "docs/design.md, 'Scientific guardrails'."
             )
 
     def check_window(self, analysis: str, window_source: str) -> None:
@@ -236,9 +284,13 @@ class Policy:
             )
 
     def labels_for(self, analysis: str) -> tuple[str, ...]:
+        """The raw value's policy labels. Overrides only allow corrections, which a raw value never
+        uses: when they are the only change from the default, the label says the raw value is
+        unchanged (`POLICY_CORRECTED_ONLY`); rules changed in any other way give `POLICY_MODIFIED`."""
         labels: list[str] = []
         if self.is_modified:
-            labels.append(POLICY_MODIFIED)
+            only_overrides = self.overrides and not Policy(rules=self.rules).is_modified
+            labels.append(POLICY_CORRECTED_ONLY if only_overrides else POLICY_MODIFIED)
         if analysis not in DEFAULT_RULES:
             labels.append(UNVALIDATED_ANALYSIS)
         return tuple(labels)
@@ -267,10 +319,14 @@ def _mirror(est: Estimate) -> Estimate:
     return Estimate(-est.value, est.stderr, low, high)
 
 
-def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = None) -> tuple[str, ...]:
+def threshold_labels(
+    analysis: str, raw: Estimate, corrected: Estimate | None = None, ends: Sequence[float] = ()
+) -> tuple[str, ...]:
     """Labels that qualify a value against the analysis's physical threshold.
 
-    - "threshold crossed only after correction": raw is below, corrected at or above.
+    - "threshold crossed only after correction": raw is below, and the corrected value or one of
+      `ends` (the corrected value at the ends of a range, such as a dead time from zero to its
+      bound) at or above.
     - "within 1.96 sigma of the threshold": the 95 % Gaussian interval of the
       headline (raw) value, or of the corrected value, contains the threshold.
     - "Gaussian error invalid at boundary": a stderr of zero (e.g. a correlator
@@ -282,12 +338,13 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
         # S = -2.01 +- 0.02 carried no label).
         raw = _mirror(raw)
         corrected = None if corrected is None else _mirror(corrected)
+        ends = [-e for e in ends]
     if raw.stderr == 0 or (corrected is not None and corrected.stderr == 0):
         labels.append(GAUSSIAN_INVALID)
     threshold = THRESHOLDS.get(analysis)
     if threshold is None:
         return tuple(labels)
-    if corrected is not None and raw.value < threshold <= corrected.value:
+    if corrected is not None and raw.value < threshold <= max((corrected.value, *ends)):
         labels.append(THRESHOLD_AFTER_CORRECTION)
     for est in (raw, corrected):
         if est is None:
@@ -300,3 +357,58 @@ def threshold_labels(analysis: str, raw: Estimate, corrected: Estimate | None = 
             labels.append(NEAR_THRESHOLD)
             break
     return tuple(labels)
+
+
+def _near(est: Estimate, threshold: float) -> str | None:
+    if est.low is not None and est.high is not None:
+        return NEAR_THRESHOLD_EXACT if est.low <= threshold <= est.high else None
+    return NEAR_THRESHOLD if abs(est.value - threshold) < 1.96 * est.stderr else None
+
+
+def corrected_threshold_labels(
+    analysis: str, raw: Estimate, corrected: Estimate, ends: Sequence[float] = ()
+) -> tuple[str, ...]:
+    """The threshold labels of the corrected value alone (council round 6, R2: they were printed on
+    the raw line): "threshold crossed only after correction" (raw below, the corrected value or one
+    of `ends` at or above), the corrected interval containing the threshold, and a zero stderr."""
+    if analysis == "chsh" and raw.value < 0:
+        raw, corrected = _mirror(raw), _mirror(corrected)
+        ends = [-e for e in ends]
+    labels: list[str] = []
+    if corrected.stderr == 0:
+        labels.append(GAUSSIAN_INVALID)
+    threshold = THRESHOLDS.get(analysis)
+    if threshold is None:
+        return tuple(labels)
+    if raw.value < threshold <= max((corrected.value, *ends)):
+        labels.append(THRESHOLD_AFTER_CORRECTION)
+    near = _near(corrected, threshold)
+    if near:
+        labels.append(near)
+    return tuple(labels)
+
+
+def override_hint(analysis: str, correction: str) -> str:
+    """How to override a refusal, in Python and on the CLI (council round 9, Tw4)."""
+    return f"Override with Policy.allow({analysis!r}, {correction!r}, reason); on the CLI, --allow {correction}=REASON."
+
+
+def t3_input(runs: Mapping, source_type: str | None, corrected: bool) -> tuple[tuple[str, ...], bool]:
+    """Labels for runs read from PTU T3 files (`dadl.data.RunTags` metadata), and whether a
+    corrected value may be computed.
+
+    On T3 input a corrected value is refused (`GuardrailRefusal`) when `corrected` (one is asked
+    for) and the source is not declared `cw`; when it is not asked for, the second value is False
+    if the source is not declared `cw`. Only an explicit `cw` counts: the templates' `spdc-cw` is
+    the default (council round 9, Rd3). Other input passes unlabelled.
+    """
+    metas = [m for m in (getattr(r, "metadata", None) for r in runs.values()) if m and m.get("sync_period_ps")]
+    if not metas:
+        return (), True
+    labels = [T3_INPUT]
+    dividers = sorted({int(m["sync_divider"]) for m in metas if m.get("sync_divider")})
+    labels += [T3_DIVIDER.format(divider=d) for d in dividers]
+    cw = source_type == T3_CLOCK_SOURCE
+    if corrected and not cw:
+        raise GuardrailRefusal(T3_SOURCE_REFUSAL + (T3_TEMPLATE_SOURCE if source_type == "spdc-cw" else ""))
+    return tuple(labels), cw

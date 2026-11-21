@@ -27,12 +27,14 @@ REQUIRED_KEYS = ("schema_version", "name", "source", "detectors", "analysis")
 MAX_FILE_BYTES = 1_000_000
 
 TOP_LEVEL_KEYS = frozenset(REQUIRED_KEYS) | {"backend", "seed", "channels", "policy", "hardware"}
-#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned).
-SOURCE_TYPES = ("spdc-cw",)
+#: Source models DADL implements. Pulsed sources need slots locked to the laser (planned). "cw"
+#: declares CW light without naming the process; on PTU T3 input only an explicit "cw" lets the
+#: analyses correct (council round 7, G3; round 9, Rd3: "spdc-cw" is the templates' default).
+SOURCE_TYPES = ("spdc-cw", "cw")
 HARDWARE_KEYS = frozenset({"tagger", "detectors"})
 DETECTOR_KEYS = frozenset(
     {"family", "efficiency", "dark_rate_cps", "dead_time_ps", "jitter_sigma_ps", "afterpulse_prob",
-     "afterpulse_tau_ps", "delay_ps"}
+     "afterpulse_tau_ps", "delay_ps", "dead_time_p_ps"}
 )
 SOURCE_KEYS = frozenset({"type", "pair_rate_per_s", "visibility", "coherence_time_ps"})
 ANALYSIS_KEYS = frozenset({"type", "settings_deg", "duration_s_per_setting", "window", "reference_delay_ps"})
@@ -80,6 +82,8 @@ class Setup:
     detector_serials: dict[str, str] = field(default_factory=dict)
     #: HOM only: the path delay of the reference acquisition, far from the dip.
     reference_delay_ps: float | None = None
+    #: `source.type` as declared in the file, or None when it is left out (the default spdc-cw).
+    source_type: str | None = None
 
     def channel_id(self, name: str):
         """The ChannelId of a channel name: tagger serial (or "sim") and input number, with role and detector."""
@@ -217,7 +221,8 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         seed = _wrap("seed", _checks.integer, seed, "seed", minimum=0)
     if data.get("policy", "default") != "default":
         raise ConfigError(
-            "policy must be 'default' in phase 1; loosen rules in code with Policy.allow(analysis, correction, reason)"
+            "policy must be 'default' in phase 1; loosen rules in code with Policy.allow(analysis, correction, reason); "
+            "on the CLI, --allow NAME=REASON"
         )
 
     # source
@@ -335,4 +340,5 @@ def parse_setup(data: dict[str, Any]) -> Setup:
         tagger=tagger,
         detector_serials=serials,
         reference_delay_ps=reference_delay,
+        source_type=src.get("type"),
     )

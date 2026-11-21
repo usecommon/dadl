@@ -42,3 +42,14 @@ def test_float_times_refused():
 def test_delay_overflow_refused():
     with pytest.raises(OverflowError):
         grid_coincidences(a(2**63 - 6), a(0), 1000, delay_a_ps=-100)
+
+
+def test_occupied_slots_equal_np_unique_on_sorted_and_unsorted_input():
+    # Council round 9 (Pf2): sorted input is de-duplicated in one pass; the result is np.unique's.
+    from dadl.coincidences import as_sorted, occupied_slots
+
+    rng = np.random.default_rng(1)
+    t = np.sort(rng.integers(0, 10**9, 50_000)).astype(np.int64)
+    for x in (t, t[::-1].copy(), rng.permutation(t), np.repeat(t[:10], 3)):
+        assert np.array_equal(occupied_slots(x, 1_000, 7), np.unique(np.floor_divide(x - 7, 1_000)))
+    assert as_sorted(t) is t and np.array_equal(as_sorted(t[::-1]), t)

@@ -128,18 +128,34 @@ def test_analyze_with_calibrations(tmp_path, capsys):
     assert main(["calibrate", "pairs", str(setup), "--tags", str(her), "--no-analysers", "--herald", "A", "--signal", "B", "--out", str(art)]) == 0
     assert main(["simulate", str(setup), "--out", str(tags)]) == 0
     capsys.readouterr()
-    # Dead time is not in the default HOM rule (decision D10): refused without --allow.
+    # Dead time is not in the default HOM rule (decision D10), and the delay-jitter artifact brings
+    # window capture, also an explicit override: one refusal names both (council round 10, Ux4: the
+    # user advocate needed a run per refusal).
     assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art)]) == 1
-    assert "dead_time" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.count("dadl: error") == 1
+    assert "--allow dead_time=REASON --allow window_capture=REASON" in err
     args = ["analyze", str(setup), "--tags", str(tags), "--calibrations", str(art), "--allow", "dead_time=calibrated from dark runs"]
-    assert main(args) == 1  # the delay-jitter artifact brings window capture, also an explicit override
-    assert "window_capture" in capsys.readouterr().err
+    assert main(args) == 1
+    err = capsys.readouterr().err
+    assert "--allow window_capture=REASON" in err and "dead_time=" not in err
     assert main([*args, "--allow", "window_capture=delay and jitter from a pair run"]) == 0
     out = capsys.readouterr().out
     assert "Corrected (forward model: dead time, then accidental subtraction, then window capture): V = 0.9" in out
     assert "Calibrations: " in out and "(modified)" in out
+    # Council round 10 (Ux1): the overrides and their reasons are printed.
+    assert ("  Overrides:\n    dead_time: calibrated from dark runs\n"
+            "    window_capture: delay and jitter from a pair run\n") in out
     # --allow needs a reason.
     assert main(["analyze", str(setup), "--tags", str(tags), "--allow", "dead_time"]) == 1
+    # Council round 4 (S2): a dark artifact for A only gave a KeyError traceback; now the reason.
+    one = tmp_path / "one"
+    assert main(["calibrate", "dark", str(setup), "--tags", str(dark), "--channel", "A", "--out", str(one)]) == 0
+    capsys.readouterr()
+    assert main(["analyze", str(setup), "--tags", str(tags), "--calibrations", str(one), "--allow",
+                 "dead_time=calibrated from dark runs"]) == 1
+    err = capsys.readouterr().err
+    assert "every channel needs one" in err and "Traceback" not in err
 
 
 def test_analyze_chsh_with_calibrations_needs_the_policy_and_every_pair(tmp_path, capsys):
@@ -159,3 +175,204 @@ def test_analyze_chsh_with_calibrations_needs_the_policy_and_every_pair(tmp_path
     capsys.readouterr()
     assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 1
     assert "every channel pair" in capsys.readouterr().err
+
+
+def test_analyze_chsh_prints_the_dead_time_range(tmp_path, capsys):
+    # Council round 3 (R5): with every dead time a bound the CHSH CLI printed the label "counts give
+    # the value at zero" but not the range.
+    tags, dark, art = tmp_path / "chsh.npz", tmp_path / "dark.npz", tmp_path / "dark-art"
+    assert main(["simulate", "chsh-spad", "--out", str(tags)]) == 0
+    assert main(["simulate", "chsh-spad", "--dark", "--duration-s", "2", "--out", str(dark)]) == 0
+    assert main(["calibrate", "dark", "chsh-spad", "--tags", str(dark), "--out", str(art)]) in (0, 1)
+    capsys.readouterr()
+    allow = ["--allow", "dead_time=dark runs", "--allow", "accidental_subtraction=off-peak bins"]
+    assert main(["analyze", "chsh-spad", "--tags", str(tags), "--calibrations", str(art), *allow]) == 0
+    out = capsys.readouterr().out
+    assert "Dead time known only as an upper limit: S = " in out and " at zero, " in out and " at the bound" in out
+
+
+def _pulsed(period, n_pulses, rng, p_single=0.01, p_pair=0.0, jitter=50.0):
+    """A pulsed source: per pulse, A and B each click with p_single, and a pair with p_pair."""
+    k = np.arange(n_pulses)
+    a, b, pair = (rng.random(n_pulses) < p for p in (p_single, p_single, p_pair))
+    out = {}
+    for name, hit in (("A", a | pair), ("B", b | pair)):
+        t = k[hit] * period + rng.normal(0, jitter, int(hit.sum())) + 1000
+        out[name] = np.unique(t.astype(np.int64))
+    return out
+
+
+def test_pulsed_t3_input_needs_a_declared_cw_source():
+    # Council round 7 (G3): at 76 MHz the side windows sample random phases of the pulse train and
+    # the accidentals read about W / period low; the corrected V was 0.962 for a true 1, unlabelled.
+    from dadl.data import RunTags
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import T3_INPUT
+
+    period = 13157.9
+    rng = np.random.default_rng(2)
+    plain = {"dip": _pulsed(period, 2_000_000, rng), "reference": _pulsed(period, 2_000_000, rng, p_pair=0.002)}
+    meta = {"mode": "T3", "sync_period_ps": period, "tick_ps": 2}
+    runs = {k: RunTags(v, metadata=meta) for k, v in plain.items()}
+    w = Window(1000, "plan")
+    with pytest.raises(GuardrailRefusal, match="Declare `source.type: cw`"):
+        hom_from_tags(runs, w, subtract_accidentals=True)
+    result, counts = hom_from_tags(runs, w)
+    assert result.corrected is None and T3_INPUT in result.labels
+    # Declared CW (the sync a clock only), the off-peak windows still show the pulse train: refused
+    # (council round 8, Ph3), and under the override computed and labelled. Here it is wrong.
+    from dadl.analysis._twopoint import OFFPEAK_ACCEPTED
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w, source_type="cw")
+    loose = Policy.default().allow("hom_visibility", "misfit_forward_model", "test")
+    declared, _ = hom_from_tags(runs, w, source_type="cw", policy=loose)
+    assert declared.corrected is not None and T3_INPUT in declared.labels
+    assert OFFPEAK_ACCEPTED in declared.corrected_labels
+    assert counts["accidentals"] < 0.5 * counts["c_min"]
+    # T2 input (no sync period) is not labelled T3, and the off-peak check refuses it the same way.
+    t2 = {k: RunTags(v, metadata={"mode": "T2", "tick_ps": 1}) for k, v in plain.items()}
+    for r in (t2, plain):
+        with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+            hom_from_tags(r, w)
+        res, _ = hom_from_tags(r, w, policy=loose)
+        assert res.corrected is not None and T3_INPUT not in res.labels
+
+
+def test_hom_takes_a_delay_artifact_in_either_channel_order(tmp_path):
+    # Council round 7 (Q2): every artifact in the tests was in analysis order, every window delay 0;
+    # a sign error in the capture moved V by about 15 se unnoticed.
+    from test_forward import CA, CB, SIGN_DET, SIGN_LATE, assert_same_correction, sign_sets
+
+    from dadl.guardrails import Policy
+    from dadl.sim import simulate_pairs
+
+    rng = np.random.default_rng(30)
+    policy = Policy.default().allow("hom_visibility", "window_capture", "test")
+    sets = sign_sets(tmp_path, "hom_visibility", policy, {(CA, CB): simulate_pairs(2e5, SIGN_DET, SIGN_LATE, 0.05, rng)})
+    src = PairSource(pair_rate_per_s=2e5, visibility=0.92, coherence_time_ps=1.5)
+    runs = {k: simulate_hom(src, SIGN_DET, SIGN_LATE, d, 0.2, rng) for k, d in (("dip", 0.0), ("reference", 15.0))}
+    window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
+    ab, ba = (hom_from_tags(runs, window, policy=policy, calibrations=c, channels=(CA, CB), seed=2,
+                            reference_delay_ps=15.0) for c in sets)
+    assert ab[0].corrections == ("accidental_subtraction", "window_capture")
+    assert_same_correction(ab, ba)
+    c = ab[0].corrected
+    assert abs(c.value - 0.92) < 4 * c.stderr
+
+
+def test_the_predictive_check_looks_at_the_declared_delay(tmp_path):
+    # Council round 7 (Q2): crosstalk 100 ps beside the pair peak at the declared +400 ps is
+    # flagged; checked at -400 ps (a sign error) the window holds no peak and passes.
+    from test_forward import CA, CB, SIGN_DET, SIGN_LATE, sign_sets
+
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+    from dadl.sim import Crosstalk, simulate_pairs
+
+    rng = np.random.default_rng(33)
+    policy = Policy.default().allow("hom_visibility", "window_capture", "test")
+    ab, _ = sign_sets(tmp_path, "hom_visibility", policy, {(CA, CB): simulate_pairs(2e5, SIGN_DET, SIGN_LATE, 0.05, rng)})
+    src = PairSource(pair_rate_per_s=2e5, visibility=0.92, coherence_time_ps=1.5)
+    xt = (Crosstalk("A", "B", 0.02, 500.0, 20.0),)
+    runs = {k: simulate_hom(src, SIGN_DET, SIGN_LATE, d, 0.2, rng, xt) for k, d in (("dip", 0.0), ("reference", 15.0))}
+    window = Window(width_ps=200, source="plan", delays_ps={"B": 400})
+    with pytest.raises(Misspecified):
+        hom_from_tags(runs, window, policy=policy, calibrations=ab, channels=(CA, CB), seed=2, reference_delay_ps=15.0)
+
+
+# --- Council round 8: pulsed light on T2 and plain tags (Ph3, Fix 5) ----------------------------
+
+
+def _pulsed_plain(period, n_pulses, rng, jitter=50.0):
+    """A HOM pair of acquisitions from a pulsed source as plain tags (no T3 metadata): 1% singles
+    per pulse on each detector, and same-pulse pairs at 0.2% per pulse in the reference only."""
+    def run(p_pair):
+        k = np.arange(n_pulses)
+        a, b, pr = (rng.random(n_pulses) < p for p in (0.01, 0.01, p_pair))
+        out = {}
+        for name, hit in (("A", a | pr), ("B", b | pr)):
+            t = k[hit] * period + rng.normal(0, jitter, int(hit.sum())) + 1000
+            out[name] = np.unique(t.astype(np.int64))
+        return out
+
+    return {"dip": run(0.0), "reference": run(0.002)}
+
+
+def test_pulsed_light_on_plain_tags_is_refused_off_peak():
+    # r8-council pulsed_t2.py: at a 13157.9 ps period the side windows sample random phases of the
+    # pulse train, the accidentals read low and V came out 0.96 for a true 1, unlabelled.
+    from dadl.analysis._twopoint import OFFPEAK_ACCEPTED
+    from dadl.errors import Misspecified
+    from dadl.guardrails import Policy
+
+    w = Window(1000, "plan")
+    runs = _pulsed_plain(13_157.9, 2_000_000, np.random.default_rng(2))
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w)
+    raw, counts = hom_from_tags(runs, w, subtract_accidentals=False)
+    assert raw.corrected is None and "offpeak_p" not in counts
+    loose = Policy.default().allow("hom_visibility", "misfit_forward_model", "test")
+    res, counts = hom_from_tags(runs, w, policy=loose)
+    assert OFFPEAK_ACCEPTED in res.corrected_labels and counts["offpeak_p"] < 2e-4
+
+
+def test_pulsed_light_at_a_period_on_the_window_grid_is_not_refused():
+    # Every shift lands on a pulse: the off-peak estimate is right and the windows are flat.
+    runs = _pulsed_plain(12_500.0, 2_000_000, np.random.default_rng(2))
+    _, counts = hom_from_tags(runs, Window(1000, "plan"))
+    assert counts["offpeak_p"] > 0.01
+
+
+@pytest.mark.slow
+def test_the_off_peak_check_is_calibrated_on_clean_hom_snspd():
+    # Council round 8 (Fix 5): off-peak p below 0.01 in at most 2% of 200 clean hom-snspd analyses
+    # (council: 0.25% at the Bonferroni over the two acquisitions).
+    from dadl.analysis.propagation import REGIMES
+
+    reg = REGIMES["hom-snspd"]
+    rng = np.random.default_rng(31)
+    w = Window(reg.window_ps, "plan")
+    ps = []
+    for _ in range(200):
+        runs = {k: simulate_hom(reg.source, reg.detector, reg.detector, d, reg.duration_s, rng)
+                for k, d in (("dip", 0.0), ("reference", reg.reference_delay_ps))}
+        ps.append(hom_from_tags(runs, w)[1]["offpeak_p"])
+    assert np.mean(np.array(ps) < 0.01) <= 0.02
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def test_the_template_s_spdc_cw_does_not_declare_a_t3_clock():
+    # Council round 9 (Rd3, the red team's t3cw.py): every template declares spdc-cw, which skipped
+    # the T3 declaration; a pulsed 12525 ps period off the side-window comb then read V 0.95 for 1.
+    from dadl.data import RunTags
+    from dadl.errors import GuardrailRefusal, Misspecified
+
+    period = 13157.9
+    rng = np.random.default_rng(2)
+    plain = {"dip": _pulsed(period, 2_000_000, rng), "reference": _pulsed(period, 2_000_000, rng, p_pair=0.002)}
+    runs = {k: RunTags(v, metadata={"mode": "T3", "sync_period_ps": period, "tick_ps": 2}) for k, v in plain.items()}
+    w = Window(1000, "plan")
+    with pytest.raises(GuardrailRefusal, match="the template's spdc-cw is the default and does not count"):
+        hom_from_tags(runs, w, source_type="spdc-cw", subtract_accidentals=True)
+    result, _ = hom_from_tags(runs, w, source_type="spdc-cw")
+    assert result.corrected is None
+    with pytest.raises(Misspecified, match="off-peak windows are not flat"):
+        hom_from_tags(runs, w, source_type="cw")
+
+
+def test_analyses_do_not_modify_the_caller_s_tags():
+    # Council round 9 (Pf3): as_sorted returns the caller's array when it is already in order, so
+    # nothing downstream may write into it.
+    import copy
+
+    noisy = DetectorParams(efficiency=0.8, dark_rate_cps=2e5, dead_time_ps=30_000, jitter_sigma_ps=10)
+    rng = np.random.default_rng(3)
+    runs = {"dip": simulate_hom(SRC, noisy, noisy, 0.0, 0.2, rng), "reference": simulate_hom(SRC, noisy, noisy, 40.0, 0.2, rng)}
+    before = copy.deepcopy(runs)
+    hom_from_tags(runs, Window(width_ps=1000, source="plan"))
+    assert all(np.array_equal(runs[k][c], before[k][c]) for k in runs for c in runs[k])

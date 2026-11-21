@@ -29,7 +29,7 @@ from dadl.closed_form import heralding_ratio_expected, nonparalyzable_measured_r
 from dadl.coincidences import grid_coincidences
 from dadl.data import ChannelId
 from dadl.errors import GuardrailRefusal
-from dadl.guardrails import POLICY_MODIFIED, THRESHOLD_AFTER_CORRECTION, Policy
+from dadl.guardrails import POLICY_CORRECTED_ONLY, POLICY_MODIFIED, THRESHOLD_AFTER_CORRECTION, Policy
 from dadl.sim import DetectorParams, PairSource, detect, poisson_times, simulate_chsh_setting, simulate_pairs
 
 BELL_VISIBILITY_THRESHOLD = 1.0 / math.sqrt(2.0)
@@ -100,8 +100,9 @@ def test_subtracted_visibility_reproduces_the_published_82_percent_only_under_a_
     assert r.raw.value < BELL_VISIBILITY_THRESHOLD < r.corrected.value
     # Subtraction recovers the injected pair visibility (it is the pairs' V, not the data's).
     assert r.corrected.value == pytest.approx(FRINGE_SOURCE.visibility, abs=3 * r.corrected.stderr + 0.01)
-    assert POLICY_MODIFIED in r.labels
-    assert THRESHOLD_AFTER_CORRECTION in r.labels
+    # Council round 10 (Ux2): "policy modified" is on the corrected value; the raw value says it is unchanged.
+    assert POLICY_MODIFIED in r.corrected_labels and POLICY_CORRECTED_ONLY in r.labels
+    assert THRESHOLD_AFTER_CORRECTION in r.corrected_labels
 
 
 # --- 2. The coincidence-time loophole (arXiv:1503.07573, arXiv:1309.0712) ---------------------------

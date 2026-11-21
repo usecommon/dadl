@@ -127,6 +127,12 @@ def _utc(ts: _dt.datetime) -> str:
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
+#: What a kind's intervals include, where it is more than counting statistics (council round 6, T3).
+UNCERTAINTY_KINDS = {
+    "deadtime-series": "statistical, with afterpulse parameters propagated from the cited dark artifact by linear "
+    "sensitivity",
+}
+
 
 def _summary_entry(cal: Calibration, name: str, iv: Any) -> dict[str, Any]:
     """Value, interval, unit and definition; a limit-only parameter has value null and a bound.
@@ -183,7 +189,8 @@ def build_manifest(
 
     `created` (when the record was made) defaults to now (UTC); pass it explicitly to reproduce an
     artifact: with a fixed `created` the same data and code give the same ID, since draw seeds come
-    from the inputs. `acquired` is when the data were taken (from the tagger file when known). A
+    from the inputs. `acquired` is when the data were taken (from the tagger file when known); with
+`valid_until`, validity runs from `acquired` when given, else from `created`. A
     $SOURCE_DATE_EPOCH in the environment is deliberately not read: packaging environments set it,
     and it silently backdated records (calibration-lab review, cycle 3).
     """
@@ -227,7 +234,7 @@ def build_manifest(
             "status": cal.status,
         },
         "uncertainty": {
-            "kind": "statistical (counting) only",
+            "kind": UNCERTAINTY_KINDS.get(cal.kind, "statistical (counting) only"),
             "level": 0.95,
             "validation": "frequentist coverage checked on DADL's own simulator at the gated regimes",
             "not_included": [
@@ -250,7 +257,9 @@ def build_manifest(
     if cal.conditions:
         manifest["conditions"] = dict(cal.conditions)
     if valid_until is not None:
-        manifest["valid_for"] = {"from": manifest["created"], "to": _utc(valid_until)}
+        # Validity starts when the calibration data were taken, if recorded: a dataset taken between
+        # acquisition and writing was refused (council round 2).
+        manifest["valid_for"] = {"from": manifest.get("acquired", manifest["created"]), "to": _utc(valid_until)}
     return manifest, post
 
 
@@ -343,6 +352,41 @@ def _jcs_int(text: str) -> int | float:
 MAX_MANIFEST_BYTES = 16 * 2**20
 
 
+def _check_npy_header(ppath: Path, post_meta: Mapping[str, Any]) -> None:
+    """Check the posterior table's .npy header against the manifest before reading the table: a
+    192-byte file whose header declared 2^52 rows made numpy allocate 64 PiB (council round 7, S2).
+    Requires dtype <f8, C order, the manifest's (n_samples, len(params)) shape, and a file size
+    of exactly header + rows x cols x 8 bytes."""
+    rows, params = post_meta["n_samples"], post_meta["params"]
+    if isinstance(rows, bool) or not isinstance(rows, int) or rows < 0 or not isinstance(params, list):
+        raise ArtifactError(f"{ppath}: the manifest's posterior n_samples or params are malformed")
+    try:
+        size = ppath.stat().st_size
+        with ppath.open("rb") as fh:
+            version = np.lib.format.read_magic(fh)
+            if version == (1, 0):
+                shape, fortran, dtype = np.lib.format.read_array_header_1_0(fh)
+            elif version == (2, 0):
+                shape, fortran, dtype = np.lib.format.read_array_header_2_0(fh)
+            else:
+                raise ArtifactError(f"{ppath}: unsupported .npy version {version}")
+            offset = fh.tell()
+    except FileNotFoundError as exc:
+        raise ArtifactError(f"posterior table missing: {ppath}") from exc
+    except OSError as exc:
+        raise ArtifactError(f"cannot read {ppath}: {exc}") from exc
+    except (ValueError, SyntaxError, TypeError) as exc:
+        raise ArtifactError(f"{ppath}: not a .npy table: {exc}") from exc
+    if dtype != np.dtype("<f8") or fortran or tuple(shape) != (rows, len(params)):
+        raise ArtifactError(
+            f"{ppath}: table header (dtype {dtype}, shape {tuple(shape)}, Fortran order {fortran}) does not match the "
+            f"manifest (float64 <f8, ({rows}, {len(params)}), C order)"
+        )
+    if size != offset + rows * len(params) * 8:
+        raise ArtifactError(f"{ppath}: {size} bytes, not the {offset + rows * len(params) * 8} its header and the "
+                            "manifest give")
+
+
 def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
     """Read and verify an artifact manifest and its posterior table.
 
@@ -353,7 +397,7 @@ def read_artifact(path: str | Path) -> tuple[dict[str, Any], np.ndarray]:
         return _read_artifact(Path(path))
     except ArtifactError:
         raise
-    except (KeyError, TypeError, AttributeError, IndexError, ValueError, RecursionError) as exc:
+    except (KeyError, TypeError, AttributeError, IndexError, ValueError, RecursionError, MemoryError) as exc:
         raise ArtifactError(f"{path}: malformed artifact ({type(exc).__name__}: {exc})") from exc
 
 
@@ -392,14 +436,15 @@ def _read_artifact(path: Path) -> tuple[dict[str, Any], np.ndarray]:
         if isinstance(v, (int, float)) and isinstance(lo, (int, float)) and not lo <= v <= hi:
             raise ArtifactError(f"{path}: summary {name}: value lies outside its interval")
     ppath = path.with_name(f"{aid}.posterior.npy")
+    _check_npy_header(ppath, manifest["posterior"])
     try:
         post = ppath.read_bytes()
     except OSError as exc:
         raise ArtifactError(f"posterior table missing: {ppath}") from exc
     try:
         samples = np.load(io.BytesIO(post), allow_pickle=False)
-    except ValueError as exc:
-        raise ArtifactError(f"{ppath}: not a .npy table: {exc}") from exc
+    except (ValueError, MemoryError) as exc:
+        raise ArtifactError(f"{ppath}: not a .npy table: {type(exc).__name__}: {exc}") from exc
     if samples.dtype.kind != "f" or samples.dtype.itemsize != 8:
         raise ArtifactError(f"{ppath}: posterior table must be float64, not {samples.dtype}")
     if samples.ndim != 2 or posterior_sha256(samples) != manifest["posterior"]["sha256"]:

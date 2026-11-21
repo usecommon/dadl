@@ -9,6 +9,12 @@ Corrections follow the Bell rule: under the default policy none is allowed (acci
 can move a non-violating dataset past 1/sqrt(2)). With `calibrations` and a policy that allows the
 corrections, the corrected value comes from the forward model (`dadl.forward`), with calibration
 uncertainty, never from the old subtraction.
+
+The value compares two acquisitions, so a pump drift between them moves it (+3% on the max run
+read 0.707 for 0.699). Every result carries `TWO_POINT`; `SINGLES_DRIFT` is added when a channel's
+singles rate differs between the acquisitions beyond 4 sigma (Poisson). The singles test assumes
+setting-independent singles (a Werner state, no analyser-dependent loss): a loss that depends on
+the setting also trips it.
 """
 
 from __future__ import annotations
@@ -17,12 +23,23 @@ import dataclasses
 
 import numpy as np
 
-from dadl.analysis._twopoint import check_calibration_args, forward_check, forward_from_counts, run_counts, span_ps
+from dadl.analysis._twopoint import (
+    check_calibration_args,
+    forward_check,
+    forward_from_counts,
+    offpeak_check,
+    range_ends,
+    run_counts,
+    span_ps,
+    use_checks,
+)
 from dadl.analysis.chsh import Window, check_delay_channels, check_no_duplicates, check_reference_channel
 from dadl.analysis.visibility import bell_visibility
+from dadl.coincidences import as_sorted as _as_sorted
 from dadl.coincidences import grid_coincidences
-from dadl.data import ChannelId
-from dadl.guardrails import INTERRUPTED, Policy, threshold_labels
+from dadl.data import ChannelId, runs_lattice
+from dadl.forward_check import NO_LATTICE
+from dadl.guardrails import INTERRUPTED, Policy, corrected_threshold_labels, t3_input
 from dadl.propagate import CalibrationSet
 from dadl.result import LabelledValue
 from dadl.stationarity import interrupted
@@ -31,6 +48,23 @@ FRINGE_CHANNELS: tuple[str, ...] = ("A", "B")
 FRINGE_SETTINGS: tuple[str, ...] = ("max", "min")
 #: Largest relative difference of the two acquisitions' spans for the raw count comparison.
 MAX_EXPOSURE_MISMATCH = 0.01
+#: Poisson z of a channel's singles-rate difference between the acquisitions above which it is labelled.
+SINGLES_DRIFT_Z = 4.0
+
+TWO_POINT = (
+    "two-point visibility at the declared settings: not normalised for rate drift between the max and min "
+    "acquisitions"
+)
+SINGLES_DRIFT = (
+    "singles differ between the max and min acquisitions beyond 4 sigma: a rate drift or a setting-dependent loss; "
+    "V moves with it (+3% on the max run read 0.707 for 0.699)"
+)
+
+
+def _singles_z(n1: int, t1: float, n2: int, t2: float) -> float:
+    """Poisson z of the difference of two singles rates."""
+    var = n1 / t1**2 + n2 / t2**2
+    return (n1 / t1 - n2 / t2) / var**0.5 if var > 0 else 0.0
 
 
 def fringe_from_tags(
@@ -42,8 +76,14 @@ def fringe_from_tags(
     calibrations: CalibrationSet | None = None,
     channels: tuple[ChannelId, ChannelId] | None = None,
     seed: int = 0,
+    source_type: str | None = None,
 ) -> tuple[LabelledValue, dict[str, float]]:
-    """Fringe visibility from `runs["max"]` and `runs["min"]`. Returns the result and its counts."""
+    """Fringe visibility from `runs["max"]` and `runs["min"]`. Returns the result and its counts.
+
+    On PTU T3 input a corrected value is refused unless `source_type` declares CW light ("cw"),
+    and the result is labelled (`dadl.guardrails.t3_input`)."""
+    t3_labels, _ = t3_input(runs, source_type, calibrations is not None or bool(subtract_accidentals))
+    lattice = runs_lattice(runs)
     if calibrations is not None:
         check_calibration_args(subtract_accidentals, channels)
     from dadl.calibration.accidentals import shifted_coincidences, side_offsets
@@ -64,7 +104,7 @@ def fringe_from_tags(
     def reduce(name: str):
         run = runs[name]
         c = grid_coincidences(run["A"], run["B"], window.width_ps, da, db)
-        side = shifted_coincidences(np.sort(run["A"]), np.sort(run["B"]), window.width_ps, da, db, offsets)
+        side = shifted_coincidences(_as_sorted(run["A"]), _as_sorted(run["B"]), window.width_ps, da, db, offsets)
         return c, side, span_ps(run, FRINGE_CHANNELS)
 
     c_max, side_max, t_max = reduce("max")
@@ -86,6 +126,17 @@ def fringe_from_tags(
         "duration_max_s": t_max / 1e12,
         "duration_min_s": t_min / 1e12,
     }
+    offpeak_labels: tuple[str, ...] = ()
+    if subtract_accidentals or calibrations is not None:
+        counts["offpeak_p"], offpeak_labels, counts["offpeak_draws"] = offpeak_check(
+            "bell_visibility", {"max": side_max, "min": side_min}, offsets, policy
+        )
+    drift = False
+    for ch in FRINGE_CHANNELS:
+        n_max, n_min = int(np.asarray(runs["max"][ch]).size), int(np.asarray(runs["min"][ch]).size)
+        t1, t2 = t_max / 1e12, t_min / 1e12
+        counts[f"singles_ratio_{ch.lower()}"] = (n_max / t1) / (n_min / t2) if n_min else float("inf")
+        drift = drift or abs(_singles_z(n_max, t1, n_min, t2)) > SINGLES_DRIFT_Z
     if subtract_accidentals:
         result = bell_visibility(
             c_max, c_min, accidentals=acc, accidentals_stderr=float(np.sqrt(side_min.sum())) / side_min.size,
@@ -93,15 +144,25 @@ def fringe_from_tags(
         )
     else:
         result = bell_visibility(c_max, c_min, policy=policy, window=window)
-    labels = result.labels
+    labels = result.labels + (TWO_POINT,) + ((SINGLES_DRIFT,) if drift else ()) + t3_labels
+    if result.corrected is not None and offpeak_labels:
+        result = dataclasses.replace(result, corrected_labels=result.corrected_labels + offpeak_labels)
     if calibrations is not None:
         check_p, check_labels = forward_check(
             "bell_visibility", {"max": (runs["max"], (0.0,)), "min": (runs["min"], (0.0,))},
             FRINGE_CHANNELS, tuple(channels), window_ps=window.width_ps, delays_ps=dict(window.delays_ps),
-            calibrations=calibrations, policy=policy,
+            calibrations=calibrations, policy=policy, lattice_ps=lattice,
         )
         if check_p is not None:
             counts["forward_check_p"] = check_p
+        elif lattice == 0:
+            counts["forward_check_note"] = NO_LATTICE
+        use_labels, use_counts = use_checks(
+            "bell_visibility", [runs["max"], runs["min"]], FRINGE_CHANNELS, tuple(channels),
+            calibrations=calibrations, policy=policy,
+        )
+        counts.update(use_counts)
+        check_labels = check_labels + use_labels
         high = run_counts(runs["max"], c_max, side_max, t_max)
         low = run_counts(runs["min"], c_min, side_min, t_min)
         fwd, extra = forward_from_counts(
@@ -109,15 +170,16 @@ def fringe_from_tags(
             window_ps=window.width_ps, declared_delay_ps=float(db - da),
         )
         counts.update(extra)
-        labels = tuple(dict.fromkeys(
-            labels + fwd.labels + check_labels + threshold_labels("bell_visibility", result.raw, fwd.estimate)
-        ))
-        result = dataclasses.replace(
-            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids
+        corrected_labels = fwd.labels + check_labels + offpeak_labels + corrected_threshold_labels(
+            "bell_visibility", result.raw, fwd.estimate, range_ends(extra)
         )
-    if interrupted(*([np.sort(runs[k][ch]) for ch in FRINGE_CHANNELS] for k in FRINGE_SETTINGS)):
+        result = dataclasses.replace(
+            result, corrected=fwd.estimate, corrections=fwd.corrections, artifact_ids=fwd.artifact_ids,
+            corrected_labels=tuple(dict.fromkeys(lab for lab in corrected_labels if lab not in labels)),
+        )
+    if interrupted(*([_as_sorted(runs[k][ch]) for ch in FRINGE_CHANNELS] for k in FRINGE_SETTINGS)):
         labels += (INTERRUPTED,)
     return dataclasses.replace(result, labels=labels, counts=counts), counts
 
 
-__all__ = ["FRINGE_CHANNELS", "FRINGE_SETTINGS", "fringe_from_tags"]
+__all__ = ["FRINGE_CHANNELS", "FRINGE_SETTINGS", "SINGLES_DRIFT", "TWO_POINT", "fringe_from_tags"]

@@ -16,6 +16,7 @@ from dadl.guardrails import (
     DEFAULT_POLICY_FINGERPRINT,
     DEFAULT_RULES,
     NEAR_THRESHOLD,
+    POLICY_CORRECTED_ONLY,
     POLICY_MODIFIED,
     STRICTEST,
     THRESHOLD_AFTER_CORRECTION,
@@ -58,8 +59,10 @@ def test_loosened_policy_is_never_silent():
     result = bell_visibility(N_MAX, N_MIN, accidentals=ACCIDENTALS, policy=policy)
     assert result.raw.value == pytest.approx(0.45)
     assert result.corrected.value == pytest.approx(0.82, abs=1e-3)
-    assert POLICY_MODIFIED in result.labels
-    assert THRESHOLD_AFTER_CORRECTION in result.labels
+    # Council round 10 (Ux2): on the corrected value; the raw value is marked unchanged.
+    assert POLICY_MODIFIED in result.corrected_labels and POLICY_MODIFIED not in result.labels
+    assert POLICY_CORRECTED_ONLY in result.labels
+    assert THRESHOLD_AFTER_CORRECTION in result.corrected_labels
     assert result.overrides == ("bell_visibility: accidental_subtraction (reproducing Thompson's example)",)
 
 
@@ -139,3 +142,45 @@ def test_results_cannot_be_used_as_bare_numbers():
     # Not a forgery guard: explicit extraction and in-process edits remain possible,
     # which the docs state. This pins that the label survives an honest replace().
     assert dataclasses.replace(r).labels == r.labels
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def _raises_naming_policy_allow():
+    """Every `raise` of a DadlError in the package whose message names Policy.allow( (or builds it
+    with override_hint), as (file:line, source)."""
+    import ast
+    from pathlib import Path
+
+    import dadl
+    from dadl import errors
+
+    names = {n for n, c in vars(errors).items() if isinstance(c, type) and issubclass(c, errors.DadlError)}
+    root = Path(dadl.__file__).parent
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text()
+        for node in ast.walk(ast.parse(text)):
+            if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                    and getattr(node.exc.func, "id", getattr(node.exc.func, "attr", None)) in names):
+                src = ast.get_source_segment(text, node.exc) or ""
+                if "Policy.allow(" in src or "override_hint(" in src:
+                    found.append((f"{path.relative_to(root)}:{node.lineno}", src))
+    return found
+
+
+@pytest.mark.parametrize("where,src", _raises_naming_policy_allow())
+def test_every_refusal_naming_policy_allow_gives_the_cli_form(where, src):
+    # Council round 9 (Tw4): refusals told CLI users to call Policy.allow; every one now also says
+    # "--allow NAME=REASON" (directly, or through override_hint).
+    assert "--allow" in src or "override_hint(" in src, where
+
+
+def test_the_override_hint_names_both_forms():
+    from dadl.guardrails import KNOWN_CORRECTIONS, override_hint
+
+    hint = override_hint("chsh", "dead_time_contradicted")
+    assert "Policy.allow('chsh', 'dead_time_contradicted', reason)" in hint
+    assert "--allow dead_time_contradicted=REASON" in hint
+    assert "dead_time_contradicted" in KNOWN_CORRECTIONS

@@ -19,13 +19,23 @@ A control runs alongside: the same corrected value with the calibration uncertai
 (point +- 1.96 statistical standard deviations). It must fall below the band in at least one
 declared regime (`CONTROL_REGIMES`), or the regimes do not test propagation.
 
-The forward model's predictive check (`dadl.forward_check`) runs in every replicate. In the clean
-regimes it may flag at most `MAX_FLAG_SHARE` of replicates. The misspecified regime (`MISSPECIFIED`:
+The forward model's predictive check (`dadl.forward_check`) runs in every replicate, with the CHSH
+delay-drift check and the off-peak flatness check; each is counted under its own key ("forward
+misfit", "drift accepted", "off-peak accepted"). In the clean regimes they may flag at most
+`MAX_FLAG_SHARE` of replicates together. The misspecified regime (`MISSPECIFIED`:
 crosstalk between the two HOM detectors, which the model lacks, in the window) passes only if the
 check flags at least `MIN_FLAG_SHARE` of its replicates; its coverage is reported, not gated
 (it is expected to fail: that is what the check is for).
 
+A replicate the analysis refuses (any `DadlError`, such as a `StaleCalibration` from the gap
+tests) is counted under "refused: <type>" and as not covered, rather than aborting the gate
+(council round 8, St2). Any refusal fails the regime: the tolerance is the owner's to set (O12).
+
 Regimes are declared before the first run (phase 3 plan, M3).
+
+The gate writes 400 draws per artifact (users get 2,000). With N_MC = 4,000 joint draws the
+interval ends have a Monte Carlo sd of about 4% of the joint standard error, the same at 400 and
+2,000 rows.
 """
 
 from __future__ import annotations
@@ -43,7 +53,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from dadl.analysis.chsh import Window, chsh
+from dadl.analysis._twopoint import OFFPEAK_ACCEPTED
+from dadl.analysis.chsh import DELAY_DRIFT_ACCEPTED, Window, chsh
 from dadl.analysis.hom import hom_from_tags
 from dadl.artifact import write_artifact
 from dadl.calibration.coverage import CoverageResult, _children, gate
@@ -51,6 +62,7 @@ from dadl.calibration.dark import calibrate_dark
 from dadl.calibration.delay import calibrate_delay
 from dadl.closed_form import chsh_ideal, hom_visibility_expected
 from dadl.data import ChannelId
+from dadl.errors import DadlError
 from dadl.forward_check import FORWARD_MISFIT_ACCEPTED
 from dadl.guardrails import Policy
 from dadl.propagate import MISFIT_ACCEPTED, CalibrationSet, DatasetContext
@@ -153,7 +165,10 @@ REGIMES: dict[str, Regime] = {
     ),
     # Dead-time selection (raw S about 1.6 sigma high at a source S of 1.98), with the dead time
     # from short dark runs: its uncertainty is comparable to the statistical error, so this is
-    # the regime where switching it off must undercover.
+    # the regime where switching it off must undercover. About 57% of its 0.1 s dark artifacts give
+    # the dead time as a bound (median 60 ns for 50 ns), so nearly every replicate corrects at least
+    # one channel at its bound: the regime tests the corrected value at the bound and the identified
+    # channels' draws, not the D3 range from zero to the bound.
     "chsh-dead-time": Regime(
         "chsh",
         PairSource(pair_rate_per_s=3.0e6, visibility=0.70),
@@ -164,13 +179,21 @@ REGIMES: dict[str, Regime] = {
 }
 #: Regimes where the uncertainty-off control must fall below the band.
 CONTROL_REGIMES = ("chsh-dead-time",)
+#: Below this many replicates the control rule is not decidable: chsh-dead-time's control covers
+#: about 87.5%, inside the 100-replicate band about one run in three (council round 10, Rg4).
+CONTROL_MIN_REPLICATES = 400
 
 CORRECTED = "corrected"
 CONTROL = "control"
 MISFITS = "misfit artifacts"
 FLAGGED = "forward misfit"
-KEYS = (CORRECTED, CONTROL, MISFITS, FLAGGED)
-#: Largest share of clean replicates the predictive check may flag (phase 3 plan, M3 acceptance).
+DRIFT = "drift accepted"
+OFFPEAK = "off-peak accepted"
+KEYS = (CORRECTED, CONTROL, MISFITS, FLAGGED, DRIFT, OFFPEAK)
+#: Refused replicates are counted under this prefix and the error type ("refused: StaleCalibration").
+REFUSED = "refused: "
+#: Largest share of clean replicates the predictive, drift and off-peak checks may flag together
+#: (phase 3 plan, M3 acceptance).
 MAX_FLAG_SHARE = 0.01
 #: Smallest share of misspecified replicates it must flag.
 MIN_FLAG_SHARE = 0.90
@@ -203,9 +226,30 @@ def _lower(links: tuple[Crosstalk, ...]) -> tuple[Crosstalk, ...]:
     return tuple(Crosstalk(x.source.lower(), x.target.lower(), x.probability, x.delay_ps, x.jitter_sigma_ps) for x in links)
 
 
-def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, bool, bool, bool]:
-    """(corrected interval covers the truth, control interval covers it, a misfit artifact was used,
-    the forward model's predictive check flagged the analysis)."""
+def _replicate(regime: Regime, child: np.random.SeedSequence) -> dict[str, int]:
+    """One replicate's counts under `KEYS`: the corrected interval covers the truth, the control
+    interval covers it, a misfit artifact was used, and the predictive, drift and off-peak checks
+    flagged the analysis. A refused replicate counts 1 under "refused: <type>" and 0 elsewhere,
+    and its message goes to stderr (council round 8, St2)."""
+    try:
+        result, misfit = _analyse(regime, child)
+    except DadlError as exc:
+        print(f"refused replicate ({type(exc).__name__}): {exc}", file=sys.stderr, flush=True)
+        return {**dict.fromkeys(KEYS, 0), REFUSED + type(exc).__name__: 1}
+    covered, control = covers(result.corrected, regime.truth)
+    labels = result.all_labels
+    return {
+        CORRECTED: int(covered),
+        CONTROL: int(control),
+        MISFITS: int(misfit),
+        FLAGGED: int(FORWARD_MISFIT_ACCEPTED in labels),
+        DRIFT: int(DELAY_DRIFT_ACCEPTED in labels),
+        OFFPEAK: int(OFFPEAK_ACCEPTED in labels),
+    }
+
+
+def _analyse(regime: Regime, child: np.random.SeedSequence):
+    """One replicate's analysis result and whether it used a misfit artifact."""
     cal_seq, run_seq, fit_seq = child.spawn(3)
     cal_rng, run_rng = np.random.default_rng(cal_seq), np.random.default_rng(run_seq)
     fit_seed = int(fit_seq.generate_state(1)[0])
@@ -226,10 +270,15 @@ def _replicate(regime: Regime, child: np.random.SeedSequence) -> tuple[bool, boo
         dets = dict.fromkeys(CHSH_CHANNELS, det)
         runs = simulate_chsh(regime.source, dets, regime.duration_s, run_rng, CHSH_SETTINGS)
         result = chsh(runs, window, POLICY, settings_deg=CHSH_SETTINGS, calibrations=cset, channels=CHSH_CHANNELS, seed=fit_seed)
-    c, truth = result.corrected, regime.truth
+    return result, MISFIT_ACCEPTED in cset.labels
+
+
+def covers(c, truth: float) -> tuple[bool, bool]:
+    """Whether the corrected interval covers the truth, and whether the control does: the point
+    +- 1.96 statistical standard errors (calibration uncertainty off)."""
     half = 1.959964 * c.stderr_statistical
     covered = c.low <= truth <= c.high
-    return covered, c.value - half <= truth <= c.value + half, MISFIT_ACCEPTED in cset.labels, FORWARD_MISFIT_ACCEPTED in result.labels
+    return covered, c.value - half <= truth <= c.value + half
 
 
 def propagation(
@@ -238,24 +287,51 @@ def propagation(
     reg = REGIMES[regime]
     covered = dict.fromkeys(KEYS, 0)
     for child in _children(seed, replicates, part, regime):
-        for key, hit in zip(KEYS, _replicate(reg, child)):
-            covered[key] += hit
-    name = "hom_visibility" if reg.analysis == "hom" else "chsh"
-    return CoverageResult(f"{name} [{regime}]", replicates, covered, gate(replicates, 1))
+        for key, hit in _replicate(reg, child).items():
+            covered[key] = covered.get(key, 0) + hit
+    return CoverageResult(result_name(regime), replicates, covered, gate(replicates, 1))
+
+
+def regime_names(analysis: str, regimes: list[str] | None = None) -> list[str]:
+    """The regimes `run` covers for `analysis` ("hom", "chsh", "all") and `regimes`."""
+    names = [r for r, reg in REGIMES.items() if analysis in ("all", reg.analysis)]
+    if regimes is not None:
+        unknown = sorted(set(regimes) - set(names))
+        if unknown:
+            raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
+        names = [r for r in names if r in regimes]
+    return names
+
+
+def result_name(regime: str) -> str:
+    """The calibration name of a regime's result."""
+    return f"{'hom_visibility' if REGIMES[regime].analysis == 'hom' else 'chsh'} [{regime}]"
 
 
 def regime_of(result: CoverageResult) -> str:
     return result.calibration.split("[", 1)[1].rstrip("]")
 
 
+def _share(result: CoverageResult, key: str) -> float:
+    return result.covered.get(key, 0) / result.replicates
+
+
+def refusals(result: CoverageResult) -> dict[str, int]:
+    """The refused replicates by error type."""
+    return {k[len(REFUSED):]: v for k, v in result.covered.items() if k.startswith(REFUSED) and v}
+
+
 def passed(result: CoverageResult) -> bool:
-    """Clean regimes: the corrected value within the band, few misfit artifacts and few flags; in
-    a control regime, the control below the band. The misspecified regime: flagged enough."""
+    """No refused replicate (until the owner sets a tolerance, O12). Clean regimes: the corrected
+    value within the band, few misfit artifacts and few flags; in a control regime, the control
+    below the band. The misspecified regime: flagged enough."""
+    if refusals(result):
+        return False
     if REGIMES[regime_of(result)].misspecified:
-        return result.fraction(FLAGGED) >= MIN_FLAG_SHARE
+        return _share(result, FLAGGED) >= MIN_FLAG_SHARE
     lo, hi = result.gate
     ok = lo <= result.fraction(CORRECTED) <= hi and result.fraction(MISFITS) <= MAX_MISFIT_SHARE
-    ok = ok and result.fraction(FLAGGED) <= MAX_FLAG_SHARE
+    ok = ok and sum(_share(result, k) for k in (FLAGGED, DRIFT, OFFPEAK)) <= MAX_FLAG_SHARE
     if regime_of(result) in CONTROL_REGIMES:
         ok = ok and result.fraction(CONTROL) < lo
     return ok
@@ -264,22 +340,41 @@ def passed(result: CoverageResult) -> bool:
 def describe(result: CoverageResult) -> str:
     lo, hi = result.gate
     verdict = "PASS" if passed(result) else "FAIL"
+    refused = [f"  {REFUSED + k:<17} {v / result.replicates:.1%}  ({v}; any refusal fails the regime)"
+               for k, v in sorted(refusals(result).items())]
+    refused = refused or [f"  {'refused':<17} 0  (any refusal fails the regime)"]
     if REGIMES[regime_of(result)].misspecified:
         return "\n".join([
             f"{result.calibration}: {result.replicates} replicates, misspecified  {verdict}",
-            f"  {FLAGGED:<17} {result.fraction(FLAGGED):.1%}  (predictive check; at least {MIN_FLAG_SHARE:.0%})",
+            f"  {FLAGGED:<17} {_share(result, FLAGGED):.1%}  (predictive check; at least {MIN_FLAG_SHARE:.0%})",
             f"  {CORRECTED:<17} {result.fraction(CORRECTED):.1%}  (reported: the model lacks the crosstalk)",
             f"  {CONTROL:<17} {result.fraction(CONTROL):.1%}  (reported)",
             f"  {MISFITS:<17} {result.fraction(MISFITS):.1%}  (reported)",
+            f"  {DRIFT:<17} {_share(result, DRIFT):.1%}  (reported)",
+            f"  {OFFPEAK:<17} {_share(result, OFFPEAK):.1%}  (reported)",
+            *refused,
         ])
     control = "must fall below the band" if regime_of(result) in CONTROL_REGIMES else "reported, not gated here"
+    if regime_of(result) in CONTROL_REGIMES and result.replicates < CONTROL_MIN_REPLICATES:
+        control += (f"; control rule not decidable below about {CONTROL_MIN_REPLICATES} replicates: a FAIL on it "
+                    "here is not evidence of a problem")
     return "\n".join([
         f"{result.calibration}: {result.replicates} replicates, gate {lo:.1%}-{hi:.1%}  {verdict}",
         f"  {CORRECTED:<17} {result.fraction(CORRECTED):.1%}",
         f"  {CONTROL:<17} {result.fraction(CONTROL):.1%}  (calibration uncertainty off; {control})",
         f"  {MISFITS:<17} {result.fraction(MISFITS):.1%}  (at most {MAX_MISFIT_SHARE:.0%})",
-        f"  {FLAGGED:<17} {result.fraction(FLAGGED):.1%}  (predictive check; at most {MAX_FLAG_SHARE:.0%})",
+        f"  {FLAGGED:<17} {_share(result, FLAGGED):.1%}  (predictive check)",
+        f"  {DRIFT:<17} {_share(result, DRIFT):.1%}  (CHSH delay drift)",
+        f"  {OFFPEAK:<17} {_share(result, OFFPEAK):.1%}  (off-peak flatness; the three at most "
+        f"{MAX_FLAG_SHARE:.0%} together)",
+        *refused,
     ])
+
+
+def _keys(counts) -> list[str]:
+    """`KEYS`, then every refusal key any of `counts` holds, in order."""
+    extra = sorted({k for c in counts for k in c if k not in KEYS})
+    return [*KEYS, *extra]
 
 
 #: Replicates per parallel task.
@@ -313,14 +408,12 @@ def run(
 ) -> list[CoverageResult]:
     """Every regime of `analysis`, or only `regimes`; with `part`, only those replicates (a shard:
     the counts are partial and the result is not gated). `progress` gets a line per finished chunk."""
-    names = [r for r, reg in REGIMES.items() if analysis in ("all", reg.analysis)]
-    if regimes is not None:
-        unknown = sorted(set(regimes) - set(names))
-        if unknown:
-            raise ValueError(f"unknown regime(s) {unknown} for {analysis!r}")
-        names = [r for r in names if r in regimes]
+    names = regime_names(analysis, regimes)
     span = part if part is not None else range(replicates)
-    tasks = [(r, replicates, seed, range(lo, min(lo + CHUNK, span.stop))) for r in names for lo in range(span.start, span.stop, CHUNK)]
+    # Chunks no larger than a worker's share, so a shard keeps every worker busy (council round 4:
+    # 125 replicates in chunks of 50 left one of four workers idle).
+    chunk = max(1, min(CHUNK, -(-len(span) // max(jobs, 1))))
+    tasks = [(r, replicates, seed, range(lo, min(lo + chunk, span.stop))) for r in names for lo in range(span.start, span.stop, chunk)]
     start = time.monotonic()
 
     def report(done: int, task) -> None:
@@ -355,32 +448,57 @@ def run(
     out = []
     for r in names:
         mine = [p for t, p in zip(tasks, parts) if t[0] == r]
-        covered = {k: sum(p.covered[k] for p in mine) for k in KEYS}
+        covered = {k: sum(p.covered.get(k, 0) for p in mine) for k in _keys(p.covered for p in mine)}
         out.append(CoverageResult(mine[0].calibration, replicates, covered, mine[0].gate))
     return out
 
 
-def shard_record(results: list[CoverageResult], seed: int, part: range) -> dict:
+def shard_record(
+    results: list[CoverageResult], seed: int, part: range, analysis: str = "all", regimes: list[str] | None = None
+) -> dict:
+    """A shard's partial counts, with the analysis and regimes it was asked for."""
     return {
         "seed": seed,
-        "replicates": results[0].replicates,
+        "replicates": results[0].replicates if results else 0,
+        "analysis": analysis,
+        "regimes": sorted(regimes) if regimes is not None else None,
         "range": [part.start, part.stop],
         "results": [{"calibration": r.calibration, "covered": r.covered} for r in results],
     }
 
 
 def merge(records: list[dict]) -> list[CoverageResult]:
-    """Sum shard records; refuses mixed seeds or totals, and a slice missing or run twice."""
+    """Sum shard records; refuses mixed seeds, totals, analyses or regimes, a slice missing or run
+    twice, an empty merge, and a result set other than the one the analysis and regimes produce.
+    The gate is the code's (council round 7, S1); a shard's own `gate`, if any, must agree."""
     if not records:
         raise ValueError("no shards to merge")
     seeds = {r["seed"] for r in records}
     totals = {r["replicates"] for r in records}
     if len(seeds) != 1 or len(totals) != 1:
         raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    if any("analysis" not in r or "regimes" not in r for r in records):
+        raise ValueError("a shard does not record its analysis and regimes; rerun it with this version")
+    asked = {(r["analysis"], tuple(r["regimes"]) if r["regimes"] is not None else None) for r in records}
+    if len(asked) != 1:
+        raise ValueError(f"shards disagree on the analysis or regimes: {sorted(asked, key=str)}")
+    analysis, regimes = asked.pop()
     replicates = totals.pop()
+    if not any(r["results"] for r in records):
+        raise ValueError("the shards hold no results")
+    expected = [result_name(r) for r in regime_names(analysis, list(regimes) if regimes is not None else None)]
+    found = list(dict.fromkeys(res["calibration"] for r in records for res in r["results"]))
+    if set(found) != set(expected):
+        missing, extra = sorted(set(expected) - set(found)), sorted(set(found) - set(expected))
+        raise ValueError(f"the shards' results are not those of {analysis} {list(regimes or ['(all)'])}: "
+                         f"missing {missing}, unexpected {extra}")
+    band = gate(replicates, 1)
+    for r in records:
+        for res in r["results"]:
+            if "gate" in res and not np.allclose(res["gate"], band, rtol=0, atol=1e-12):
+                raise ValueError(f"{res['calibration']}: the shard's gate {res['gate']} is not the code's {list(band)}")
     out = []
-    names = dict.fromkeys(res["calibration"] for r in records for res in r["results"])
-    for name in names:
+    for name in expected:
         mine = [(r["range"], res["covered"]) for r in records for res in r["results"] if res["calibration"] == name]
         seen = sorted(tuple(rng) for rng, _ in mine)
         expected_next = 0
@@ -390,8 +508,10 @@ def merge(records: list[dict]) -> list[CoverageResult]:
             expected_next = hi
         if expected_next != replicates:
             raise ValueError(f"{name}: shards cover replicates 0-{expected_next}, not all {replicates}")
-        covered = {k: sum(c[k] for _, c in mine) for k in KEYS}
-        out.append(CoverageResult(name, replicates, covered, gate(replicates, 1)))
+        if any(not set(KEYS) <= set(c) or any(k not in KEYS and not k.startswith(REFUSED) for k in c) for _, c in mine):
+            raise ValueError(f"{name}: a shard does not count {list(KEYS)} (and refusals)")
+        covered = {k: sum(c.get(k, 0) for _, c in mine) for k in _keys(c for _, c in mine)}
+        out.append(CoverageResult(name, replicates, covered, band))
     return out
 
 
@@ -420,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run(args.analysis, args.replicates, args.seed, args.jobs, args.regimes, part, log)
         if part is not None:
             with open(args.out, "w", encoding="utf-8") as fh:
-                json.dump(shard_record(results, args.seed, part), fh, indent=1)
+                json.dump(shard_record(results, args.seed, part, args.analysis, args.regimes), fh, indent=1)
             for r in results:
                 print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
             return 0

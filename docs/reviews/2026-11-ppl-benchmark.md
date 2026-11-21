@@ -17,7 +17,8 @@ Why, in one line each:
 - **Speed where it matters:** NumPyro's first run, compilation included, is 1–3 s on every
   platform. PyMC's is 4–38 s, slowest on Windows; Stan adds 5–12 s of model compilation per model
   and was the slowest on the 20,000-gap dark likelihood (150–300 ESS/s against 770–1,850 for
-  NumPyro).
+  NumPyro). In steady state Stan was fastest on the delay model (1.6–3x NumPyro on every OS) and
+  the libraries overlap on macOS; NumPyro was chosen on install and first run (council round 6).
 - **Correctness is a tie:** all 42 runs converged (R-hat ≤ 1.004) and every posterior's 2.5%,
   50% and 97.5% quantiles were within 0.07 reference half-widths of DADL's own intervals.
 

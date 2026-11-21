@@ -45,6 +45,26 @@ and detector input k (numbered from 0 in the record) is k + 1, matching
 PicoQuant's own T2 numbering; T3 files use the same numbers, so an input
 keeps its number in either mode.
 
+T3 files come from a sync (usually pulsed) source. DADL models CW light: in a T3 file the sync is
+used as a clock only. Corrected values are refused on T3 input unless the setup declares
+`source.type: cw`. Pulsed sources are not supported on any input (T2, T3 or plain tags): pulsed
+accidentals sit in side peaks at multiples of the repetition period. On T2 and plain tags DADL
+detects them through the off-peak windows (not flat) and refuses the accidental-subtracted values;
+a period that is a whole multiple of the window grid is not detected, but then the off-peak
+estimate is also right.
+
+T3 tick and lattice: a recorded gap between two T3 tags is within one dtime resolution of the
+true gap, whatever the sync period, so the error bound of a T3 gap is the dtime resolution
+(`tick_ps`; plus 1 ps when the tags were rounded to whole ps), not the common divisor of the tags.
+It is used only for dead-time intervals. Histograms of pair delays use `lattice_ps`, the dtime
+resolution itself (council round 8): within one sync the difference of two tags is an exact
+multiple of it, and binning a 25 ps lattice in 26 ps bins biased the delay by -12 ps. A
+resolution that is not a whole number of ps has no integer lattice (`lattice_ps` None). A T3 file whose dtime
+range (2^bits x resolution) is shorter than the sync period records no photon late in each
+period: a `t3-range` event and a note say so, and `dadl.tagfile.read_tags` refuses it. The sync
+divider convention in T3 (`HWSync_Divider` > 1) is unverified; the metadata record it
+(`sync_divider`).
+
 Times: T2 ticks are multiplied by `MeasDesc_GlobalResolution` to give ps.
 When that (in T3: both the sync period and the dtime resolution) is a whole
 number of ps (1, 4, 5, 80 ps, a 12500 ps sync period, ...) the conversion is
@@ -52,7 +72,9 @@ exact integer arithmetic; otherwise tags are rounded to the nearest ps and a
 note says so.
 
 The whole record body is decoded in memory: about 100 bytes per record at
-peak (a 160 MB file took 4.2 GB; with markers about 215 bytes per record).
+peak in T2 (a 160 MB file took 4.2 GB; with markers about 215 bytes per
+record) and up to about 170 bytes per record in T3, which adds a sync tag per
+occupied sync period.
 Chunked reading for very large files is planned. Metadata checks read the
 header only.
 
@@ -123,6 +145,9 @@ PICOHARP_MAX_INPUT = 4
 PICOHARP_T3_MIN_INPUT = 1
 #: Sync periods (MeasDesc_GlobalResolution of a T3 file) accepted: 1 ps to 1 s.
 T3_PERIOD_RANGE_S = (1e-12, 1.0)
+
+#: Width of the T3 dtime field per family (bits).
+T3_DTIME_BITS = {"picoharp": 12, "hh1": 15, "hh2": 15}
 
 #: Header bytes read first; a longer header is read on in steps.
 HEADER_CHUNK = 1 << 16
@@ -395,6 +420,47 @@ class PtuFile:
         self._counts: dict[str, int] = {}
 
     @property
+    def tick_ps(self) -> int | None:
+        """The tick of the tags in whole ps (council round 7, G1). T2: `MeasDesc_GlobalResolution`
+        when it is a whole number of ps, else None. T3: the dtime resolution rounded up to whole
+        ps, plus 1 when the tags are rounded to whole ps (each by up to 0.5 ps)."""
+        if self.mode == "T2":
+            return _whole_ps(self.resolution_s)
+        assert self.sync_period_s is not None
+        res = _whole_ps(self.resolution_s)
+        exact = res is not None and _whole_ps(self.sync_period_s) is not None
+        tick = res if res is not None else math.ceil(self.resolution_s * 1e12)
+        return int(tick) + (0 if exact else 1)
+
+    @property
+    def lattice_ps(self) -> int | None:
+        """The lattice of pair delays in whole ps, for histograms (council round 8). T2:
+        `MeasDesc_GlobalResolution`; T3: the dtime resolution. None when it is not a whole number
+        of ps. Unlike `tick_ps` it has no +1 for rounding: within one sync two T3 tags share the
+        rounded sync part, so their difference is an exact multiple of the resolution."""
+        return _whole_ps(self.resolution_s)
+
+    @property
+    def sync_divider(self) -> int | None:
+        """T3 only: `HWSync_Divider` when above 1, else None."""
+        divider = self.header.get("HWSync_Divider")
+        if self.mode == "T3" and isinstance(divider, int) and not isinstance(divider, bool) and divider > 1:
+            return int(divider)
+        return None
+
+    def dtime_range_short(self) -> str | None:
+        """T3 only: a note when the dtime range (2^bits x resolution) is shorter than the sync
+        period, else None (council round 7, G4)."""
+        if self.mode != "T3":
+            return None
+        assert self.sync_period_s is not None
+        span = (1 << T3_DTIME_BITS[self.family]) * self.resolution_s
+        if span >= self.sync_period_s * (1 - 1e-9):
+            return None
+        return (f"dtime range {span * 1e9:.4g} ns < sync period {self.sync_period_s * 1e9:.4g} ns: photons late in "
+                "each period are not recorded")
+
+    @property
     def family(self) -> str:
         return (FORMATS if self.mode == "T2" else T3_FORMATS)[self.record_type][0]
 
@@ -501,6 +567,9 @@ class PtuFile:
                 "note": "input 0 holds only the syncs that started a recorded measurement, not every sync",
                 "sync_periods": extra["sync_periods"],
             }))
+        short_range = self.dtime_range_short()
+        if short_range:
+            events.append(Event("t3-range", detail={"note": short_range}))
         stop = self.header.get("TTResult_StopReason")
         incomplete = False
         if stop is None:
@@ -557,11 +626,17 @@ class PtuFile:
                               "constant over the acquisition",
                 "sync_tags": "input 0 holds only the syncs that started a recorded measurement",
             })
+            if self.sync_divider is not None:
+                metadata["sync_divider"] = self.sync_divider
+        metadata["tick_ps"] = self.tick_ps
+        metadata["lattice_ps"] = self.lattice_ps
         if incomplete:
             metadata["data_loss"] = STOP_REASON_NAMES.get(stop, f"stop reason {stop}")
         if not exact:
             what = "the tick is" if self.mode == "T2" else "the sync period or dtime resolution is"
             metadata["note"] = f"{what} not a whole number of ps; tags were rounded to the nearest ps"
+        if short_range:
+            metadata["note"] = "; ".join(n for n in (metadata.get("note"), short_range) if n)
         return TagSet(tags, duration_ps=duration, clock=f"{device} {self.mode} clock", metadata=metadata)
 
 

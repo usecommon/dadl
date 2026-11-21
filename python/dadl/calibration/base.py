@@ -47,6 +47,26 @@ def with_interruption_check(ppc: float, notes: list[str], *streams: np.ndarray) 
     from dadl.stationarity import channels_pvalue
 
     p_int, longest = channels_pvalue(*streams)
+    return _combine_interruption(ppc, notes, p_int, longest)
+
+
+def with_interruption_check_runs(ppc: float, notes: list[str], runs: list[np.ndarray]) -> float:
+    """As `with_interruption_check`, for separate acquisitions of one channel.
+
+    Each run is tested on its own bounds (its first and last tag), Bonferroni over the runs.
+    Point-process review (council round 1): testing scan runs as one acquisition flagged runs of
+    unequal length, or taken one after another on a running clock, as interrupted.
+    """
+    from dadl.stationarity import channels_pvalue
+
+    results = [channels_pvalue(t) for t in runs]
+    if not results:
+        return ppc
+    p_int = min(1.0, len(results) * min(r[0] for r in results))
+    return _combine_interruption(ppc, notes, p_int, max(r[1] for r in results))
+
+
+def _combine_interruption(ppc: float, notes: list[str], p_int: float, longest: float) -> float:
     if 2.0 * p_int < MISFIT_ALPHA:
         # Same threshold as the status below (point-process review, cycle 5: the note fired at
         # p < 0.001 while the status needed p < 0.0005). A strongly modulated source (+-50%) can
@@ -115,7 +135,8 @@ class Calibration:
     def __str__(self) -> str:
         lines = [f"{self.kind} ({self.method} {self.method_version}) for {', '.join(map(str, self.channels))}"]
         for name, iv in self.estimates.items():
-            shown = f"<= {iv.high:.6g} (upper limit only)" if name in self.unidentified and iv.low == 0 else str(iv)
+            limit = name in self.unidentified and iv.low == 0
+            shown = f"<= {iv.high:.4g} ({iv.level:.0%} upper limit only)" if limit else str(iv)
             lines.append(f"  {name:<20} {shown}  {self.units.get(name, '')}".rstrip())
         lines.append(f"  converged: {self.converged}; predictive check p = {self.ppc_pvalue:.3g}")
         if self.status == "misfit":

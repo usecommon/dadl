@@ -51,6 +51,59 @@ def simulate_setup_dark(setup: Setup, duration_s: float) -> dict:
     return {key: (dark if i == 0 else empty) for i, key in enumerate(setup.setting_keys)}
 
 
+#: Default avalanche rates of a dead-time scan, as fractions of 1 / dead_time_ps of the slowest channel.
+DEADTIME_SCAN_FRACTIONS = (0.05, 0.15, 0.3, 0.5)
+
+
+def deadtime_scan_rates(setup: Setup) -> tuple[float, ...]:
+    """Default photon rates (per s, at each detector, before its efficiency) of a dead-time scan:
+    one per setting, up to four, spread so that the avalanche rate x dead time runs from 0.05 to
+    0.5 (paralysis grows with it) on the slowest channel at the smallest efficiency.
+
+    Detector physics review (council round 1): scaled by photon rate alone, a detector of
+    efficiency 0.5 reached only 0.25 and tau_p went unidentified.
+    """
+    longest = max((d.dead_time_ps for d in setup.detectors.values()), default=0)
+    if longest <= 0:
+        raise DadlError("the setup's detectors have no dead time to scan")
+    eff = min(d.efficiency for d in setup.detectors.values())
+    if not eff > 0:
+        raise DadlError("the setup's detectors need a positive efficiency to scan")
+    k = min(len(setup.setting_keys), len(DEADTIME_SCAN_FRACTIONS))
+    fractions = DEADTIME_SCAN_FRACTIONS[:k] if k > 2 else (0.1, 0.4)
+    return tuple(f / (longest * 1e-12 * eff) for f in fractions)
+
+
+def simulate_setup_deadtime_scan(setup: Setup, rates: tuple[float, ...], duration_s: float) -> dict:
+    """Steady light straight onto every detector, one rate per setting (for `calibrate deadtime`).
+
+    `rates` are photon rates at each detector (per s, before its efficiency); settings past the
+    last rate are empty.
+    """
+    from dadl.sim import detect, poisson_times
+
+    _require_sim(setup)
+    if not duration_s > 0:
+        raise DadlError("duration_s must be positive")
+    if not 2 <= len(rates) <= len(setup.setting_keys):
+        raise DadlError(f"give 2 to {len(setup.setting_keys)} rates (one per setting of this setup), got {len(rates)}")
+    if any(not r > 0 for r in rates):
+        raise DadlError("rates must be positive")
+    names = [name for _num, name in sorted(setup.channels.items())]
+    streams = np.random.SeedSequence(setup.seed).spawn(len(rates) * len(names))
+    out = {}
+    for i, key in enumerate(setup.setting_keys):
+        if i >= len(rates):
+            out[key] = {name: np.empty(0, dtype=np.int64) for name in names}
+            continue
+        run = {}
+        for j, name in enumerate(names):
+            rng = np.random.default_rng(streams[i * len(names) + j])
+            run[name] = detect(poisson_times(rates[i], duration_s, rng), setup.detectors[name], duration_s, rng)
+        out[key] = run
+    return out
+
+
 def simulate_setup_heralding(setup: Setup, duration_s: float) -> dict:
     """A heralding run: the pair source straight onto one detector per arm, no analysers or beamsplitter.
 

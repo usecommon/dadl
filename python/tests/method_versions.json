@@ -11,9 +11,13 @@
     "sha256": "cc7bbf9ba0ee8d995db4aee722ad1e29e9cccd25602c1b7075bb0fb67f53208f",
     "version": "2"
   },
-  "delay": {
-    "sha256": "0505711c77f108fae30ceb7c0233fd011d1b341d84cea6f4046496a8d847ded6",
+  "deadtime": {
+    "sha256": "b926650d5f6d21fd793968847584723990995717bf5782aaaff2f616904e3574",
     "version": "8"
+  },
+  "delay": {
+    "sha256": "856408d39817802a393bc4a2d28d49d0fda185523eba26a5489a40db97b4b765",
+    "version": "10"
   },
   "heralding": {
     "sha256": "861ebb9f5cfb4cb9c3ec2f834c50f0c393885139981435a0217a2042e3279b81",

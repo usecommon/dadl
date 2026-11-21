@@ -67,10 +67,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "family": {"type": "string", "description": "A label only: it selects no model. Every detector uses the same model (hard non-paralyzable dead time, Gaussian timing response, single-exponential afterpulsing); SNSPD recovery, timing tails and latching are not modelled."},
+        "family": {"type": "string", "description": "A label only: it selects no model. Every detector uses the same model (hard non-paralyzable dead time, optionally after a paralyzable stage, Gaussian timing response, single-exponential afterpulsing); SNSPD recovery, timing tails and latching are not modelled."},
         "efficiency": {"type": "number", "minimum": 0, "maximum": 1},
         "dark_rate_cps": {"type": "number", "minimum": 0},
         "dead_time_ps": {"type": "integer", "minimum": 0},
+        "dead_time_p_ps": {"type": "integer", "minimum": 0, "description": "Paralyzable stage before the non-paralyzable dead_time_ps (series model); at most dead_time_ps. Default 0."},
         "jitter_sigma_ps": {"type": "number", "minimum": 0, "description": "Gaussian sigma of the timing jitter in ps. Datasheets usually quote the FWHM, which is 2.355 sigma."},
         "afterpulse_prob": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
         "afterpulse_tau_ps": {"type": "number", "minimum": 0},

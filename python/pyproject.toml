@@ -50,6 +50,8 @@ packages = ["dadl"]
 
 [tool.hatch.build.targets.sdist]
 include = ["dadl", "tests", "README.md", "pyproject.toml", "LICENSE-MIT", "LICENSE-APACHE"]
+# tests/data is caught by the repository-wide data/ ignore rule.
+artifacts = ["tests/data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

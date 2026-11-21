@@ -4,8 +4,10 @@
     dadl init [DIR]                                     copy the example setup.yaml into DIR
     dadl simulate SETUP --out tags.npz [--dark]         write simulated tags in the tag-file format
     dadl analyze SETUP --tags tags.npz|tags.csv         raw CHSH S or HOM visibility from your own tags
-                 [--calibrations DIR --allow C=REASON]  HOM: corrected by the forward model
+                 [--calibrations DIR --allow C=REASON]  HOM and CHSH: corrected by the forward model
     dadl calibrate dark SETUP --tags dark.npz --out DIR fit dark rate, afterpulsing and dead time
+    dadl calibrate deadtime SETUP --tags scan.npz --out DIR [--dark DIR]
+                                                        series (paralyzable + non-paralyzable) dead time
     dadl calibrate pairs SETUP --tags F --herald A+ --signal B+ --out DIR
                                                         delay, jitter, accidentals, heralding efficiency
     dadl version
@@ -28,13 +30,18 @@ import numpy as np
 
 from dadl import __version__
 from dadl.analysis.chsh import chsh
-from dadl.guardrails import ACCIDENTALS_SUBTRACTED, POLICY_MODIFIED, SIMULATED_INPUT
+from dadl.guardrails import (
+    ACCIDENTALS_SUBTRACTED, KNOWN_CORRECTIONS, POLICY_MODIFIED, SIMULATED_INPUT, T3_CLOCK_SOURCE,
+)
 from dadl.closed_form import chsh_expected_grid, chsh_ideal, hom_visibility_expected
 from dadl.config import Setup, load_setup
 from dadl.errors import DadlError
 from dadl.result import UNCERTAINTY_KIND, LabelledValue
 from dadl.simsetup import simulate_setup, simulate_setup_dark, simulate_setup_heralding
-from dadl.tagfile import ptu_file, read_tags, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir, write_tags
+from dadl.tagfile import (
+    ptu_file, ptu_files, read_tags, t3_folder, tag_lattice_ps, tag_tick_ps, tagger_settings, tags_are_simulated, write_ptu_dir,
+    write_tags,
+)
 
 SITE = "https://usecommon.github.io/dadl/"
 EXAMPLES = ("chsh-spad", "hom-snspd")
@@ -54,14 +61,43 @@ def _resolve(target: str) -> Path:
 _simulate = simulate_setup
 
 
-def _print_result(result: LabelledValue, symbol: str = "S") -> None:
+def _override_lines(overrides, details: dict[str, list[str]] | None = None, indent: str = "    ") -> list[str]:
+    """One line per override, "NAME: reason", from a result's `overrides` ("analysis: NAME (reason)"),
+    each followed by what it let through (`details`, by name) (council round 10, Ux1)."""
+    lines = []
+    for text in overrides:
+        _, _, rest = text.partition(": ")
+        name, _, reason = rest.partition(" (")
+        lines.append(f"{indent}{name}: {reason[:-1] if reason.endswith(')') else reason}")
+        lines += [f"{indent}  {d}" for d in (details or {}).get(name, ())]
+    return lines
+
+
+def _from_override(label: str) -> bool:
+    """Whether a label reports something the user's `--allow` let through."""
+    from dadl.guardrails import POLICY_CORRECTED_ONLY
+    from dadl.propagate import OUTSIDE_VALIDITY
+
+    return label in (POLICY_MODIFIED, POLICY_CORRECTED_ONLY, OUTSIDE_VALIDITY) or "accepted" in label.split(":")[0]
+
+
+def _print_labels(labels, head: str, indent: str) -> None:
+    """Labels one per line, indented, under `head`, those from the user's overrides first (council
+    round 10, Ux6: an override came 6th of 7 in one semicolon-separated line)."""
+    labels = sorted(labels, key=lambda lab: not _from_override(lab))
+    if not labels:
+        print(f"{indent}{head}: none")
+        return
+    print(f"{indent}{head}:")
+    for lab in labels:
+        print(f"{indent}  - {lab}")
+
+
+def _print_result(result: LabelledValue, symbol: str = "S", details: dict[str, list[str]] | None = None) -> None:
     print(f"  Raw {symbol} = {result.raw}   ({UNCERTAINTY_KIND})")
     # Labels about the corrected value are printed with it, not on the raw line (senior-physicist
-    # review, cycle 10).
-    from dadl.forward import ACCIDENTALS_MODELLED, FORWARD_MODEL
-
-    raw_labels = [lab for lab in result.labels if lab not in (ACCIDENTALS_SUBTRACTED, FORWARD_MODEL, ACCIDENTALS_MODELLED)]
-    print(f"  Labels: {'; '.join(raw_labels) or 'none'}")
+    # review, cycle 10; council round 6, R2: they are now recorded apart, as corrected_labels).
+    _print_labels(result.labels, "Labels", "  ")
     if result.analysis == "chsh" and result.counts:
         ratios = ", ".join(
             f"{k} {v['coincidences_per_singles_a']:.3f}/{v['coincidences_per_singles_b']:.3f}"
@@ -75,6 +111,11 @@ def _print_result(result: LabelledValue, symbol: str = "S") -> None:
     w = result.window or {}
     print(f"  Window: {w.get('width_ps')} ps, delays {w.get('delays_ps') or 'none'}, source '{w.get('source')}' (declared, not verified)")
     print(f"  Policy: {result.policy_fingerprint[:12]}{' (modified)' if result.overrides or POLICY_MODIFIED in result.labels else ' (default)'}")
+    if result.overrides:
+        # Council round 10 (Ux1): only the fingerprint was printed; the reasons were nowhere.
+        print("  Overrides:")
+        for line in _override_lines(result.overrides, details):
+            print(line)
 
 
 def _warn_angles(setup: Setup) -> None:
@@ -94,7 +135,7 @@ def _input_hashes(setup_path: Path, tags: str) -> dict[str, str]:
     if setup_path.is_file():
         out[setup_path.name] = hashlib.sha256(setup_path.read_bytes()).hexdigest()
     path = Path(tags)
-    for f in sorted(path.glob("setting*.ptu")) if path.is_dir() else [path]:
+    for f in ptu_files(path) or ([] if path.is_dir() else [path]):
         if f.is_file():
             out[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out
@@ -114,13 +155,25 @@ def _print_hom_extras(result: LabelledValue, counts: dict, setup: Setup) -> None
             f"  Accidentals subtracted ({counts['accidentals']:.3g} +- {counts['accidentals_stderr']:.2g}, off-peak): "
             f"V = {result.corrected}  (secondary; not an indistinguishability claim)"
         )
+        _print_corrected_labels(result)
     elif counts["accidentals"] > 0:
         print(f"  Accidentals not subtracted (estimate {counts['accidentals']:.3g}); see the labels.")
     ref = abs(setup.reference_delay_ps or 0)
     if ref > 0.1 * setup.window.width_ps:
+        effect = (
+            "the raw V reads low; the corrected value models the capture."
+            if "window_capture" in result.corrections
+            else "V reads low."
+        )
         print(
             f"  warning: the reference delay ({ref:g} ps) is not small against the {setup.window.width_ps} ps window: "
-            "the fixed grid loses part of the split peak at +-delay, and V reads low."
+            f"the fixed grid loses part of the split peak at +-delay, and {effect}"
+        )
+    coherence = (setup.data.get("source") or {}).get("coherence_time_ps") if isinstance(setup.data, dict) else None
+    if coherence and ref < 3 * float(coherence):
+        print(
+            f"  warning: the reference delay ({ref:g} ps) is less than three coherence times ({float(coherence):g} ps "
+            "each): the reference still interferes, and V reads low."
         )
 
 
@@ -140,13 +193,12 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
     them. If the dark data only bound the dead time too loosely to use (an SNSPD's 100 cps), the
     refusal is reported and the accidentals are corrected alone.
     """
-    import datetime as dt
     import tempfile
 
     from dadl.analysis.hom import hom_from_tags
     from dadl.artifact import write_artifact
     from dadl.calibration import calibrate_dark
-    from dadl.errors import GuardrailRefusal
+    from dadl.errors import GuardrailRefusal, StaleCalibration
     from dadl.guardrails import Policy
     from dadl.propagate import CalibrationSet, DatasetContext
 
@@ -174,21 +226,27 @@ def _quickstart_hom_corrected(runs: dict, setup: Setup) -> tuple[LabelledValue, 
         try:
             result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=cset, **common)
             return result, counts, None
-        except GuardrailRefusal as exc:
+        except (GuardrailRefusal, StaleCalibration) as exc:
             note = str(exc).split(", so a correction", 1)[0]
         without_dark = CalibrationSet.load(tmp, analysis="hom_visibility", policy=policy, dataset=dataset, kinds=(DELAY_KIND,))
         result, counts = hom_from_tags(runs, setup.window, policy=policy, calibrations=without_dark, **common)
     return result, counts, note
 
 
-QUICKSTART_CHSH_DARK_CPS_NOTE = "dark counts of a few hundred per second do not identify it"
+#: Council round 4: the old note ("a few hundred per second do not identify it") was fixed text
+#: whatever the setup's dark rate; the quickstart simply does not calibrate it for CHSH.
+QUICKSTART_CHSH_DARK_CPS_NOTE = "a dark calibration is not attempted in the quickstart"
+#: Council round 6 (R6, limit L4).
+CHSH_FOUR_PAIRS = (
+    "Window capture for CHSH needs a delay-jitter artifact for each of the four channel pairs, so four heralding "
+    "runs (re-route the fibres between them). `dadl simulate --heralding` writes the A+/B+ pair only."
+)
 
 
 def _quickstart_chsh_corrected(runs: dict, setup: Setup) -> LabelledValue:
     """CHSH with a corrected S from the forward model: each channel pair's delay and jitter from a
     simulated pair run (no analysers), accidentals from the off-peak bins. The policy is loosened
     for both corrections, as any corrected CHSH must be, and the result says so."""
-    import datetime as dt
     import tempfile
 
     from dadl.artifact import write_artifact
@@ -272,8 +330,10 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     _warn_angles(setup)
     print()
     _print_result(result)
-    _print_forward(corrected, {}, "S")
-    print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}: " + "; ".join(corrected.overrides))
+    _print_forward(corrected, corrected.counts or {}, "S")
+    print(f"    under a loosened policy {corrected.policy_fingerprint[:12]}, overrides:")
+    for line in _override_lines(corrected.overrides, indent="      "):
+        print(line)
     worst = max(d.dead_time_ps * 1e-12 * (setup.source.pair_rate_per_s * d.efficiency / 2 + d.dark_rate_cps) for d in setup.detectors.values())
     print(
         f"  Dead time not corrected: {QUICKSTART_CHSH_DARK_CPS_NOTE}; at these rates about {worst:.2%} of the time is dead."
@@ -295,7 +355,9 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print("  Calibrate from dark data: `dadl simulate chsh-spad --dark --out dark.npz`, then")
     print("  `dadl calibrate dark chsh-spad --tags dark.npz --out artifacts/`. From a heralding run (no")
     print("  analysers): `dadl simulate chsh-spad --heralding --duration-s 2 --out her.npz`, then")
-    print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out artifacts/`.")
+    print("  `dadl calibrate pairs chsh-spad --tags her.npz --no-analysers --herald A+ --signal B+ --out pairs/`.")
+    print(f"  {CHSH_FOUR_PAIRS} Hence its own folder: `analyze --calibrations artifacts/` corrects without window")
+    print("  capture until pairs/ holds all four pairs; then pass both folders.")
     print(f"  Overview: {SITE}")
     return 0
 
@@ -308,20 +370,40 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise DadlError(f"{dest} already exists; not overwriting it")
     shutil.copyfile(example_path(args.example), dest)
     print(f"Wrote {dest} (from the {args.example} example).")
-    print(f"Edit it, then run: dadl quickstart {dest}")
+    # Council round 9 (Tw8): both first runs.
+    print(f"  Simulated data: edit it, then run `dadl quickstart {dest}`.")
+    print(
+        "  Recorded data: set `backend: file` and the `hardware:` block (tagger and detector serials), map "
+        f"`channels:` to your inputs, then run `dadl calibrate dark {dest} --tags DARK --out cal`, "
+        f"`dadl calibrate pairs ...` and `dadl analyze {dest} --tags RUN --calibrations cal` (README, \"Using your "
+        "own data\")."
+    )
     return 0
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     setup = load_setup(_resolve(args.setup))
-    if args.duration_s is not None and not (args.dark or args.heralding):
-        raise DadlError("--duration-s applies to --dark and --heralding; a CHSH or HOM run takes its duration from the setup")
-    args.duration_s = 20.0 if args.duration_s is None else args.duration_s
+    if args.duration_s is not None and not (args.dark or args.heralding or args.deadtime_scan):
+        raise DadlError(
+            "--duration-s applies to --dark, --heralding and --deadtime-scan; a CHSH or HOM run takes its duration "
+            "from the setup"
+        )
+    if args.rates is not None and not args.deadtime_scan:
+        raise DadlError("--rates applies to --deadtime-scan")
+    default_s = 0.05 if args.deadtime_scan else 20.0
+    args.duration_s = default_s if args.duration_s is None else args.duration_s
     if not args.duration_s > 0:
         raise DadlError("--duration-s must be positive")
-    if args.dark and args.heralding:
-        raise DadlError("choose one of --dark and --heralding")
-    if args.dark:
+    if sum(map(bool, (args.dark, args.heralding, args.deadtime_scan))) > 1:
+        raise DadlError("choose one of --dark, --heralding and --deadtime-scan")
+    if args.deadtime_scan:
+        from dadl.simsetup import deadtime_scan_rates, simulate_setup_deadtime_scan
+
+        rates = _rates(args.rates) if args.rates is not None else deadtime_scan_rates(setup)
+        runs = simulate_setup_deadtime_scan(setup, rates, args.duration_s)
+        shown = ", ".join(f"{r:.3g}" for r in rates)
+        what = f"dead-time scan tags ({args.duration_s:g} s per rate; photon rates {shown} per s, settings 0-{len(rates) - 1})"
+    elif args.dark:
         runs = simulate_setup_dark(setup, args.duration_s)
         what = f"dark tags ({args.duration_s:g} s per channel, setting 0)"
     elif args.heralding:
@@ -358,13 +440,24 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rates(text: str) -> tuple[float, ...]:
+    try:
+        return tuple(float(x) for x in text.split(","))
+    except ValueError as exc:
+        raise DadlError(f"--rates: comma-separated photon rates per s, got {text!r}") from exc
+
+
 def _add_record_options(p: argparse.ArgumentParser) -> None:
     """Options that complete the artifact as a record (calibration-lab review, cycle 3)."""
     p.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",
                    help="a numeric condition to record, e.g. temperature_K=233.1 or bias_V=24.5 (repeatable)")
     p.add_argument("--acquired", help="when the data were taken (ISO 8601 with a UTC offset); a PTU file's local creation time is recorded separately")
     p.add_argument("--created", help="record creation time (ISO 8601), to reproduce an artifact; default now")
-    p.add_argument("--valid-until", help="end of the intended validity (ISO 8601); recorded, not enforced")
+    p.add_argument(
+        "--valid-until",
+        help="end of the intended validity (ISO 8601); an analysis acquired outside it is refused unless "
+        "calibration_outside_validity is allowed",
+    )
     p.add_argument("--supersedes", help="ID of the artifact this one replaces (must exist in --out)")
 
 
@@ -391,12 +484,12 @@ def _record(args: argparse.Namespace, setup_path: Path) -> tuple[dict, dict[str,
     conditions = _conditions(args.condition)
     conditions.update(tagger_settings(args.tags))
     tags_path = Path(args.tags)
-    files = sorted(tags_path.glob("setting*.ptu")) if tags_path.is_dir() else [tags_path]
+    files = ptu_files(tags_path) or ([] if tags_path.is_dir() else [tags_path])
     inputs = tuple((hashlib.sha256(f.read_bytes()).hexdigest(), "raw-file", f.name) for f in files if f.is_file())
     if setup_path.is_file():
         inputs += ((hashlib.sha256(setup_path.read_bytes()).hexdigest(), "config", setup_path.name),)
     acquired, instrument = _when(args.acquired, "acquired"), {}
-    if tags_path.is_dir() and files:
+    if ptu_files(tags_path):
         from dadl.adapters.ptu import PtuFile
 
         header = PtuFile(files[0]).header
@@ -452,10 +545,10 @@ def _backend(setup, tags_path: str) -> str:
             "the mark.)"
         )
     path = Path(tags_path)
-    if path.is_dir() and setup.tagger:
+    if ptu_files(path) and setup.tagger:
         from dadl.adapters.ptu import PtuFile
 
-        serials = {str(PtuFile(f).header.get("HW_SerialNo", "")).strip() for f in sorted(path.glob("setting*.ptu"))}
+        serials = {str(PtuFile(f).header.get("HW_SerialNo", "")).strip() for f in ptu_files(path)}
         serials.discard("")
         # Whole-token comparison: "123" must not match "HydraHarp-1234567" (twin review, cycle 9).
         tagger = setup.tagger
@@ -466,6 +559,21 @@ def _backend(setup, tags_path: str) -> str:
                 f"hardware.tagger: {setup.tagger}"
             )
     return "hardware"
+
+
+#: Council round 7 (G5): whether a T3 file's sync period counts divided or undivided syncs is not
+#: settled (M9 item: one real divided T3 file).
+T3_DIVIDER_REFUSAL = (
+    "the T3 sync divider convention is unverified (HWSync_Divider {divider}); rates may be off by the divider. "
+    "Record dark and dead-time runs with the divider at 1, or in T2"
+)
+
+
+def _refuse_t3_divider(tags_path: str) -> None:
+    """Refuse dark, dead-time and DCR calibration from T3 files with a sync divider above 1."""
+    info = t3_folder(tags_path)
+    if info and info["sync_divider"]:
+        raise DadlError(f"{tags_path}: " + T3_DIVIDER_REFUSAL.format(divider=info["sync_divider"]))
 
 
 def _check_time_units(runs: dict, setup) -> None:
@@ -534,12 +642,15 @@ def _refuse_source_on(tags: dict, setup) -> None:
 
 def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_dark
+    from dadl.forward import dead_time_far_below
 
     setup = load_setup(_resolve(args.setup))
-    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
+    _refuse_t3_divider(args.tags)
     keys = setup.setting_keys
     if not 0 <= args.setting < len(keys):
         raise DadlError(f"--setting must be 0..{len(keys) - 1}")
+    # Only the setting used is read (council round 9, Tw6); a single .ptu file is setting 0.
+    runs = read_tags(args.tags, setup.channels, keys, only=(args.setting,))
     tags = runs[keys[args.setting]]
     number = {name: num for num, name in setup.channels.items()}
     wanted = args.channel or [setup.channels[n] for n in sorted(setup.channels)]
@@ -571,11 +682,20 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
         print()
         print(cal)
         dead_declared = setup.detectors[name].dead_time_ps if name in setup.detectors else 0
-        dead_high = cal.estimates["dead_time_ps"].high
-        if dead_declared > 0 and dead_high < 0.8 * dead_declared:
+        far_below = dead_time_far_below(cal, dead_declared)
+        if far_below is not None:
+            # One rule with analyze's label (council round 9, Rd1b).
             print(
-                f"  warning: the dead time (at most {dead_high:.0f} ps) is well below the setup's declared "
+                f"  warning: the dead time ({far_below:.0f} ps) is below half the setup's declared "
                 f"{dead_declared} ps. A spurious double trigger or reflection can set it; check the shortest gaps."
+            )
+        dead_low = cal.estimates["dead_time_ps"].low
+        if dead_declared > 0 and "dead_time_ps" not in cal.unidentified and dead_low > 3 * dead_declared:
+            # Council round 6 (R1): an SNSPD's 30 ns read 20 us, identified, with no warning.
+            print(
+                f"  warning: the dead time (at least {dead_low:.0f} ps) is far above the setup's declared "
+                f"{dead_declared} ps; with a dead time far below the dark gap spacing, an 'identified' value is "
+                "usually a chance miss (README, the dead-time check). Analyses test it against the analysed gaps."
             )
         declared = setup.detectors[name].dark_rate_cps if name in setup.detectors else 0.0
         fitted = cal.estimates["dark_rate_cps"].low
@@ -604,25 +724,105 @@ def cmd_calibrate_dark(args: argparse.Namespace) -> int:
     return 0
 
 
-def _grid_capture(offset_ps: float, sigma_ps: float, width_ps: int) -> float:
-    """Probability that a pair lands in one fixed-grid slot: E[max(0, 1 - |D| / W)], D ~ N(offset, sigma)."""
-    from scipy import integrate, stats
+def _dark_artifact_for(source: str, channel):
+    """The channel's dark artifact from a folder or file, or a refusal naming what is there."""
+    from dadl.artifact import load_calibration
+    from dadl.calibration.dark import KIND as DARK_KIND
 
-    if sigma_ps <= 0:
-        return max(0.0, 1.0 - abs(offset_ps) / width_ps)
-    pdf = stats.norm(offset_ps, sigma_ps).pdf
-    value, _ = integrate.quad(lambda d: (1.0 - abs(d) / width_ps) * pdf(d), -width_ps, width_ps, points=[0.0], limit=200)
-    return float(value)
+    path = Path(source)
+    files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+    found = []
+    for f in files:
+        try:
+            cal = load_calibration(f)
+        except (DadlError, ValueError, OSError):
+            continue
+        if cal.kind == DARK_KIND and tuple(cal.channels) == (channel,):
+            found.append((f, cal))
+    if not found:
+        raise DadlError(f"no dark artifact for {channel} in {source}")
+    if len(found) > 1:
+        raise DadlError(f"{len(found)} dark artifacts for {channel} in {source}; pass the one to use as a file")
+    return found[0]
+
+
+def cmd_calibrate_deadtime(args: argparse.Namespace) -> int:
+    from dadl.calibration.deadtime import calibrate_deadtime_series
+
+    setup = load_setup(_resolve(args.setup))
+    _refuse_t3_divider(args.tags)
+    keys = setup.setting_keys
+    bad = [i for i in (args.settings or []) if not 0 <= i < len(keys)]
+    if bad:
+        raise DadlError(f"--settings must be in 0..{len(keys) - 1}")
+    tags_dir = Path(args.tags)
+    only = args.settings or (
+        [i for i in range(len(keys)) if ptu_file(tags_dir, i).is_file()] if tags_dir.is_dir() else None
+    )
+    runs = read_tags(args.tags, setup.channels, keys, only=only)
+    settings = args.settings if args.settings else [
+        i for i, k in enumerate(keys) if any(np.asarray(t).size > 1 for t in runs[k].values())
+    ]
+    bad = [i for i in settings if not 0 <= i < len(keys)]
+    if bad:
+        raise DadlError(f"--settings must be in 0..{len(keys) - 1}")
+    number = {name: num for num, name in setup.channels.items()}
+    wanted = args.channel or [setup.channels[n] for n in sorted(setup.channels)]
+    unknown = [c for c in wanted if c not in number]
+    if unknown:
+        raise DadlError(f"unknown channel(s) {unknown}; the setup's channels are {sorted(number)}")
+    backend = _backend(setup, args.tags)
+    _check_time_units(runs, setup)
+    print(f"DADL {__version__} calibrate deadtime: {setup.name}, tags from {args.tags} (settings {settings})")
+    write, extra, inputs = _record(args, _resolve(args.setup))
+    # Council round 7 (G1): on T3 data the tick is the dtime resolution, which the tags do not show.
+    tick = tag_tick_ps(args.tags)
+    failed: list[str] = []
+    for name in wanted:
+        channel = setup.channel_id(name)
+        acquisitions = [runs[keys[i]][name] for i in settings]
+        afterpulse = None
+        dark_input: tuple = ()
+        try:
+            if args.dark:
+                from dadl.artifact import artifact_id, read_artifact
+
+                dark_path, afterpulse = _dark_artifact_for(args.dark, channel)
+                dark_input = ((artifact_id(read_artifact(dark_path)[0]), "previous-artifact", str(channel)),)
+                print(f"  {name}: afterpulsing from {dark_path}")
+            cal = calibrate_deadtime_series(
+                acquisitions, channel, afterpulse=afterpulse, backend=backend, seed=setup.seed,
+                conditions={"settings": float(len(settings)), **extra},
+                allow_condition_mismatch=args.allow_condition_mismatch, tick_ps=tick,
+            )
+        except (DadlError, ValueError) as exc:
+            print()
+            print(f"  {name}: not calibrated: {exc}")
+            failed.append(name)
+            continue
+        cal = dataclasses.replace(cal, inputs=cal.inputs + dark_input + inputs)
+        print()
+        print(cal)
+        try:
+            path = _write_checked(cal, args.out, args.accept_misfit, **write)
+        except DadlError as exc:
+            print(f"  not written: {exc}")
+            failed.append(name)
+        else:
+            print(f"  artifact: {path}")
+    if failed:
+        raise DadlError(f"{len(failed)} of {len(wanted)} channels not calibrated or not written: {', '.join(failed)}")
+    return 0
 
 
 def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     from dadl.calibration import calibrate_accidentals, calibrate_delay, calibrate_heralding
 
     setup = load_setup(_resolve(args.setup))
-    runs = read_tags(args.tags, setup.channels, setup.setting_keys)
     keys = setup.setting_keys
     if not 0 <= args.setting < len(keys):
         raise DadlError(f"--setting must be 0..{len(keys) - 1}")
+    runs = read_tags(args.tags, setup.channels, keys, only=(args.setting,))
     _check_time_units(runs, setup)
     tags = runs[keys[args.setting]]
     if setup.analysis_type in ("chsh", "hom") and not args.no_analysers:
@@ -669,7 +869,8 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
     detector_args = {"dead_time_ps": dead, "afterpulse_tau_ps": tau_a}
     cals = [
         calibrate_delay(
-            a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_tick_ps(args.tags), **common
+            a, b, chs, range_ps=args.range_ps, bin_width_ps=args.bin_width_ps, tick_ps=tag_lattice_ps(args.tags),
+            t3_period_ps=(t3_folder(args.tags) or {}).get("sync_period_ps"), **common
         ),
         calibrate_accidentals(
             a, b, chs, width_ps=window.width_ps, delay_a_ps=d_a, delay_b_ps=d_b, **detector_args, **common
@@ -713,7 +914,11 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             f"  The fitted delay ({fitted:.0f} ps) differs from the declared one ({d_b - d_a} ps) by more than a "
             "quarter window. Declare it in the plan before analysis; DADL never moves the window to fit the data."
         )
-    capture = _grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps)
+    from dadl.forward import grid_capture
+
+    # The forward model's closed form (council round 4: a quad integral read about 0 for a narrow
+    # peak in a wide window).
+    capture = float(grid_capture(fitted - (d_b - d_a), cals[0].estimates["jitter_sigma_ps"].value, window.width_ps))
     eta = cals[2].estimates["heralding_efficiency"].value
     print()
     if cals[0].status == "misfit":
@@ -744,6 +949,8 @@ def cmd_calibrate_pairs(args: argparse.Namespace) -> int:
             f"  Source figures (secondary, not recorded): coincidences-to-accidentals {car}; pair rate {rate_text}; "
             "dark counts in the singles also raise it)."
         )
+    if setup.analysis_type == "chsh":
+        print(f"  {CHSH_FOUR_PAIRS}")
     if refused:
         raise DadlError(f"{len(refused)} of {len(cals)} artifacts not written (misfit): {', '.join(refused)}")
     return 0
@@ -774,8 +981,11 @@ def _policy(analysis: str, allow: list[str]):
     return policy
 
 
-def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, analysis: str, policy):
-    """Artifacts from --calibrations, checked against this dataset (time, conditions, raw inputs)."""
+def _calibration_set(
+    args: argparse.Namespace, runs: dict, setup_path: Path, analysis: str, policy, channels, source_type=None
+):
+    """Artifacts from --calibrations, checked against this dataset (time, conditions, raw inputs) and
+    the setup's channels (detector serials)."""
     import hashlib
 
     from dadl.data import tags_sha256
@@ -787,22 +997,127 @@ def _calibration_set(args: argparse.Namespace, runs: dict, setup_path: Path, ana
     if tags_path.is_file():
         hashes.add(hashlib.sha256(tags_path.read_bytes()).hexdigest())
     conditions = {**tagger_settings(args.tags), **_conditions(args.condition)}
-    dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions, input_sha256=frozenset(hashes))
-    return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset)
+    # A CW T3 clock may change between calibration and run (council round 9, Tw3).
+    t3_cw = t3_folder(args.tags) is not None and source_type == T3_CLOCK_SOURCE
+    dataset = DatasetContext(acquired=_when(args.acquired, "acquired"), conditions=conditions,
+                             input_sha256=frozenset(hashes), instrument=_instrument(args.tags), t3_cw=t3_cw)
+    return CalibrationSet.load(args.calibrations, analysis=analysis, policy=policy, dataset=dataset, channels=channels)
+
+
+def _instrument(tags: str) -> dict[str, str]:
+    """The tagger model and serial from a folder of PTU files (as `_record` writes them), else {}."""
+    path = Path(tags)
+    files = ptu_files(path)
+    if not files:
+        return {}
+    from dadl.adapters.ptu import PtuFile
+
+    header = PtuFile(files[0]).header
+    found = {"model": header.get("HW_Type"), "serial": header.get("HW_SerialNo")}
+    return {k: str(v) for k, v in found.items() if v not in (None, "")}
+
+
+def _print_corrected_labels(result: LabelledValue) -> None:
+    """The corrected value's labels, under its line (council round 6, R2)."""
+    from dadl.forward import FORWARD_MODEL
+
+    shown = [lab for lab in result.corrected_labels if lab not in (FORWARD_MODEL, ACCIDENTALS_SUBTRACTED)]
+    _print_labels(shown, "Labels of the corrected value", "    ")
 
 
 def _print_forward(result: LabelledValue, counts: dict, symbol: str = "V") -> None:
-    """The corrected line of a forward-model result: value, corrections in order, artifacts."""
+    """The corrected line of a forward-model result: value, corrections in order, its labels, what
+    the calibration part leaves out, artifacts."""
     order = ", then ".join(c.replace("_", " ") for c in result.corrections)
-    note = "  (secondary; not a Bell claim)" if result.analysis == "chsh" else ""
-    print(f"  Corrected (forward model: {order}): {symbol} = {result.corrected}{note}")
+    note = {"chsh": "  (secondary; not a Bell claim)", "hom_visibility": "  (secondary; not an indistinguishability claim)"}
+    print(f"  Corrected (forward model: {order}): {symbol} = {result.corrected}{note.get(result.analysis, '')}")
+    _print_corrected_labels(result)
+    if counts.get("forward_check_note"):
+        # Council round 9 (Rd5): the skipped check was only in the counts.
+        print(f"    Note: {counts['forward_check_note']}")
+    excluded = counts.get("calibration_excludes")
+    if excluded:
+        # Council round 6 (R4): "calibration 0.0000" read as exactly known.
+        print(f"    Calibration part excludes: {'; '.join(excluded)} (and the model limits: README, Methods)")
     if "corrected_at_zero_dead_time" in counts:
         print(
             f"  Dead time known only as an upper limit: {symbol} = {counts['corrected_at_zero_dead_time']:.4f} at zero, "
-            f"{counts['corrected_at_bound_dead_time']:.4f} at the bound (the corrected value uses the bound)"
+            f"{counts['corrected_at_bound_dead_time']:.4f} at the bound (the corrected value and interval use the bound)"
         )
     if result.artifact_ids:
         print("  Calibrations: " + ", ".join(a[:12] for a in result.artifact_ids))
+
+
+def _dead_time_far_below_labels(cset, setup: Setup, names) -> tuple[str, ...]:
+    """`DEAD_TIME_FAR_BELOW` for each analysed channel whose dark dead time is below half the
+    setup's declared one (council round 9, Rd1b: an echo-set 50 ns bound on a 1 us detector)."""
+    if cset is None:
+        return ()
+    from dadl.calibration.dark import KIND as DARK_KIND
+    from dadl.forward import DEAD_TIME_FAR_BELOW, _duration, dead_time_far_below
+
+    out = []
+    for name in names:
+        det = setup.detectors.get(name)
+        if det is None:
+            continue
+        try:
+            cal = cset.get(DARK_KIND, setup.channel_id(name))
+        except KeyError:
+            continue
+        used = dead_time_far_below(cal, det.dead_time_ps)
+        if used is not None:
+            out.append(DEAD_TIME_FAR_BELOW.format(
+                name=f"{name} ({setup.channel_id(name)})", x=_duration(used), y=_duration(float(det.dead_time_ps))
+            ))
+    return tuple(out)
+
+
+def _print_no_effect(args: argparse.Namespace, result: LabelledValue) -> None:
+    if args.allow and result.corrected is None:
+        print("  --allow had no effect: no corrected value")
+
+
+def _preflight_corrections(sources, analysis: str, policy, channels) -> None:
+    """Refuse once, naming every `--allow` the calibrations need (council round 10, Ux4: HOM took three
+    runs, one refusal each). Asks `Policy.check_correction` about each correction the artifacts for
+    `channels` imply: dead time (dark artifacts), accidental subtraction (any corrected value) and
+    window capture (delay-jitter artifacts)."""
+    from dadl.artifact import load_calibration
+    from dadl.calibration.dark import KIND as DARK_KIND
+    from dadl.calibration.delay import KIND as DELAY_KIND
+    from dadl.errors import GuardrailRefusal
+    from dadl.guardrails import REFUSAL_REASONS
+    from dadl.propagate import _artifact_files
+
+    wanted = set(channels)
+    kinds = {cal.kind for cal in map(load_calibration, _artifact_files(sources)) if wanted & set(cal.channels)}
+    needed = (["dead_time"] if DARK_KIND in kinds else []) + ["accidental_subtraction"]
+    needed += ["window_capture"] if DELAY_KIND in kinds else []
+    missing = []
+    for name in needed:
+        try:
+            policy.check_correction(analysis, name)
+        except GuardrailRefusal:
+            missing.append(name)
+    if missing:
+        why = REFUSAL_REASONS.get(analysis, "corrections are secondary values, allowed one by one")
+        raise GuardrailRefusal(
+            f"these calibrations need corrections the policy does not allow for '{analysis}' ({why}): pass "
+            + " ".join(f"--allow {name}=REASON" for name in missing)
+            + " (in Python, Policy.allow); see docs/design.md, 'Scientific guardrails'."
+        )
+
+
+def _override_details(cset, counts: dict | None) -> dict[str, list[str]]:
+    """What the validity and gap-test overrides let through, by override name (council round 10, Ux1)."""
+    out: dict[str, list[str]] = {}
+    if cset is not None and cset.overridden:
+        out["calibration_outside_validity"] = list(cset.overridden)
+    problems = (counts or {}).get("dead_time_gap_problems")
+    if problems:
+        out["dead_time_contradicted"] = list(problems)
+    return out
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -816,35 +1131,55 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     simulated = tags_are_simulated(args.tags)
     analysis = "hom_visibility" if setup.analysis_type == "hom" else "chsh"
     policy = _policy(analysis, args.allow)
-    cset = _calibration_set(args, runs, _resolve(args.setup), analysis, policy) if args.calibrations else None
+    names = ("A", "B") if setup.analysis_type == "hom" else ("A+", "A-", "B+", "B-")
+    used = [setup.channel_id(name) for name in names]
+    if args.calibrations:
+        _preflight_corrections(args.calibrations, analysis, policy, used)
+    cset = (
+        _calibration_set(args, runs, _resolve(args.setup), analysis, policy, used, setup.source_type)
+        if args.calibrations else None
+    )
+    far_labels = _dead_time_far_below_labels(cset, setup, names)
     if setup.analysis_type == "hom":
         from dadl.analysis.hom import hom_from_tags
 
         channels = (setup.channel_id("A"), setup.channel_id("B")) if cset is not None else None
         result, counts = hom_from_tags(
             runs, setup.window, policy=policy, calibrations=cset, channels=channels, seed=setup.seed,
-            reference_delay_ps=setup.reference_delay_ps,
+            reference_delay_ps=setup.reference_delay_ps, source_type=setup.source_type,
         )
         result = dataclasses.replace(
             result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra
         )
+        if result.corrected is not None and far_labels:
+            result = dataclasses.replace(result, corrected_labels=result.corrected_labels + far_labels)
         print("  The tags are trusted as given.")
         print()
         print(f"  Coincidences: {counts['c_min']:.0f} at the dip, {counts['c_max']:.0f} at the reference")
-        _print_result(result, "V")
+        _print_result(result, "V", _override_details(cset, counts))
         _print_hom_extras(result, counts, setup)
+        _print_no_effect(args, result)
+        # Council round 6 (R8): as CHSH prints for its window.
+        print(
+            "  The dip and reference delays and the window must be declared before acquisition; choosing them from "
+            "the data biases V upward."
+        )
         return 0
     ids = {name: setup.channel_id(name) for name in ("A+", "A-", "B+", "B-")} if cset is not None else None
     result = chsh(
-        runs, setup.window, settings_deg=setup.settings_deg, policy=policy, calibrations=cset, channels=ids, seed=setup.seed
+        runs, setup.window, settings_deg=setup.settings_deg, policy=policy, calibrations=cset, channels=ids,
+        seed=setup.seed, source_type=setup.source_type,
     )
     result = dataclasses.replace(result, labels=result.labels + ((SIMULATED_INPUT,) if simulated else ()), **extra)
+    if result.corrected is not None and far_labels:
+        result = dataclasses.replace(result, corrected_labels=result.corrected_labels + far_labels)
     _warn_angles(setup)
     print("  The tags are trusted as given; the headline is raw S." if cset is not None else "  The tags are trusted as given; raw S only.")
     print()
-    _print_result(result)
+    _print_result(result, "S", _override_details(cset, result.counts))
     if result.corrected is not None:
-        _print_forward(result, {}, "S")
+        _print_forward(result, result.counts or {}, "S")
+    _print_no_effect(args, result)
     print("  Inputs: " + ", ".join(f"{k} {v[:12]}" for k, v in result.inputs.items()))
     print(
         "  Choosing the window, delays or run after seeing the data inflates false violations (best of 72 "
@@ -864,7 +1199,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     qs = sub.add_parser(
         "quickstart",
-        help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility)",
+        help="simulate an example (or your setup.yaml) and print its raw result (CHSH S or HOM visibility), and a "
+        "corrected value from simulated calibrations",
         description="Simulate an experiment (CHSH or HOM) from a setup file and analyse it with a fixed, planned window.",
     )
     qs.add_argument(
@@ -897,24 +1233,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="simulate a heralding run: the pair source straight onto one detector per arm (for calibrate pairs)",
     )
     sim.add_argument(
+        "--deadtime-scan", action="store_true",
+        help="steady light on every detector at several rates, one per setting (for calibrate deadtime)",
+    )
+    sim.add_argument(
+        "--rates", default=None, metavar="R1,R2,...",
+        help="--deadtime-scan: photon rate at each detector (before efficiency) per s, one per setting (default: "
+        "avalanche rate x dead time from 0.05 to 0.5 over four settings; 0.1 and 0.4 for two)",
+    )
+    sim.add_argument(
         "--duration-s", type=float, default=None,
-        help="acquisition length for --dark (per channel) or --heralding (default 20); a CHSH or HOM run uses the setup",
+        help="acquisition length for --dark (per channel) or --heralding (default 20), or per rate for --deadtime-scan "
+        "(default 0.05); a CHSH or HOM run uses the setup",
     )
     sim.set_defaults(func=cmd_simulate)
 
-    an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file")
+    an = sub.add_parser("analyze", help="raw CHSH S or HOM visibility from your own tag file (corrected too with "
+                        "--calibrations)")
     an.add_argument("setup", help="setup.yaml giving the window, delays and channel map")
     an.add_argument("--tags", required=True, help="tag file (.npz or .csv: columns setting, channel, timestamp_ps) or a folder of PTU files setting0.ptu, ...")
     an.add_argument(
         "--calibrations", action="append", metavar="DIR",
-        help="calibration artifacts (folder or file, repeatable): HOM gains a corrected value from the forward model",
+        help="calibration artifacts (folder or file, repeatable): HOM and CHSH gain a corrected value from the "
+        "forward model",
     )
     an.add_argument("--acquired", help="when the tags were taken (ISO 8601 with a UTC offset), checked against each artifact's validity")
     an.add_argument("--condition", action="append", default=[], metavar="KEY=VALUE",
-                    help="a numeric condition of this acquisition (repeatable), checked against each artifact's conditions")
+                    help="a numeric condition of this acquisition (repeatable). Compared with each artifact's: "
+                    "temperature_K (within 0.5 K), bias* and tagger_* (equal), and a <name>_<unit> against a recorded "
+                    "<name>_min_<unit> / <name>_max_<unit>. Other recorded names are labelled 'recorded, not compared'")
     an.add_argument(
         "--allow", action="append", default=[], metavar="CORRECTION=REASON",
-        help="loosen the default policy for this analysis (e.g. dead_time='calibrated from dark runs'); labelled 'policy modified'",
+        help="loosen the default policy for the corrected value (e.g. dead_time='calibrated from dark runs'); "
+        "printed with its reason and labelled 'policy modified'. Names: " + ", ".join(sorted(KNOWN_CORRECTIONS)),
     )
     an.set_defaults(func=cmd_analyze)
 
@@ -937,6 +1288,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_record_options(dark)
     dark.set_defaults(func=cmd_calibrate_dark)
+
+    dt = cal_sub.add_parser(
+        "deadtime",
+        help="series dead time (paralyzable then non-paralyzable) from illuminated runs at several rates",
+        description="Fit each channel's paralyzable (dead_time_p_ps) and non-paralyzable (dead_time_ps) dead times "
+        "from the gaps of two or more acquisitions under steady light at different rates (simulated: dadl simulate "
+        "SETUP --deadtime-scan). Afterpulsing is held at the channel's dark artifact (--dark). Writes one "
+        "content-addressed artifact per channel, of kind deadtime-series. The scan needs steady light: an "
+        "attenuated CW laser with its intensity stable to about 1-2% over each run, not pulsed light or a "
+        "mains-powered lamp. Slow intensity noise looks like less paralysis: a +-20% 100 Hz modulation biased "
+        "tau_p 10% low with the predictive check passing; +-40% is flagged.",
+        epilog="HOM, fringe and CHSH do not use this artifact: not yet supported; see Known limits (they take the "
+               "dark dead time).",
+    )
+    dt.add_argument("setup", help="setup.yaml (channel map) or a bundled example name")
+    dt.add_argument("--tags", required=True, help="tag file, or a folder of PTU files, one rate per setting")
+    dt.add_argument("--settings", type=int, nargs="+", help="setting indices holding the runs (default: every non-empty one)")
+    dt.add_argument("--channel", action="append", help="channel name to calibrate (repeatable; default all)")
+    dt.add_argument("--dark", help="folder or file with the channels' dark artifacts (afterpulsing); default: none")
+    dt.add_argument(
+        "--allow-condition-mismatch", metavar="REASON", default=None,
+        help="use a dark artifact whose recorded conditions (bias, temperature, tagger settings) differ from this "
+        "scan's; the reason is recorded in a note",
+    )
+    dt.add_argument("--out", required=True, help="directory for the artifacts")
+    dt.add_argument(
+        "--accept-misfit", action="store_true",
+        help="write artifacts whose predictive check fails (p < 0.001), marked misfit; refused otherwise",
+    )
+    _add_record_options(dt)
+    dt.set_defaults(func=cmd_calibrate_deadtime)
 
     pairs = cal_sub.add_parser(
         "pairs",
@@ -978,6 +1360,8 @@ def main(argv: list[str] | None = None) -> int:
     except (DadlError, ValueError, OverflowError, OSError) as exc:
         # Library input errors (ValueError, OverflowError) reach CLI users as a message, not a
         # traceback (software review, cycle 2).
+        # Council round 10 (Ux13): in a redirected log the error landed above the header.
+        sys.stdout.flush()
         print(f"dadl: error: {exc}", file=sys.stderr)
         return 1
 

@@ -17,6 +17,23 @@ import numpy as np
 from dadl import _backend, _checks
 
 
+def as_sorted(a: np.ndarray) -> np.ndarray:
+    """`a` itself when already in order (an O(n) check), else a sorted copy: same values as np.sort."""
+    a = np.asarray(a)
+    if a.ndim == 1 and (a.size < 2 or bool(np.all(a[1:] >= a[:-1]))):
+        return a
+    return np.sort(a)
+
+
+def _dedupe_sorted(x: np.ndarray) -> np.ndarray:
+    if x.size and bool(np.all(x[1:] >= x[:-1])):
+        keep = np.empty(x.size, dtype=bool)
+        keep[0] = True
+        np.not_equal(x[1:], x[:-1], out=keep[1:])
+        return x[keep]
+    return np.unique(x)
+
+
 def occupied_slots(times: np.ndarray, width_ps: int, delay_ps: int = 0) -> np.ndarray:
     """Sorted, de-duplicated slot indices occupied by `times` after removing `delay_ps`."""
     core = _backend.core()
@@ -31,7 +48,7 @@ def occupied_slots(times: np.ndarray, width_ps: int, delay_ps: int = 0) -> np.nd
         lo, hi = int(times.min()) - delay_ps, int(times.max()) - delay_ps
         if lo < _checks.INT64_MIN or hi > _checks.INT64_MAX:
             raise OverflowError("removing the declared delay moves a tag outside the int64 range")
-    return np.unique(np.floor_divide(times - np.int64(delay_ps), np.int64(width_ps)))
+    return _dedupe_sorted(np.floor_divide(times - np.int64(delay_ps), np.int64(width_ps)))
 
 
 def grid_coincidences(

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/usecommon/dadl/v0.1.0/schema/calibration-1.schema.json",
   "title": "DADL calibration artifact manifest, version 1",
-  "description": "Frozen at DADL 0.1.0: later versions may add optional fields; changing existing ones needs calibration/2. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
+  "description": "Frozen at DADL 0.1.0: later versions may add optional fields (and the kind `deadtime-series`, decision D4); changing existing ones needs calibration/2. Manifest of an immutable, content-addressed calibration artifact. The artifact ID is the SHA-256 of this manifest canonicalized with RFC 8785 (JCS), excluding the signature field. See docs/design.md, 'Calibration artifact format'. Timestamps are UTC with a trailing Z. Units per parameter are given in summary.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,9 +22,10 @@
       "const": "calibration/1"
     },
     "kind": {
-      "description": "What was calibrated. Parameters fitted from the same data share one artifact (one joint posterior).",
+      "description": "What was calibrated. Parameters fitted from the same data share one artifact (one joint posterior). deadtime-series (phase 3, decision D4) is the one kind added after the calibration/1 freeze. 0.1.x readers load a `deadtime-series` artifact but nothing in them uses it; validators against the 0.1.0 schema refuse it.",
       "enum": [
         "dark-afterpulse-deadtime",
+        "deadtime-series",
         "dcr-temperature",
         "heralding-efficiency",
         "delay-jitter",
@@ -86,7 +87,7 @@
       "pattern": "Z$"
     },
     "valid_for": {
-      "description": "Intended time range and conditions for the artifact. Recorded only: DADL does not yet enforce it.",
+      "description": "Intended time range and conditions for the artifact. Enforced when the calibration is used (from acquisition, or creation, to `to`; `conditions` as the top-level conditions are).",
       "type": "object",
       "properties": {
         "from": {

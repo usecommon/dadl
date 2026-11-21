@@ -3,7 +3,9 @@
 Archivist review, cycle 8: methods changed across several commits under one version label, so
 artifacts with different statistics were indistinguishable. Each calibration module's source hash
 is pinned here with its METHOD_VERSION. After changing a module, bump its METHOD_VERSION and run
-`python python/tests/test_method_versions.py` to update the table.
+`python python/tests/test_method_versions.py` to update the table. A code change that leaves every
+output byte-identical keeps its version, re-pins the hash and says so in the entry's `notes`
+(council round 9, Pf6).
 """
 
 import hashlib
@@ -12,7 +14,7 @@ import json
 from pathlib import Path
 
 TABLE = Path(__file__).with_name("method_versions.json")
-MODULES = ("accidentals", "dark", "dcr", "delay", "heralding")
+MODULES = ("accidentals", "dark", "dcr", "deadtime", "delay", "heralding")
 
 
 def current() -> dict[str, dict[str, str]]:
@@ -38,5 +40,12 @@ def test_method_code_changes_come_with_a_new_version():
 
 
 if __name__ == "__main__":
-    TABLE.write_text(json.dumps(current(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # A note (such as "code changed, outputs byte-identical") stays with its entry while the
+    # version is unchanged.
+    old = json.loads(TABLE.read_text(encoding="utf-8")) if TABLE.exists() else {}
+    table = current()
+    for name, entry in table.items():
+        if "notes" in old.get(name, {}) and old[name]["version"] == entry["version"]:
+            entry["notes"] = old[name]["notes"]
+    TABLE.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {TABLE}")

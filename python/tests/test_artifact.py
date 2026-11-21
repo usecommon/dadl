@@ -112,3 +112,42 @@ def test_write_leaves_no_temporary_files_and_refuses_bad_manifests(cal, tmp_path
     target.write_bytes(canonical_json(manifest))
     with pytest.raises(ArtifactError, match="posterior"):
         read_artifact(target)
+
+
+def test_a_posterior_header_is_checked_before_the_table_is_read(tmp_path):
+    # Council round 7 (S2): a 192-byte table whose header declared 2^52 rows made numpy try to
+    # allocate 64 PiB, and the MemoryError escaped ArtifactError.
+    import io
+
+    from test_propagate import make_cal, write
+
+    from dadl.cli import _dark_artifact_for
+    from dadl.errors import DadlError
+    from dadl.propagate import CalibrationSet
+
+    cal = make_cal()
+    path = write(cal, tmp_path / "w")
+    manifest = json.loads(path.read_text())
+    ncol = len(manifest["posterior"]["params"])
+    d = tmp_path / "arts"
+    d.mkdir()
+    for rows in (2**52, 2**40):
+        manifest["posterior"]["n_samples"] = rows
+        aid = artifact_id(manifest)
+        (d / f"{aid}.json").write_bytes(canonical_json(manifest))
+        buf = io.BytesIO()
+        np.lib.format.write_array_header_1_0(buf, {"descr": "<f8", "fortran_order": False, "shape": (rows, ncol)})
+        (d / f"{aid}.posterior.npy").write_bytes(buf.getvalue() + b"\0" * 64)
+        with pytest.raises(ArtifactError, match="bytes, not the"):
+            read_artifact(d / f"{aid}.json")
+        with pytest.raises(ArtifactError):
+            CalibrationSet.load(d / f"{aid}.json", analysis="hom_visibility")
+    # The dead-time command's dark lookup skips unreadable files, as intended.
+    with pytest.raises(DadlError, match="no dark artifact"):
+        _dark_artifact_for(str(d), cal.channels[0])
+    # A table in Fortran order is refused from its header too.
+    post = path.with_name(path.stem + ".posterior.npy")
+    table = np.load(post)
+    np.save(post, np.asfortranarray(table[:, ::-1]))
+    with pytest.raises(ArtifactError, match="Fortran order True"):
+        read_artifact(path)

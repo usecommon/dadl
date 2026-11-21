@@ -298,6 +298,7 @@ def test_sparse_sharp_peak_still_gets_a_predictive_check_and_an_artifact(tmp_pat
     write_artifact(cal, tmp_path, created=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc))
 
 
+@pytest.mark.slow
 def test_every_regime_has_a_closed_form_truth_and_runs():
     from dadl.calibration.coverage import PAIR_REGIMES, UNITS, run
 
@@ -308,9 +309,10 @@ def test_every_regime_has_a_closed_form_truth_and_runs():
         assert t["accidentals"]["accidental_coincidences"] > 0
     results = run("all", replicates=3, jobs=1)
     per_regime = sum(3 - len(r.skip) for r in PAIR_REGIMES.values())
-    from dadl.calibration.coverage import DARK_REGIMES
+    from dadl.calibration.coverage import DARK_REGIMES, DEADTIME_REGIMES
 
-    assert len(results) == len(DARK_REGIMES) + per_regime + 1 + 1  # dark, pairs, ideal heralding, DCR
+    # dark, pairs, ideal heralding, DCR, and two results (tau_p; tau_np at least) per dead-time regime
+    assert len(results) == len(DARK_REGIMES) + per_regime + 1 + 1 + 2 * len(DEADTIME_REGIMES)
     (sparse,) = [r for r in results if r.calibration == "accidentals [sparse-snspd]"]
     assert sparse.at_least and "at least" in str(sparse)
 
@@ -349,3 +351,104 @@ def test_sparse_dispersion_check_is_exact():
     p = np.array([dispersion_pvalue(rng.poisson(0.05, 200)) for _ in range(400)])
     assert np.mean(p < 0.01) <= 0.02
     assert dispersion_pvalue(np.r_[np.zeros(199), 6]) < 0.01  # all counts in one window is structure
+
+
+@pytest.mark.slow
+def test_delay_check_is_not_hot_on_clean_snspd_pair_runs():
+    # Council round 8 (St5, Fix 2): the delay fit's check on (groups - 5) degrees of freedom gave
+    # p < 0.05 in 9.5% of clean hom-snspd pair runs; on (groups - 1), as the forward check, 2.5%.
+    from dadl.calibration.delay import calibrate_delay
+
+    det = DetectorParams(efficiency=0.85, dark_rate_cps=100.0, dead_time_ps=30_000, jitter_sigma_ps=25.0)
+    ids = (ChannelId("sim", 0), ChannelId("sim", 1))
+    rng = np.random.default_rng(88)
+    ps = []
+    for i in range(400):
+        a, b = simulate_pairs(2e5, det, det, 0.1, rng)
+        ps.append(calibrate_delay(a, b, ids, backend="sim", seed=i, n_draws=50).ppc_pvalue)
+    assert np.mean(np.array(ps) < 0.05) <= 0.06
+
+
+# --- Council round 9 ----------------------------------------------------------------------------
+
+
+def _t3_pairs(period_ps, seed, *, res_ps=80, delay_ps=4_372.0, jitter_ps=40.0, pairs=40_000, singles=40_000,
+              duration_s=2.0):
+    """Pair tags as a T3 reader returns them: nsync x period + dtime x resolution, rounded to whole
+    ps (dadl.adapters.ptu._t3_to_ps); period None gives T2 tags on the resolution."""
+    from dadl.adapters.ptu import _t3_to_ps
+
+    rng = np.random.default_rng(seed)
+    span = duration_s * 1e12
+    t = rng.uniform(0, span, pairs)
+    a = np.concatenate([t + rng.normal(0, jitter_ps / math.sqrt(2), pairs), rng.uniform(0, span, singles)])
+    b = np.concatenate([t + delay_ps + rng.normal(0, jitter_ps / math.sqrt(2), pairs), rng.uniform(0, span, singles)])
+
+    def tags(x):
+        x = np.sort(x[x >= 0])
+        if period_ps is None:
+            return np.unique((np.floor(x / res_ps) * res_ps).astype(np.int64))
+        n = np.floor(x / period_ps).astype(np.int64)
+        dtime = np.floor((x - n * period_ps) / res_ps).astype(np.int64)
+        ps, _ = _t3_to_ps(n, dtime, period_ps * 1e-12, res_ps * 1e-12)
+        return np.unique(ps)
+
+    return tags(a), tags(b)
+
+
+def _t3_delay(period_ps, seed, **kw):
+    a, b = _t3_pairs(period_ps, seed, **kw)
+    return calibrate_delay(a, b, CHS, range_ps=20_000, bin_width_ps=20, tick_ps=80, t3_period_ps=period_ps,
+                           backend="sim", seed=1)
+
+
+@pytest.mark.parametrize("period_ps", [12_500.3, 49_999.37])
+def test_t3_delays_across_a_sync_edge_are_put_back_on_the_lattice(period_ps):
+    # Council round 9 (Tw1, delay method 10): at an 80 ps resolution and a 12500.3 ps period a
+    # 4.4 ns delay read 7 ps low with status ok (interval excluding the truth); at 49999.37 ps it
+    # was a misfit.
+    from dadl.calibration.delay import t3_group_histograms
+
+    cal = _t3_delay(period_ps, 4242)
+    assert cal.status == "ok" and cal.estimates["delay_ps"].contains(4_372.0)
+    a, b = _t3_pairs(period_ps, 4242)
+    groups = t3_group_histograms(a, b, 80, 20_000, period_ps, 80)
+    assert set(groups) >= {0, 1} and sum(groups.values()).sum() > 0
+
+
+def test_t3_on_the_lattice_and_t2_are_unchanged():
+    # Council round 9 (Tw1): a period that is a whole number of resolutions has nothing to correct;
+    # T3 at 50000 ps and T2 give the same tags, and the fit is the round-8 fit to the last digit.
+    from dadl.calibration.delay import t3_group_histograms
+
+    a3, b3 = _t3_pairs(50_000.0, 4242)
+    a2, b2 = _t3_pairs(None, 4242)
+    assert np.array_equal(a3, a2) and np.array_equal(b3, b2)
+    assert t3_group_histograms(a3, b3, 80, 20_000, 50_000.0, 80) is None
+    t3 = calibrate_delay(a3, b3, CHS, range_ps=20_000, bin_width_ps=20, tick_ps=80, t3_period_ps=50_000.0,
+                         backend="sim", seed=1)
+    t2 = calibrate_delay(a2, b2, CHS, range_ps=20_000, bin_width_ps=20, tick_ps=80, backend="sim", seed=1)
+    assert t3.estimates == t2.estimates and np.array_equal(t3.samples, t2.samples)
+
+
+@pytest.mark.slow
+def test_t3_delay_intervals_cover_across_a_sync_edge():
+    # Council round 9 (Tw1): 80 ps, 12500.3 ps period, 4.4 ns delay; the interval contains the
+    # truth in at least 19 of 20 seeds, with no misfit.
+    cals = [_t3_delay(12_500.3, seed) for seed in range(20)]
+    assert all(c.status == "ok" for c in cals)
+    assert sum(c.estimates["delay_ps"].contains(4_372.0) for c in cals) >= 19
+
+
+def test_the_forward_check_puts_t3_delays_back_on_the_lattice():
+    # Council round 9 (Tw1): pooled_peak and the predictive check bin on the same lattice, so they
+    # take the T3 period from the tags' metadata (PairData.t3_period_ps).
+    from dadl.forward_check import PairData, pair_pvalue, pooled_peak
+
+    a, b = _t3_pairs(12_500.3, 7, pairs=60_000)
+    plain = PairData("p", a, b, 4_400.0, 1_000, -28.0, 40.0, lattice_ps=80)
+    t3 = PairData("p", a, b, 4_400.0, 1_000, -28.0, 40.0, lattice_ps=80, t3_period_ps=12_500.3)
+    fit, fit_plain = pooled_peak([t3]), pooled_peak([plain])
+    assert abs(fit.offset_ps + 28.0) < 3 * fit.offset_se_ps
+    assert abs(fit_plain.offset_ps + 28.0) > abs(fit.offset_ps + 28.0)
+    assert pair_pvalue(t3) > 1e-3

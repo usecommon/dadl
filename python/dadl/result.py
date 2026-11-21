@@ -45,11 +45,19 @@ class Estimate:
 
     def __str__(self) -> str:
         text = f"{self.value:.4f} ± {self.stderr:.4f}"
+        if self.stderr_calibration is not None:
+            # A corrected value's "±" is one sd; its interval is 95% (council round 10, Ux11).
+            text += " (1 sd)"
         if self.low is not None and self.high is not None:
             kind = "95%" if self.stderr_calibration is not None else "exact 95%"
             text += f" ({kind}: [{self.low:.4f}, {self.high:.4f}])"
         if self.stderr_calibration is not None:
-            text += f" [stat {self.stderr_statistical:.4f}, calibration {self.stderr_calibration:.4f}]"
+            # Two significant figures: "0.0000" read as exactly known (council round 6, R4). A part
+            # below 1e-12 of the value is floating-point noise, printed as 0 (council round 10, Rg5).
+            cal = self.stderr_calibration
+            shown = "0" if cal == 0 or abs(cal) < 1e-12 * abs(self.value) else f"{cal:.2g}"
+            text += (f" [stat {self.stderr_statistical:.2g}, calibration part {shown} (statistical part of the "
+                     "artifacts only)]")
         return text
 
     def __format__(self, spec: str) -> str:
@@ -64,12 +72,19 @@ class Estimate:
 
 @dataclass(frozen=True)
 class LabelledValue:
-    """Raw value first, optional corrected value, labels and provenance."""
+    """Raw value first, optional corrected value, labels and provenance.
+
+    `labels` qualify the raw value or both values (provenance, simulated input, the analysis's
+    caveats); `corrected_labels` qualify the corrected value only (council round 6, R2: a corrected
+    value's threshold label was printed beside the raw one). `all_labels` is both.
+    """
 
     analysis: str
     raw: Estimate
     corrected: Estimate | None = None
     labels: tuple[str, ...] = field(default_factory=tuple)
+    #: Labels of the corrected value only.
+    corrected_labels: tuple[str, ...] = field(default_factory=tuple)
     artifact_ids: tuple[str, ...] = field(default_factory=tuple)
     #: Corrections behind `corrected`, in the order applied (design, "Minimum metadata").
     corrections: tuple[str, ...] = field(default_factory=tuple)
@@ -85,6 +100,11 @@ class LabelledValue:
     #: SHA-256 of the inputs (setup file, tag files), so a result can be tied to what it read.
     inputs: dict[str, str] | None = None
 
+    @property
+    def all_labels(self) -> tuple[str, ...]:
+        """`labels` then `corrected_labels`, without repeats."""
+        return tuple(dict.fromkeys(self.labels + self.corrected_labels))
+
     def __float__(self) -> float:
         raise TypeError(
             "A DADL result is not a bare number: use .raw.value or .corrected.value "
@@ -93,10 +113,12 @@ class LabelledValue:
 
     def __str__(self) -> str:
         parts = [f"{self.analysis}: raw {self.raw}"]
-        if self.corrected is not None:
-            parts.append(f"corrected {self.corrected}")
         if self.labels:
             parts.append("[" + "; ".join(self.labels) + "]")
+        if self.corrected is not None:
+            parts.append(f"corrected {self.corrected}")
+            if self.corrected_labels:
+                parts.append("[" + "; ".join(self.corrected_labels) + "]")
         return "  ".join(parts)
 
     def as_record(self) -> dict[str, object]:
@@ -132,6 +154,7 @@ class LabelledValue:
             "corrected_stderr_calibration": None if self.corrected is None else self.corrected.stderr_calibration,
             "corrections": js(list(self.corrections)),
             "labels": js(list(self.labels)),
+            "corrected_labels": js(list(self.corrected_labels)),
             "artifact_ids": js(list(self.artifact_ids)),
             "policy_fingerprint": self.policy_fingerprint,
             "overrides": js(list(self.overrides)),

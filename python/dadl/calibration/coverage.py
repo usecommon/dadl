@@ -4,7 +4,12 @@ Each replicate simulates one acquisition from known parameters with an
 independent random stream, runs the calibration, and records whether each 95%
 interval contains the truth. Run from the command line:
 
-    python -m dadl.calibration.coverage {dark,pairs,dcr,all} --replicates 1000 [--jobs 4]
+    python -m dadl.calibration.coverage {dark,pairs,dcr,deadtime,all} --replicates 1000 [--jobs 4]
+    python -m dadl.calibration.coverage deadtime --regimes passive-quench --shard 1/4 --out p1.json
+    python -m dadl.calibration.coverage merge p*.json
+
+A shard runs one contiguous slice of the replicates and writes its counts ungated; `merge` sums
+the shards (refusing gaps, overlaps and mixed seeds) and applies the gates.
 
 Each calibration is gated at more than one point of parameter space (a
 "regime"), since a method can cover well at one point and fail at another:
@@ -25,12 +30,14 @@ CLI passes them.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import multiprocessing
 import os
 import sys
+import time
 import zlib
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -38,12 +45,13 @@ import numpy as np
 from dadl.calibration.accidentals import calibrate_accidentals
 from dadl.calibration.dark import calibrate_dark
 from dadl.calibration.dcr import calibrate_dcr_temperature
+from dadl.calibration.deadtime import calibrate_deadtime_series
 from dadl.calibration.delay import calibrate_delay
 from dadl.calibration.heralding import calibrate_heralding
 from dadl.closed_form import accidentals_expected, arrhenius_dark_rate, heralding_ratio_expected
 from dadl.data import ChannelId
 from dadl.coincidences import occupied_slots
-from dadl.sim import DetectorParams, simulate_dark, simulate_pairs
+from dadl.sim import DetectorParams, detect, poisson_times, simulate_dark, simulate_pairs
 from dadl.stats import coverage_band
 
 #: Simulated detector for the dark calibration gate: a Si SPAD module with
@@ -188,7 +196,9 @@ class CoverageResult:
     replicates: int
     covered: dict[str, int]
     gate: tuple[float, float]
-    #: True when only the lower bound applies (coverage of at least 95%).
+    #: True when only the lower bound applies (coverage of at least 95%). The at-least rule keeps
+    #: the lower edge of the two-sided band, so its false-fail rate is about 1.6e-4 at 1,000
+    #: replicates, below the 5e-4 budget: conservative.
     at_least: bool = False
 
     def fraction(self, name: str) -> float:
@@ -292,7 +302,9 @@ def pairs_coverage(
     """Delay/jitter, accidentals and heralding gates from shared simulated pair acquisitions."""
     r = PAIR_REGIMES[regime]
     truth = pairs_truth(regime)
-    covered = {kind: dict.fromkeys(t, 0) for kind, t in truth.items() if kind not in r.skip}
+    # The misfit share is a key from the start, so the gate's Bonferroni count does not depend on
+    # whether a replicate ran (merge recomputes the gates from an empty run; council round 7, S1).
+    covered = {kind: {**dict.fromkeys(t, 0), MISFITS: 0} for kind, t in truth.items() if kind not in r.skip}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     common = {"width_ps": r.width_ps, "backend": "sim", "n_draws": 10}
     declared = {
@@ -342,7 +354,7 @@ IDEAL_SPACING = 2_000
 
 def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
     width = 1_000
-    covered = {"heralding_efficiency": 0}
+    covered = {"heralding_efficiency": 0, MISFITS: 0}
     chs = (ChannelId("sim", 0), ChannelId("sim", 1))
     for child in _children(seed, replicates, part, "ideal-accidentals"):
         sim_rng, fit_seed = child.spawn(2)
@@ -370,7 +382,7 @@ def heralding_ideal_coverage(replicates: int = 1000, seed: int = 20261111, part:
 def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | None = None) -> CoverageResult:
     """DCR(T) gate: dark calibrations at each temperature, then the Arrhenius fit."""
     truth = {"dcr_ref_cps": DCR_REF_CPS, "activation_energy_ev": DCR_EA_EV}
-    covered = dict.fromkeys(truth, 0)
+    covered = {**dict.fromkeys(truth, 0), MISFITS: 0}
     channel = ChannelId("sim", 0)
     for child in _children(seed, replicates, part, "five-temperatures"):
         streams = child.spawn(len(DCR_TEMPS_K) + 1)
@@ -392,10 +404,79 @@ def dcr_coverage(replicates: int = 1000, seed: int = 20261111, part: range | Non
     return CoverageResult("dcr-temperature [five-temperatures]", replicates, covered, gate(replicates, len(truth)))
 
 
+@dataclass(frozen=True)
+class DeadtimeRegime:
+    """Series dead time: illuminated runs at several input rates, and (with afterpulsing) a dark
+    run whose artifact supplies the afterpulse parameters, as `dadl calibrate deadtime` uses them."""
+
+    detector: DetectorParams
+    rates_cps: tuple[float, ...]
+    duration_s: float
+    dark_duration_s: float = 0.0
+
+
+DEADTIME_REGIMES: dict[str, DeadtimeRegime] = {
+    # A diode or front-end recovery that paralyzes (tau_p 20 ns) before a longer electronics dead time (50 ns).
+    "series-spad": DeadtimeRegime(
+        DetectorParams(efficiency=1.0, dark_rate_cps=1000.0, dead_time_ps=50_000, dead_time_p_ps=20_000,
+                       jitter_sigma_ps=0.0),
+        (2e6, 5e6, 1e7), 0.02,
+    ),
+    # Passive quench: recharge nearly all paralyzable (40 of 45 ns), with 2% afterpulsing at 30 ns
+    # held at a dark artifact's estimates. A stand-in: it checks the fit is self-consistent, not that
+    # it matches a real RC recharge.
+    "passive-quench": DeadtimeRegime(
+        DetectorParams(efficiency=1.0, dark_rate_cps=50_000.0, dead_time_ps=45_000, dead_time_p_ps=40_000,
+                       jitter_sigma_ps=0.0, afterpulse_prob=0.02, afterpulse_tau_ps=30_000.0),
+        (1e6, 3e6, 6e6), 0.02, dark_duration_s=1.0,
+    ),
+}
+
+
+def deadtime_coverage(
+    replicates: int = 1000, seed: int = 20261111, regime: str = "series-spad", part: range | None = None
+) -> list[CoverageResult]:
+    """tau_p (two-sided band, with the misfit share) and tau_np (at least 95%).
+
+    For tau_np the edge density is about 1 gap per tick (series-spad 1.5, passive-quench 0.7), so
+    the shortest gap equals tau_np in about 79% and 45% of replicates; the simulator's integer
+    dead time makes the tick-quantile interval over-cover (design 97.7% and 95.8%, observed 99.2%
+    and 97.3%), so it is gated at least 95%; this gate has little power against edge-density
+    errors (M10 item). Since council round 6 the interval allows one tick either side (99.9% and
+    99.0%): on the grid that is conservative by construction; an off-grid test checks the tick term.
+    """
+    reg = DEADTIME_REGIMES[regime]
+    det = reg.detector
+    truth_p = {"dead_time_p_ps": float(det.dead_time_p_ps)}
+    truth_np = {"dead_time_ps": float(det.dead_time_ps)}
+    covered_p = {**dict.fromkeys(truth_p, 0), MISFITS: 0}
+    covered_np = dict.fromkeys(truth_np, 0)
+    channel = ChannelId("sim", 0)
+    for child in _children(seed, replicates, part, regime):
+        sim_seq, fit_seq = child.spawn(2)
+        rng = np.random.default_rng(sim_seq)
+        fit_seed = int(fit_seq.generate_state(1)[0])
+        afterpulse = None
+        if reg.dark_duration_s:
+            afterpulse = calibrate_dark(simulate_dark(det, reg.dark_duration_s, rng), channel, backend="sim",
+                                        seed=fit_seed, n_draws=400)
+        runs = [detect(poisson_times(r, reg.duration_s, rng), det, reg.duration_s, rng) for r in reg.rates_cps]
+        cal = calibrate_deadtime_series(runs, channel, afterpulse=afterpulse, backend="sim", seed=fit_seed, n_draws=10)
+        _covered(cal, truth_p, covered_p)
+        iv = cal.estimates.get("dead_time_ps")
+        covered_np["dead_time_ps"] += bool(iv is not None and iv.contains(truth_np["dead_time_ps"]))
+    band = gate(replicates, 2)
+    return [
+        CoverageResult(f"deadtime-series [{regime}]", replicates, covered_p, band),
+        CoverageResult(f"deadtime-series dead_time_ps [{regime}]", replicates, covered_np, band, at_least=True),
+    ]
+
+
 UNITS: dict[str, tuple[str, ...]] = {
     "dark": tuple(DARK_REGIMES),
     "pairs": (*PAIR_REGIMES, "ideal-accidentals"),
     "dcr": ("five-temperatures",),
+    "deadtime": tuple(DEADTIME_REGIMES),
 }
 
 
@@ -411,6 +492,8 @@ def _unit(args: tuple[str, str, int, int, range | None]) -> list[CoverageResult]
         return [heralding_ideal_coverage(replicates, seed, part)]
     if name == "pairs":
         return pairs_coverage(replicates, seed, regime, part)
+    if name == "deadtime":
+        return deadtime_coverage(replicates, seed, regime, part)
     return [dcr_coverage(replicates, seed, part)]
 
 
@@ -422,13 +505,15 @@ def _merge(parts: list[CoverageResult], replicates: int) -> CoverageResult:
 
 
 def run(
-    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None
+    name: str, replicates: int = 1000, seed: int = 20261111, jobs: int = 1, regimes: list[str] | None = None,
+    part: range | None = None, progress=None,
 ) -> list[CoverageResult]:
-    """Every regime of one calibration family ("dark", "pairs", "dcr") or of all ("all"), or only
+    """Every regime of one calibration family ("dark", "pairs", "dcr", "deadtime") or of all ("all"), or only
     the named `regimes` (CI splits the gate across runners this way).
 
     With jobs > 1 each regime's replicates are split into chunks run in parallel. Replicate i
-    always uses child i of `seed`, so the result does not depend on `jobs`.
+    always uses child i of `seed`, so the result does not depend on `jobs`. `progress` gets a line
+    per finished chunk (council round 4: the gate printed nothing until done).
     """
     names = list(UNITS) if name == "all" else [name]
     if any(n not in UNITS for n in names):
@@ -437,12 +522,26 @@ def run(
     unknown = sorted(set(regimes or ()) - {r for _, r in units})
     if unknown:
         raise ValueError(f"unknown regime(s) {unknown} for {name!r}")
+    start = time.monotonic()
+
+    def report(done: int, total: int, n: str, r: str, rng: range | None) -> None:
+        if progress is not None:
+            what = f"replicates {rng.start}-{rng.stop - 1}" if rng is not None else "all replicates"
+            progress(f"{n} {r}: {what} done ({done}/{total} chunks, {time.monotonic() - start:.0f} s)")
+
     if jobs <= 1:
-        return [res for n, r in units for res in _unit((n, r, replicates, seed, None))]
+        out1 = []
+        for i, (n, r) in enumerate(units, 1):
+            out1 += _unit((n, r, replicates, seed, part))
+            report(i, len(units), n, r, part)
+        return out1
+    span = part if part is not None else range(replicates)
+    # Chunks no larger than a worker's share of a regime, so a shard keeps every worker busy.
+    chunk = max(1, min(CHUNK, -(-len(span) // jobs)))
     tasks = [
-        (n, r, replicates, seed, range(lo, min(lo + CHUNK, replicates)))
+        (n, r, replicates, seed, range(lo, min(lo + chunk, span.stop)))
         for n, r in units
-        for lo in range(0, replicates, CHUNK)
+        for lo in range(span.start, span.stop, chunk)
     ]
     # Fresh ("spawn") workers with one BLAS thread each: forked workers inherit the parent's
     # OpenBLAS thread pool on Linux, and several pools spinning on few cores slowed the CI gate
@@ -452,7 +551,12 @@ def run(
     os.environ.update(single)
     try:
         with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as ex:
-            parts = list(ex.map(_unit, tasks))
+            futures = {ex.submit(_unit, t): i for i, t in enumerate(tasks)}
+            parts: list = [None] * len(tasks)
+            for done, fut in enumerate(as_completed(futures), 1):
+                i = futures[fut]
+                parts[i] = fut.result()
+                report(done, len(tasks), tasks[i][0], tasks[i][1], tasks[i][4])
     finally:
         for k, v in saved.items():
             if v is None:
@@ -467,15 +571,129 @@ def run(
     return out
 
 
+def shard_range(shard: str, replicates: int) -> range:
+    """Shard "k/n" (1-based) as its contiguous slice of the replicates."""
+    try:
+        k, n = (int(x) for x in shard.split("/"))
+    except ValueError:
+        raise ValueError(f"shard must be k/n, got {shard!r}") from None
+    if not 1 <= k <= n:
+        raise ValueError(f"shard {shard!r}: need 1 <= k <= n")
+    return range((k - 1) * replicates // n, k * replicates // n)
+
+
+def shard_record(
+    results: list[CoverageResult], seed: int, part: range, family: str = "all", regimes: list[str] | None = None
+) -> dict:
+    """A shard's partial counts, with the family and regimes it was asked for (merge checks that
+    every result they produce is there)."""
+    return {
+        "seed": seed,
+        "replicates": results[0].replicates if results else 0,
+        "family": family,
+        "regimes": sorted(regimes) if regimes is not None else None,
+        "range": [part.start, part.stop],
+        "results": [
+            {"calibration": r.calibration, "covered": r.covered, "gate": list(r.gate), "at_least": r.at_least}
+            for r in results
+        ],
+    }
+
+
+def expected_results(family: str, regimes: list[str] | None, replicates: int, seed: int) -> dict[str, CoverageResult]:
+    """The results `run` produces for this family and regimes, with their gates from the code and
+    no replicate counted (each calibration run on an empty slice)."""
+    names = list(UNITS) if family == "all" else [family]
+    if any(n not in UNITS for n in names):
+        raise ValueError(f"unknown calibration {family!r}")
+    units = [(n, r) for n in names for r in UNITS[n] if regimes is None or r in regimes]
+    unknown = sorted(set(regimes or ()) - {r for _, r in units})
+    if unknown:
+        raise ValueError(f"unknown regime(s) {unknown} for {family!r}")
+    return {res.calibration: res for u in units for res in _unit((*u, replicates, seed, range(0)))}
+
+
+def merge(records: list[dict]) -> list[CoverageResult]:
+    """Sum shard records into gated results; refuses mixed seeds, totals, families or regimes,
+    slices that do not tile the replicates exactly, a result set other than the one the family and
+    regimes produce (an empty one included), and a shard gate other than the code's. The gates
+    are the code's, not the shard file's (council round 7, S1: an empty or lax shard passed)."""
+    if not records:
+        raise ValueError("no shards to merge")
+    seeds = {r["seed"] for r in records}
+    totals = {r["replicates"] for r in records}
+    if len(seeds) != 1 or len(totals) != 1:
+        raise ValueError(f"shards disagree: seeds {sorted(seeds)}, replicates {sorted(totals)}")
+    if any("family" not in r or "regimes" not in r for r in records):
+        raise ValueError("a shard does not record its family and regimes; rerun it with this version")
+    asked = {(r["family"], tuple(r["regimes"]) if r["regimes"] is not None else None) for r in records}
+    if len(asked) != 1:
+        raise ValueError(f"shards disagree on the family or regimes: {sorted(asked, key=str)}")
+    family, regimes = asked.pop()
+    replicates = totals.pop()
+    if not any(r["results"] for r in records):
+        raise ValueError("the shards hold no results")
+    expected = expected_results(family, list(regimes) if regimes is not None else None, replicates, seeds.pop())
+    found = list(dict.fromkeys(res["calibration"] for r in records for res in r["results"]))
+    if set(found) != set(expected):
+        missing, extra = sorted(set(expected) - set(found)), sorted(set(found) - set(expected))
+        raise ValueError(f"the shards' results are not those of {family} {list(regimes or ['(all)'])}: "
+                         f"missing {missing}, unexpected {extra}")
+    out = []
+    for name in expected:
+        mine = [(r["range"], res) for r in records for res in r["results"] if res["calibration"] == name]
+        nxt = 0
+        for lo, hi in sorted(tuple(rng) for rng, _ in mine):
+            if lo != nxt:
+                raise ValueError(f"{name}: shards do not tile 0-{replicates} (gap or overlap at {lo})")
+            nxt = hi
+        if nxt != replicates:
+            raise ValueError(f"{name}: shards cover replicates 0-{nxt}, not all {replicates}")
+        keys = dict.fromkeys(k for _, res in mine for k in res["covered"])
+        covered = {k: sum(res["covered"].get(k, 0) for _, res in mine) for k in keys}
+        first = mine[0][1]
+        if any(tuple(res["gate"]) != tuple(first["gate"]) or bool(res["at_least"]) != bool(first["at_least"])
+               for _, res in mine):
+            raise ValueError(f"{name}: shards disagree on the gate or its rule")
+        code = expected[name]
+        if not (np.allclose(first["gate"], code.gate, rtol=0, atol=1e-12) and bool(first["at_least"]) == code.at_least):
+            raise ValueError(f"{name}: the shards' gate {first['gate']} (at least: {first['at_least']}) is not the "
+                             f"code's {list(code.gate)} (at least: {code.at_least})")
+        if set(covered) != set(code.covered):
+            raise ValueError(f"{name}: the shards count {sorted(covered)}, the code {sorted(code.covered)}")
+        out.append(CoverageResult(name, replicates, covered, code.gate, code.at_least))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dadl.calibration.coverage")
-    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "all"])
+    parser.add_argument("calibration", choices=["dark", "pairs", "dcr", "deadtime", "all", "merge"])
+    parser.add_argument("files", nargs="*", help="merge: the shard files")
     parser.add_argument("--replicates", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=20261111)
-    parser.add_argument("--jobs", type=int, default=1, help="regimes run in parallel processes")
+    parser.add_argument("--jobs", type=int, default=1, help="replicate chunks run in parallel processes (the result does not depend on it)")
     parser.add_argument("--regimes", nargs="+", help="run only these regimes (default: all of the family)")
+    parser.add_argument("--shard", help="k/n: run only the k-th of n slices of the replicates; not gated")
+    parser.add_argument("--out", help="with --shard: write the partial counts here, for merge")
     args = parser.parse_args(argv)
-    results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes)
+    if args.calibration == "merge":
+        if not args.files:
+            parser.error("merge needs the shard files")
+        results = merge([json.loads(open(f, encoding="utf-8").read()) for f in args.files])
+    else:
+        if args.files:
+            parser.error("files are only for merge")
+        if (args.shard is None) != (args.out is None):
+            parser.error("--shard and --out go together")
+        part = shard_range(args.shard, args.replicates) if args.shard else None
+        log = lambda line: print(line, file=sys.stderr, flush=True)  # noqa: E731
+        results = run(args.calibration, args.replicates, args.seed, args.jobs, args.regimes, part, log)
+        if part is not None:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                json.dump(shard_record(results, args.seed, part, args.calibration, args.regimes), fh, indent=1)
+            for r in results:
+                print(f"{r.calibration}: shard {args.shard} (replicates {part.start}-{part.stop - 1}) {r.covered}")
+            return 0
     for r in results:
         print(r)
     return 0 if all(r.passed() for r in results) else 1
